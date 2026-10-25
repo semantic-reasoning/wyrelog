@@ -19,6 +19,18 @@
 
 #include "fact-test-support.h"
 
+/* DuckDB 2.0 names a spill child "duckdb_temp_<pid>_<instance>_<rest>", and
+ * the authority accepts only this process's pid. */
+static const gchar *
+temp_name (const gchar *rest)
+{
+  g_autofree gchar *name = g_strdup_printf ("duckdb_temp_%lu_0_%s",
+          (unsigned long) GetCurrentProcessId (), rest);
+  return g_intern_string (name);
+}
+
+#define TEMP_NAME(rest) temp_name ((rest))
+
 typedef struct
 {
   guint8 key[crypto_generichash_KEYBYTES];
@@ -1974,7 +1986,7 @@ test_locator_nested_directory_transport (void)
   DWORD flags = HANDLE_FLAG_INHERIT;
   g_autofree gchar *root_path = g_build_filename (path, "duckdb-root", NULL);
   g_autofree gchar *child_path = g_build_filename (root_path,
-          "duckdb_temp_storage_DEFAULT-1.tmp", NULL);
+          TEMP_NAME ("storage_DEFAULT-1.tmp"), NULL);
   g_autofree gchar *old_child_path = g_build_filename (root_path,
           "child-old", NULL);
   g_autofree gchar *stale_path = g_build_filename (path, "stale-root", NULL);
@@ -2002,7 +2014,7 @@ test_locator_nested_directory_transport (void)
       0), ==, WYRELOG_E_OK);
   g_assert_true (CloseHandle (root_handle));
   g_assert_cmpint (wyl_fact_artifact_win_directory_open_file (locator, root,
-      "duckdb_temp_storage_DEFAULT-1.tmp",
+      TEMP_NAME ("storage_DEFAULT-1.tmp"),
       GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_directory_entry_issue_working_handle
@@ -2033,7 +2045,7 @@ test_locator_nested_directory_transport (void)
   g_assert_true (DeleteFileW (child_wide));
   /* Reopen a fresh exact child, then prove child-before-root deletion. */
   g_assert_cmpint (wyl_fact_artifact_win_directory_open_file (locator, root,
-      "duckdb_temp_storage_DEFAULT-1.tmp",
+      TEMP_NAME ("storage_DEFAULT-1.tmp"),
       GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child), ==,
       WYRELOG_E_OK);
   child_identity = identity_for_path (child_path);
@@ -3157,7 +3169,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_nonnull (temp_logical);
   g_assert_true (g_str_has_prefix (temp_logical, "/wyrelog-duckdb-temp/"));
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (temp_root,
-      "duckdb_temp_storage_DEFAULT-1.tmp", &temp_child), ==, WYRELOG_E_OK);
+      TEMP_NAME ("storage_DEFAULT-1.tmp"), &temp_child), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (temp_child, TRUE, &temp_binding), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
         (temp_binding, &session), ==, WYRELOG_E_OK);
@@ -3195,7 +3207,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
       "../outside", &temp_child), ==, WYRELOG_E_INVALID);
   g_assert_null (temp_child);
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (temp_root,
-      "duckdb_temp_block-1.block", &temp_child), ==, WYRELOG_E_OK);
+      TEMP_NAME ("block-1.block"), &temp_child), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (temp_child, TRUE, &temp_binding), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_retire (temp_root,
       &temp_retire), ==, WYRELOG_E_POLICY);
@@ -3220,7 +3232,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_autofree gchar *raw_root_path = g_build_filename (path, raw_root_name,
           NULL);
   g_autofree gchar *raw_child_path = g_build_filename (raw_root_path,
-          "duckdb_temp_block-1.block", NULL);
+          TEMP_NAME ("block-1.block"), NULL);
   g_autofree wchar_t *raw_root_wide = g_utf8_to_utf16 (raw_root_path, -1,
           NULL, NULL, NULL);
   g_autofree wchar_t *raw_child_wide = g_utf8_to_utf16 (raw_child_path, -1,
@@ -3648,26 +3660,37 @@ test_temp_root_spill_child_capabilities (void)
   wyl_fact_artifact_win_temp_orphan_evidence_free (root_evidence);
 
   /* Check non-existent child */
-  g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root, "duckdb_temp_storage_S32K-1.tmp", &exists), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root, TEMP_NAME ("storage_S32K-1.tmp"), &exists), ==, WYRELOG_E_OK);
   g_assert_false (exists);
+
+  /* DuckDB 2.0 names a child after its creating process: another pid's
+   * spelling reaches neither existence nor creation authority. */
+  g_autofree gchar *foreign_pid_name = g_strdup_printf (
+    "duckdb_temp_%lu_0_storage_S32K-1.tmp",
+    (unsigned long) GetCurrentProcessId () + 1);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root,
+      foreign_pid_name, &exists), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child_binding (root,
+      foreign_pid_name, TRUE, &child, &binding, &child_evidence), ==,
+      WYRELOG_E_INVALID);
 
   /* Atomic create-and-bind with orphan evidence */
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child_binding (root,
-      "duckdb_temp_storage_S32K-1.tmp", TRUE, &child, &binding,
+      TEMP_NAME ("storage_S32K-1.tmp"), TRUE, &child, &binding,
       &child_evidence), ==, WYRELOG_E_OK);
   g_assert_nonnull (child);
   g_assert_nonnull (binding);
   g_assert_null (child_evidence);
 
   /* Check existing child */
-  g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root, "duckdb_temp_storage_S32K-1.tmp", &exists), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_child_exists (root, TEMP_NAME ("storage_S32K-1.tmp"), &exists), ==, WYRELOG_E_OK);
   g_assert_true (exists);
 
   /* Snapshot children */
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_snapshot_children (root, &children), ==, WYRELOG_E_OK);
   g_assert_nonnull (children);
   g_assert_cmpuint (children->len, ==, 1);
-  g_assert_cmpstr (g_ptr_array_index (children, 0), ==, "duckdb_temp_storage_S32K-1.tmp");
+  g_assert_cmpstr (g_ptr_array_index (children, 0), ==, TEMP_NAME ("storage_S32K-1.tmp"));
   g_ptr_array_free (children, TRUE);
 
   wyl_fact_artifact_win_temp_child_binding_free (binding);
@@ -3751,7 +3774,7 @@ test_temp_child_wrapper_ownership (void)
   /* OPEN -> CLOSED keeps only the binding.  After retirement and release of
    * the caller's child and deliberate witness, that binding is the sole
    * owner keeping the deleted File ID reachable. */
-  const gchar *closed_name = "duckdb_temp_storage_S32K-10.tmp";
+  const gchar *closed_name = TEMP_NAME ("storage_S32K-10.tmp");
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
       closed_name, TRUE, &child, &session, &evidence), ==, WYRELOG_E_OK);
   g_assert_nonnull (child);
@@ -3800,7 +3823,7 @@ test_temp_child_wrapper_ownership (void)
   /* finish and abort both release session-specific ownership before the
    * caller retires its healthy child. */
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
-      "duckdb_temp_storage_S32K-11.tmp", TRUE, &child, &session,
+      TEMP_NAME ("storage_S32K-11.tmp"), TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_OK);
   g_assert_null (evidence);
   g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
@@ -3811,7 +3834,7 @@ test_temp_child_wrapper_ownership (void)
   child = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
-      "duckdb_temp_storage_S32K-12.tmp", TRUE, &child, &session,
+      TEMP_NAME ("storage_S32K-12.tmp"), TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_OK);
   wyl_fact_artifact_io_session_abort (session);
   session = NULL;
@@ -3823,7 +3846,7 @@ test_temp_child_wrapper_ownership (void)
   * binding into the wrapper.  Exercise every terminal wrapper disposition
   * before proving that the independently owned child remains healthy. */
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
-      "duckdb_temp_storage_S32K-13.tmp", TRUE, &child, &session,
+      TEMP_NAME ("storage_S32K-13.tmp"), TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_io_session_finish (session), ==,
       WYRELOG_E_OK);
@@ -3856,7 +3879,7 @@ test_temp_child_wrapper_ownership (void)
   /* The safe result seam performs the real finish first.  Finish releases the
    * binding despite the reported error; close retains only the binding husk. */
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
-      "duckdb_temp_storage_S32K-14.tmp", TRUE, &child, &session,
+      TEMP_NAME ("storage_S32K-14.tmp"), TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_OK);
   wyl_fact_artifact_win_temp_child_set_test_seam (
     WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_REPORT_FINISH_ERROR);
@@ -3870,7 +3893,7 @@ test_temp_child_wrapper_ownership (void)
   child = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
-      "duckdb_temp_storage_S32K-15.tmp", TRUE, &child, &session,
+      TEMP_NAME ("storage_S32K-15.tmp"), TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_OK);
   wyl_fact_artifact_win_temp_child_set_test_seam (
     WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_REPORT_FINISH_ERROR);
@@ -3889,7 +3912,8 @@ test_temp_child_wrapper_ownership (void)
    * and exact rollback. */
   for (guint i = 0; i < G_N_ELEMENTS (creation_seams); i++) {
     g_autofree gchar *name = g_strdup_printf (
-      "duckdb_temp_storage_S32K-%u.tmp", 20 + i);
+      "duckdb_temp_%lu_0_storage_S32K-%u.tmp",
+      (unsigned long) GetCurrentProcessId (), 20 + i);
     gboolean exists = TRUE;
 
     child = (WylFactArtifactWinTempChild *) (guintptr) 1;
@@ -3918,7 +3942,7 @@ test_temp_child_wrapper_ownership (void)
   wyl_fact_artifact_win_temp_child_set_test_seam (
     WYL_FACT_ARTIFACT_WIN_TEMP_CHILD_TEST_SEAM_AFTER_IO_SESSION_ACQUIRE);
   g_assert_cmpint (wyl_fact_artifact_io_session_create_temp_child (root,
-      "duckdb_temp_storage_S32K-30.tmp", TRUE, &child, &session,
+      TEMP_NAME ("storage_S32K-30.tmp"), TRUE, &child, &session,
       &evidence), ==, WYRELOG_E_NOMEM);
   g_assert_null (child);
   g_assert_null (session);
@@ -3926,7 +3950,7 @@ test_temp_child_wrapper_ownership (void)
   evidence_bytes =
       wyl_fact_artifact_win_temp_orphan_evidence_bytes (evidence);
   g_assert_nonnull (evidence_bytes);
-  const gchar *uncertain_name = "duckdb_temp_storage_S32K-30.tmp";
+  const gchar *uncertain_name = TEMP_NAME ("storage_S32K-30.tmp");
   gsize evidence_size = 0;
   const guint8 *serialized = g_bytes_get_data (evidence_bytes,
           &evidence_size);
@@ -4334,9 +4358,9 @@ test_mutation_handle_lifetime_temp_tree (void)
   g_autofree gchar *root_path = g_build_filename (path,
           logical + strlen ("/wyrelog-duckdb-temp/"), NULL);
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (root,
-      "duckdb_temp_storage_DEFAULT-659.tmp", &child), ==, WYRELOG_E_OK);
+      TEMP_NAME ("storage_DEFAULT-659.tmp"), &child), ==, WYRELOG_E_OK);
   g_autofree gchar *child_path = g_build_filename (root_path,
-          "duckdb_temp_storage_DEFAULT-659.tmp", NULL);
+          TEMP_NAME ("storage_DEFAULT-659.tmp"), NULL);
   g_autofree wchar_t *child_wide = g_utf8_to_utf16 (child_path, -1, NULL,
           NULL, NULL);
   g_autofree wchar_t *root_wide = g_utf8_to_utf16 (root_path, -1, NULL, NULL,
@@ -4476,7 +4500,7 @@ test_inventory_stable_temp_and_unknown (void)
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_root (lease, &root),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (root,
-      "duckdb_temp_storage_DEFAULT-1.tmp", &child), ==, WYRELOG_E_OK);
+      TEMP_NAME ("storage_DEFAULT-1.tmp"), &child), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (child, TRUE,
       &binding), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session

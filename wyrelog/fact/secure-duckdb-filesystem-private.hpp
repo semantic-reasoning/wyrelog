@@ -138,6 +138,10 @@ public:
   void
   MoveFile (const duckdb::string &, const duckdb::string &,
       duckdb::optional_ptr < duckdb::FileOpener > = nullptr) override;
+  duckdb::optional < duckdb::FileMetadata >
+  GetStatsIfExists (const duckdb::OpenFileInfo &,
+      duckdb::optional_ptr < duckdb::FileOpener > = nullptr)
+  override;
   bool
   FileExists (const duckdb::string &,
       duckdb::optional_ptr < duckdb::FileOpener > = nullptr) override;
@@ -176,8 +180,8 @@ public:
   RegisterSubSystem (duckdb::unique_ptr < duckdb::FileSystem >)
   override;
   void
-  RegisterSubSystem (duckdb::FileCompressionType,
-      duckdb::unique_ptr < duckdb::FileSystem >)
+  RegisterCompressionFilesystem (duckdb::unique_ptr <
+      duckdb::CompressedFileSystem >)
   override;
   void
   UnregisterSubSystem (const duckdb::string &)

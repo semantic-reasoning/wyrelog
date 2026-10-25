@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/duckdb-temp-name-private.h"
 #include "fact/artifact-durability-posix-private.h"
 #include "fact/publication-lock-event-private.h"
 #ifndef G_OS_WIN32
@@ -4466,55 +4467,27 @@ duckdb_temp_child_ref (WylFactDuckdbTempChild *child)
   return child;
 }
 
+/* A spill child this process's DuckDB may name: the pid in a DuckDB 2.0
+ * temporary name is the creating process, and this authority serves only
+ * the instance running here. */
 static gboolean
 duckdb_temp_child_name_is_valid (const gchar *name)
 {
-  static const gchar storage[] = "duckdb_temp_storage_";
-  static const gchar block[] = "duckdb_temp_block-";
-  const gchar *p;
-  if (!name || strchr (name, '/') || strchr (name, '\\'))
-    return FALSE;
-  if (g_str_has_prefix (name, storage)) {
-    p = name + strlen (storage);
-    if (g_str_has_prefix (p, "DEFAULT"))
-      p += strlen ("DEFAULT");
-    else {
-      static const gchar *const classes[] = {
-        "S32K", "S64K", "S96K", "S128K", "S160K", "S192K", "S224K",
-      };
-      gboolean matched = FALSE;
-      for (guint i = 0; i < G_N_ELEMENTS (classes); i++)
-        if (g_str_has_prefix (p, classes[i])) {
-          p += strlen (classes[i]);
-          matched = TRUE;
-          break;
-        }
-      if (!matched)
-        return FALSE;
-    }
-    if (*p++ != '-')
-      return FALSE;
-    const gchar *digits = p;
-    while (g_ascii_isdigit (*p))
-      p++;
-    return p != digits && (digits[0] == '0' ? p == digits + 1 :
-           digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
-  }
-  if (!g_str_has_prefix (name, block))
-    return FALSE;
-  p = name + strlen (block);
-  const gchar *digits = p;
-  while (g_ascii_isdigit (*p))
-    p++;
-  return p != digits && (digits[0] == '0' ? p == digits + 1 :
-         digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+  gint64 pid = 0;
+  return wyl_duckdb_temp_name_classify (name, &pid)
+         != WYL_DUCKDB_TEMP_NAME_INVALID && pid == (gint64) getpid ();
 }
 
+/* The children whose lifecycle DuckDB drives through this authority: its
+ * buffer-class temporary files and the owner marker that claims its id. */
 static gboolean
-duckdb_temp_storage_name_is_valid (const gchar *name)
+duckdb_temp_lifecycle_name_is_valid (const gchar *name)
 {
-  return duckdb_temp_child_name_is_valid (name)
-         && g_str_has_prefix (name, "duckdb_temp_storage_");
+  if (!duckdb_temp_child_name_is_valid (name))
+    return FALSE;
+  WylDuckdbTempNameKind kind = wyl_duckdb_temp_name_classify (name, NULL);
+  return kind == WYL_DUCKDB_TEMP_NAME_STORAGE
+         || kind == WYL_DUCKDB_TEMP_NAME_OWNER;
 }
 
 static wyrelog_error_t
@@ -4988,9 +4961,9 @@ wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
   if (!root || !out_child || !out_fd || !out_evidence
       || !duckdb_temp_child_name_is_valid (name))
     return WYRELOG_E_INVALID;
-  /* DuckDB 1.5.5 evidence shows block names only under FileExists.  Do not
+  /* Large-block names are only ever probed with FileExists.  Do not
    * manufacture lifecycle authority from that observation. */
-  if (!duckdb_temp_storage_name_is_valid (name))
+  if (!duckdb_temp_lifecycle_name_is_valid (name))
     return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = root->lease;
   g_mutex_lock (&lease->mutex);
@@ -5580,7 +5553,10 @@ inventory_scan_temp_root (WylFactArtifactInventorySnapshot *snapshot,
         break;
       continue;
     }
-    if (!duckdb_temp_child_name_is_valid (entry->d_name)) {
+    /* An inventory observes what any process left behind, so it checks the
+     * grammar only, not which pid a name carries. */
+    if (wyl_duckdb_temp_name_classify (entry->d_name, NULL)
+        == WYL_DUCKDB_TEMP_NAME_INVALID) {
       result = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
               WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
       if (result != WYRELOG_E_OK)

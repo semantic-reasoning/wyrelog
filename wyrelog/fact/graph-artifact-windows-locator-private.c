@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-artifact-windows-locator-private.h"
+#include "fact/duckdb-temp-name-private.h"
 #include "fact/graph-windows-security-private.h"
 #include "wyrelog/wyl-log-private.h"
 
@@ -607,41 +608,13 @@ inventory_temp_root_name (const gchar *name)
   return TRUE;
 }
 
+/* An inventory observes what any process left behind, so it checks the
+ * DuckDB 2.0 grammar only, not which pid a name carries. */
 static gboolean
 inventory_temp_child_name (const gchar *name)
 {
-  const gchar *p;
-  if (name == NULL || strpbrk (name, "/\\") != NULL)
-    return FALSE;
-  if (g_str_has_prefix (name, "duckdb_temp_storage_")) {
-    static const gchar *const classes[] = {
-      "DEFAULT", "S32K", "S64K", "S96K", "S128K", "S160K", "S192K",
-      "S224K",
-    };
-    gboolean matched = FALSE;
-    p = name + strlen ("duckdb_temp_storage_");
-    for (guint i = 0; i < G_N_ELEMENTS (classes); i++)
-      if (g_str_has_prefix (p, classes[i])) {
-        p += strlen (classes[i]);
-        matched = TRUE;
-        break;
-      }
-    if (!matched || *p++ != '-')
-      return FALSE;
-    const gchar *digits = p;
-    while (g_ascii_isdigit (*p))
-      p++;
-    return p != digits && (digits[0] == '0' ? p == digits + 1
-        : (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
-  }
-  if (!g_str_has_prefix (name, "duckdb_temp_block-"))
-    return FALSE;
-  p = name + strlen ("duckdb_temp_block-");
-  const gchar *digits = p;
-  while (g_ascii_isdigit (*p))
-    p++;
-  return p != digits && (digits[0] == '0' ? p == digits + 1
-      : (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+  return wyl_duckdb_temp_name_classify (name, NULL)
+         != WYL_DUCKDB_TEMP_NAME_INVALID;
 }
 
 static gint

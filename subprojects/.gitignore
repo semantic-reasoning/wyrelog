@@ -1,6 +1,6 @@
 *
 !.gitignore
-!duckdb-amalgamated.wrap
+!duckdb-source.wrap
 !duckdb-prebuilt-linux.wrap
 !duckdb-prebuilt-osx.wrap
 !duckdb-prebuilt-windows.wrap

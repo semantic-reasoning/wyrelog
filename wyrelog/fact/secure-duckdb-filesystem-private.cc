@@ -4,6 +4,7 @@
 #include "fact/secure-duckdb-artifact-contract-private.h"
 #include "fact/secure-duckdb-file-handle-private.hpp"
 #include "fact/secure-duckdb-filesystem-contract-private.h"
+#include "fact/duckdb-temp-name-private.h"
 
 #include <algorithm>
 #include <atomic>
@@ -158,8 +159,13 @@ namespace {
           || (logical.artifact == WYL_FACT_ARTIFACT_RECOVERY
           && exact_flags (flags, 18, duckdb::FileLockType::NO_LOCK))));
     } else if (logical.kind == LogicalKind::TEMP_CHILD) {
+      /* A buffer file opens read/write/create (11).  DuckDB 2.0 also claims
+       * its instance id by creating the empty owner marker write-only and
+       * exclusively (18); nothing else opens that name. */
+      const bool owner = wyl_duckdb_temp_name_classify (logical.child.c_str (),
+          nullptr) == WYL_DUCKDB_TEMP_NAME_OWNER;
       accepted = !read_only
-          && exact_flags (flags, 11, duckdb::FileLockType::NO_LOCK);
+          && exact_flags (flags, owner ? 18 : 11, duckdb::FileLockType::NO_LOCK);
     }
     if (!accepted)
       io_reject ("non-source-pinned open tuple for logical path");
@@ -572,7 +578,16 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
     bool created_now = false;
     const bool strict_create = flags.ExclusiveCreate ()
         || flags.CreatePrivateFile ();
-    if (child == nullptr && (flags.CreateFileIfNotExists () || strict_create)) {
+    /* DuckDB 2.0 creates its owner marker with FILE_CREATE_NEW.  Only an
+     * absent marker is created; one already registered is refused, and
+     * DuckDB then claims the next instance id. */
+    const bool owner_create = flags.OverwriteExistingFile ()
+        && wyl_duckdb_temp_name_classify (logical.child.c_str (), nullptr)
+        == WYL_DUCKDB_TEMP_NAME_OWNER;
+    if (owner_create && child != nullptr)
+      io_reject ("re-creation of a registered owner marker");
+    if (child == nullptr && (flags.CreateFileIfNotExists () || strict_create
+        || owner_create)) {
       WylFactDuckdbTempChild *created = nullptr;
       open_result = wyl_fact_artifact_io_session_create_temp_child (
         temp_root_, logical.child.c_str (), flags.OpenForWriting (),
@@ -868,6 +883,25 @@ WylSecureDuckdbFileSystem::MoveFile (const duckdb::string & source,
       ? WYRELOG_E_POLICY : replace_result, "replace fixed WAL sidecar");
 }
 
+/* DuckDB 2.0 asks whether a spilled block's file exists through
+ * GetStatsIfExists before removing it; the FileSystem default would open the
+ * child with flags no temporary binding grants.  A temporary child answers
+ * through the existence authority, and its metadata is never disclosed.
+ * Every other logical object keeps the default: an open with the reader
+ * tuple it already admits, then Stats on that handle. */
+duckdb::optional < duckdb::FileMetadata >
+WylSecureDuckdbFileSystem::GetStatsIfExists (const duckdb::OpenFileInfo & file,
+    duckdb::optional_ptr < duckdb::FileOpener > opener)
+{
+  const auto logical = logical_path_for (file.path, temporary_directory_);
+  if (logical.kind == LogicalKind::TEMP_CHILD) {
+    if (!FileExists (file.path, opener))
+      return duckdb::nullopt;
+    io_reject ("temporary child metadata");
+  }
+  return duckdb::FileSystem::GetStatsIfExists (file, opener);
+}
+
 bool
 WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     duckdb::optional_ptr < duckdb::FileOpener > opener)
@@ -1124,8 +1158,8 @@ WylSecureDuckdbFileSystem::RegisterSubSystem (duckdb::unique_ptr <
 }
 
 void
-WylSecureDuckdbFileSystem::RegisterSubSystem (duckdb::FileCompressionType,
-    duckdb::unique_ptr < duckdb::FileSystem >)
+WylSecureDuckdbFileSystem::RegisterCompressionFilesystem (duckdb::unique_ptr <
+    duckdb::CompressedFileSystem >)
 {
   unsupported ("compressed subsystems");
 }

@@ -1104,7 +1104,7 @@ fact_identity_execute (gpointer context, const gchar *sql,
 /* The same fourteen names, in the same order, for the explicit
  * INSERT (...) SELECT ... of the rebuild and for its equality proof.  Never
  * SELECT *: a migrated store carries logical_bytes last (ADD COLUMN appends)
- * while this list carries it third from last, and DuckDB 1.5.5 compares an
+ * while this list carries it third from last, and DuckDB compares an
  * EXCEPT positionally rather than refusing the mismatch -- measured to return
  * a false empty difference on one shape and a spurious one on another.  The
  * names are what make the proof mean anything. */
@@ -1199,18 +1199,19 @@ static const gchar fact_forget_intent_rebuild_sql[] =
 
 /* Converge a migrated store's fact_batches.logical_bytes to NOT NULL (#1103).
  *
- * DuckDB 1.5.5 closes every direct route: ADD COLUMN refuses a constraint,
- * SET NOT NULL refuses a table with dependents, DROP CONSTRAINT is not
- * implemented, and DROP TABLE refuses while fact_event_log's foreign key
- * references fact_batches.  What is open is rebuilding both tables, because
- * dropping fact_event_log removes the dependency that blocks the other four.
- * v1.5.5 is also the newest release, so this is not a wait-for-DuckDB problem.
+ * DuckDB closes every direct route for a table that others depend on, as
+ * measured on 2.0.0: ADD COLUMN with NOT NULL and SET NOT NULL both refuse a
+ * table with dependents, DROP CONSTRAINT is not implemented, and DROP TABLE
+ * refuses while fact_event_log's foreign key references fact_batches.  (2.0
+ * accepts ADD COLUMN ... NOT NULL on a table nothing depends on; 1.5.5
+ * refused any constraint.)  What is open is rebuilding both tables, because
+ * dropping fact_event_log removes the dependency that blocks the others.
  *
  * Phase A is purely additive: every destructive statement is in phase B, after
  * both equality proofs have passed against the original tables.  Neither real
  * table is ever produced by CREATE TABLE AS SELECT -- fact_batches_rebuild is
  * created from the shared FACT_BATCHES_COLUMNS and renamed into place (RENAME
- * preserves PRIMARY KEY, UNIQUE, CHECK and NOT NULL on 1.5.5), and
+ * preserves PRIMARY KEY, UNIQUE, CHECK and NOT NULL, measured on 2.0.0), and
  * fact_event_log is recreated from the shared FACT_EVENT_LOG_COLUMNS so its
  * foreign key resolves against the new table.  Only fact_event_log_stage is
  * keyless, and it never becomes a real table.
@@ -2248,7 +2249,8 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
               "request_id VARCHAR;"
               "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
               "operator_annotation VARCHAR;"
-              /* DuckDB 1.5.5 refuses ADD COLUMN with a constraint, so this
+              /* DuckDB refuses ADD COLUMN ... NOT NULL while
+               * fact_event_log's foreign key depends on this table, so this
                * step can only add logical_bytes as nullable.
                * migrate_fact_batches_shape_unlocked below then
                * converges it to NOT NULL by rebuilding both tables, which is

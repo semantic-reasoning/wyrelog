@@ -37,6 +37,18 @@
 #include <string>
 #include <vector>
 
+/* DuckDB 2.0 names a spill child after the process that creates it, and the
+ * temporary authority accepts only this process's pid. */
+static long long
+duckdb_test_pid ()
+{
+#ifdef G_OS_WIN32
+  return (long long) GetCurrentProcessId ();
+#else
+  return (long long) getpid ();
+#endif
+}
+
 namespace fs = std::filesystem;
 
 static gchar *
@@ -485,7 +497,7 @@ test_real_main_wal_lock_and_bridge (void)
         "INSERT INTO bounded VALUES (42)");
     auto value = secure.connection->Query ("SELECT value FROM bounded");
     g_assert_false (value->HasError ());
-    g_assert_cmpstr (value->GetValue (0, 0).ToString ().c_str (), ==, "42");
+    g_assert_cmpstr (value->Collection ().GetValue (0, 0).ToString ().c_str (), ==, "42");
     g_autofree gchar *
         wal =
         g_build_filename (fixture.graph_path, "facts.duckdb.wal", nullptr);
@@ -497,7 +509,7 @@ test_real_main_wal_lock_and_bridge (void)
     assert_query_ok (*secure.connection, "CHECKPOINT");
     value = secure.connection->Query ("SELECT value FROM bounded");
     g_assert_false (value->HasError ());
-    g_assert_cmpstr (value->GetValue (0, 0).ToString ().c_str (), ==, "42");
+    g_assert_cmpstr (value->Collection ().GetValue (0, 0).ToString ().c_str (), ==, "42");
     g_assert_cmpint (secure.filesystem->SharedHealth ()->Status (), ==,
         WYRELOG_E_OK);
 
@@ -873,7 +885,7 @@ test_temp_registration_failure_rolls_back_durable_child (void)
   {
     WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
     const auto temp_path = filesystem.TemporaryDirectory ()
-        + "/duckdb_temp_storage_S32K-0.tmp";
+        + "/duckdb_temp_" + std::to_string (duckdb_test_pid ()) + "_0_storage_S32K-0.tmp";
     wyl_secure_duckdb_filesystem_set_test_faults (
       WYL_SECURE_DUCKDB_FILESYSTEM_TEST_FAULT_TEMP_REGISTRATION);
     try {
@@ -1025,7 +1037,7 @@ test_wal_crash_recovery_and_locking (void)
     if (value->HasError ())
       g_test_message ("%s", value->GetError ().c_str ());
     g_assert_false (value->HasError ());
-    g_assert_cmpstr (value->GetValue (0, 0).ToString ().c_str (), ==, "7");
+    g_assert_cmpstr (value->Collection ().GetValue (0, 0).ToString ().c_str (), ==, "7");
 
     WylSecureDuckdbBridge *
         writer = reinterpret_cast < WylSecureDuckdbBridge * >(0x1);
@@ -1035,6 +1047,70 @@ test_wal_crash_recovery_and_locking (void)
     g_assert_null (writer);
   }
 #endif
+}
+
+/* DuckDB 2.0 claims its instance id with an empty owner marker created
+ * write-only with FILE_CREATE_NEW, and probes large-block files through
+ * GetStatsIfExists.  Each tuple is admitted only for the name that needs it,
+ * and a refusal here never poisons the filesystem. */
+static void
+expect_temp_rejection (WylSecureDuckdbFileSystem &filesystem,
+    const std::string &path, duckdb::idx_t flags)
+{
+  try {
+    (void) filesystem.OpenFile (path, duckdb::FileOpenFlags (flags,
+        duckdb::FileLockType::NO_LOCK,
+        duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+    g_assert_not_reached ();
+  } catch (const duckdb::IOException &) {
+  }
+  g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+}
+
+static void
+test_temp_owner_marker_and_block_probe (void)
+{
+  Fixture fixture;
+  WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+  const std::string prefix = filesystem.TemporaryDirectory ()
+      + "/duckdb_temp_" + std::to_string (duckdb_test_pid ()) + "_0_";
+  const std::string owner = prefix + "owner";
+  const std::string storage = prefix + "storage_S32K-0.tmp";
+  const std::string block = prefix + "block-7.block";
+
+  expect_temp_rejection (filesystem, owner, 11);
+  expect_temp_rejection (filesystem, storage, 18);
+  g_assert_false (filesystem.FileExists (owner, nullptr));
+
+  auto marker = filesystem.OpenFile (owner, duckdb::FileOpenFlags (18,
+      duckdb::FileLockType::NO_LOCK,
+      duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+  marker->Close ();
+  marker.reset ();
+  g_assert_true (filesystem.FileExists (owner, nullptr));
+  expect_temp_rejection (filesystem, owner, 18);
+
+  /* An absent large-block file is answered, not opened. */
+  bool block_probe_threw = false;
+  bool block_present = true;
+  try {
+    block_present = filesystem.GetStatsIfExists (duckdb::OpenFileInfo (block),
+        nullptr).has_value ();
+  } catch (const std::exception &) {
+    block_probe_threw = true;
+  }
+  g_assert_false (block_probe_threw);
+  g_assert_false (block_present);
+  try {
+    (void) filesystem.GetStatsIfExists (duckdb::OpenFileInfo (owner), nullptr);
+    g_assert_not_reached ();
+  } catch (const duckdb::IOException &) {
+  }
+  g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+
+  g_assert_true (filesystem.TryRemoveFile (owner, nullptr));
+  g_assert_false (filesystem.FileExists (owner, nullptr));
+  g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
 }
 
 static void
@@ -1203,7 +1279,7 @@ test_denial_and_numeric_no_mutation (void)
   const
   auto
       temp_path = filesystem.TemporaryDirectory ()
-      + "/duckdb_temp_storage_S32K-0.tmp";
+      + "/duckdb_temp_" + std::to_string (duckdb_test_pid ()) + "_0_storage_S32K-0.tmp";
   auto temporary = filesystem.OpenFile (temp_path,
           duckdb::FileOpenFlags (11, duckdb::FileLockType::NO_LOCK,
           duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
@@ -1858,7 +1934,7 @@ test_pinned_validate_only_does_not_initialize (void)
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
     "WHERE NOT internal");
   g_assert_false (count->HasError ());
-  g_assert_cmpint (count->GetValue (0, 0).GetValue<int64_t> (), ==, 0);
+  g_assert_cmpint (count->Collection ().GetValue (0, 0).GetValue<int64_t> (), ==, 0);
 }
 
 static void
@@ -2328,7 +2404,7 @@ test_pinned_pathname_identity_corpus_parity (void)
       g_assert_false (statement->HasError ());
       duckdb::vector<duckdb::Value> values;
       values.emplace_back (raw_value);
-      auto update = statement->Execute (values, false);
+      auto update = statement->Execute (values);
       g_assert_nonnull (update);
       g_assert_false (update->HasError ());
     }
@@ -2633,6 +2709,8 @@ main (int argc, char **argv)
       test_checked_finalize_reports_cleanup_failure);
   g_test_add_func ("/secure-duckdb-filesystem/wal-crash-recovery-locking",
       test_wal_crash_recovery_and_locking);
+  g_test_add_func ("/secure-duckdb-filesystem/temp-owner-marker-and-block-probe",
+      test_temp_owner_marker_and_block_probe);
   g_test_add_func ("/secure-duckdb-filesystem/temp-spill-cleanup",
       test_real_temp_spill_cleanup);
   g_test_add_func ("/secure-duckdb-filesystem/denial-numeric",

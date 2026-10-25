@@ -1,6 +1,6 @@
 # DuckDB fixed-WAL lifecycle evidence
 
-Wyrelog's source-pinned DuckDB v1.5.5 tests record the two fixed WAL
+Wyrelog's source-pinned DuckDB v2.0.0 tests record the two fixed WAL
 replacement paths used by the secure filesystem design:
 
 - a live or completed checkpoint moves `facts.duckdb.wal.checkpoint` to
@@ -43,9 +43,30 @@ the three named tests repeatedly through the non-installed seam target.
 Windows continues to use the regular dependency and has no runtime requirement
 from this evidence.
 
+## Windows sidecar rename durability
+
+DuckDB 1.5.5 replaced a sidecar with `MoveFileExW`, which a live reader of the
+destination refuses; wyrelog patched in POSIX-semantics renames and opened the
+source with `FILE_FLAG_WRITE_THROUGH`, so that fast path was at least as
+durable as the `MOVEFILE_WRITE_THROUGH` fallback. DuckDB 2.0 performs the
+POSIX-semantics rename itself (`LocalFileSystem::MoveFile`), so the patch was
+dropped, but upstream opens the source with `DELETE` access only and no
+write-through. It also throws when it cannot open the source, and on any
+rename failure other than `ERROR_INVALID_PARAMETER`, `ERROR_NOT_SUPPORTED` and
+`ERROR_INVALID_FUNCTION`, where the patch fell back to `MoveFileExW`.
+
+This is an accepted change, not an oversight, and its scope is every Windows
+build that does not use the secure bridge, prebuilt and source alike; the
+prebuilt library never carried the patch. A rename there can return before
+it is durable, so a power loss right after recovery can still find the
+pre-rename sidecar: the completed-checkpoint state whose reopen performs the
+same rename again. Secure-bridge builds
+are unaffected: their `MoveFile()` replaces the WAL through the artifact
+authority rather than through `LocalFileSystem`.
+
 ## DuckDB source-pin upgrades
 
-Any change from v1.5.5 must deliberately review all of the following before
+Any change from v2.0.0 must deliberately review all of the following before
 updating the structural boundary:
 
 - `WALStartCheckpoint()` and `WALFinishCheckpoint()` ordering;

@@ -15,6 +15,36 @@ import sys
 import tempfile
 
 
+# test-audit-conn-duckdb-hardening's positive control reports this failure
+# code when the library refuses external extensions outright.  The process
+# status is only a failure bit; the code travels in the WYRELOG_TEST_FAILURE
+# diagnostic its main prints.  The source
+# subproject is generated without the extension loader, so it must refuse;
+# the prebuilt library ships one, so it must not.
+NO_EXTENSION_LOADER = 31
+
+
+FAILURE_CODE = re.compile(r"^WYRELOG_TEST_FAILURE .* code=(-?[0-9]+)$", re.M)
+
+
+def failure_code(status: int, stderr: str) -> int:
+    if status == 0:
+        return 0
+    codes = FAILURE_CODE.findall(stderr)
+    if status != 1 or len(codes) != 1:
+        raise RuntimeError(f"child failed without one failure code: {status}")
+    return int(codes[0])
+
+
+def expect_loader_posture(duckdb_source: str, status: int) -> None:
+    refused = status == NO_EXTENSION_LOADER
+    if duckdb_source == "subproject" and not refused:
+        raise RuntimeError(
+            f"source-built DuckDB did not refuse external extensions: {status}")
+    if duckdb_source == "prebuilt" and refused:
+        raise RuntimeError("prebuilt DuckDB lost its extension loader")
+
+
 def create_sqlite(path: Path) -> None:
     database = sqlite3.connect(path)
     try:
@@ -70,6 +100,12 @@ def validate_hardened_trace(evidence: str, extension_root: Path) -> None:
         raise RuntimeError(f"hardened probe used forbidden resources: {found}")
 
 
+def validate_no_network(evidence: str, probe: str) -> None:
+    found = [token for token in ("AF_INET", "AF_INET6") if token in evidence]
+    if found:
+        raise RuntimeError(f"{probe} used forbidden network: {found}")
+
+
 def validate_positive_trace(evidence: str, staged: Path) -> None:
     successful_open = re.compile(
         rf'\bopen(?:at|at2)?\([^\n]*"{re.escape(str(staged))}"[^\n]*'
@@ -101,6 +137,44 @@ def trace_parser_self_test() -> None:
         except RuntimeError:
             continue
         raise RuntimeError(f"hardened trace mutation survived: {mutation}")
+
+    for source, status, accepted in (
+            ("subproject", NO_EXTENSION_LOADER, True),
+            ("subproject", 0, False),
+            ("subproject", 30, False),
+            ("prebuilt", 0, True),
+            ("prebuilt", 30, True),
+            ("prebuilt", NO_EXTENSION_LOADER, False)):
+        try:
+            expect_loader_posture(source, status)
+        except RuntimeError:
+            if accepted:
+                raise RuntimeError(
+                    f"loader posture rejected {source} status {status}")
+            continue
+        if not accepted:
+            raise RuntimeError(
+                f"loader posture accepted {source} status {status}")
+
+    diagnostic = ("WYRELOG_TEST_FAILURE file=t.c function=main line=1 "
+                  f"code={NO_EXTENSION_LOADER}\n")
+    if (failure_code(0, "") != 0
+            or failure_code(1, diagnostic) != NO_EXTENSION_LOADER):
+        raise RuntimeError("failure code parser misread a diagnostic")
+    for status, stderr in ((1, ""), (2, diagnostic), (1, diagnostic * 2)):
+        try:
+            failure_code(status, stderr)
+        except RuntimeError:
+            continue
+        raise RuntimeError(f"failure code parser accepted {status} {stderr!r}")
+    validate_no_network('openat(AT_FDCWD, "/tmp/x", O_RDONLY) = 3', "self")
+    for mutation in ("connect(3, {sa_family=AF_INET}, 16) = 0",
+                     "connect(3, {sa_family=AF_INET6}, 28) = 0"):
+        try:
+            validate_no_network(mutation, "self")
+        except RuntimeError:
+            continue
+        raise RuntimeError(f"network trace mutation survived: {mutation}")
 
     staged = extension_root / "v1/linux/sqlite_scanner.duckdb_extension"
     validate_positive_trace(
@@ -180,7 +254,8 @@ def stage_extension(source: Path, home: Path) -> Path:
 
 
 def run_child(executable: Path, mode: str, catalog: Path,
-              environment: dict[str, str], trace: Path) -> str:
+              environment: dict[str, str], trace: Path,
+              codes: tuple[int, ...] = (0,)) -> tuple[int, str]:
     command = [str(executable), mode, str(catalog)]
     tracer = shutil.which("strace") if sys.platform.startswith("linux") else None
     if sys.platform.startswith("linux") and tracer is None:
@@ -188,13 +263,19 @@ def run_child(executable: Path, mode: str, catalog: Path,
     if tracer is not None:
         command = [tracer, "-f", "-e", "trace=file,network", "-o",
                    str(trace), *command]
-    subprocess.run(command, check=True, env=environment)
+    completed = subprocess.run(command, check=False, env=environment,
+                               stderr=subprocess.PIPE, text=True,
+                               encoding="utf-8", errors="replace")
+    sys.stderr.write(completed.stderr)
+    code = failure_code(completed.returncode, completed.stderr)
+    if code not in codes:
+        raise subprocess.CalledProcessError(completed.returncode, command)
     if tracer is None:
-        return ""
-    return trace.read_text(encoding="utf-8", errors="strict")
+        return code, ""
+    return code, trace.read_text(encoding="utf-8", errors="strict")
 
 
-def run_clean(executable: Path) -> None:
+def run_clean(executable: Path, duckdb_source: str) -> None:
     with tempfile.TemporaryDirectory(prefix="wyl-audit-autoload-clean-") as raw:
         root = Path(raw)
         home = root / "home"
@@ -203,7 +284,7 @@ def run_clean(executable: Path) -> None:
         create_sqlite(catalog)
         before_home = tree_snapshot(home)
         before_catalog = file_digest(catalog)
-        evidence = run_child(
+        _, evidence = run_child(
             executable, "--foreign-sqlite", catalog,
             isolated_environment(home), root / "hardened.strace",
         )
@@ -213,8 +294,21 @@ def run_clean(executable: Path) -> None:
         if file_digest(catalog) != before_catalog:
             raise RuntimeError("hardened probe changed the foreign catalog")
 
+        # No scanner is staged, so the prebuilt positive control fails to
+        # find one; the source build must fail earlier, for want of a loader.
+        positive_home = root / "positive-home"
+        positive_home.mkdir()
+        status, positive = run_child(
+            executable, "--raw-sqlite-positive", catalog,
+            isolated_environment(positive_home), root / "positive.strace",
+            (30, NO_EXTENSION_LOADER),
+        )
+        expect_loader_posture(duckdb_source, status)
+        validate_no_network(positive, "positive control")
 
-def run_ambient(executable: Path, explicit: Path | None) -> int:
+
+def run_ambient(executable: Path, explicit: Path | None,
+                duckdb_source: str) -> int:
     version = subprocess.run(
         [str(executable), "--duckdb-library-version"], check=True,
         capture_output=True, text=True, encoding="utf-8",
@@ -241,15 +335,20 @@ def run_ambient(executable: Path, explicit: Path | None) -> int:
         before_catalog = file_digest(catalog)
         environment = isolated_environment(home)
 
-        positive = run_child(
+        status, positive = run_child(
             executable, "--raw-sqlite-positive", catalog, environment,
-            root / "positive.strace",
+            root / "positive.strace", (0, NO_EXTENSION_LOADER),
         )
-        validate_positive_trace(positive, staged)
+        expect_loader_posture(duckdb_source, status)
+        if status == 0:
+            validate_positive_trace(positive, staged)
+        else:
+            # A library without a loader must not even read the scanner.
+            validate_hardened_trace(positive, home / ".duckdb" / "extensions")
         if tree_snapshot(home) != before_home or file_digest(catalog) != before_catalog:
             raise RuntimeError("positive control changed its fixtures")
 
-        hardened = run_child(
+        _, hardened = run_child(
             executable, "--foreign-sqlite", catalog, environment,
             root / "hardened.strace",
         )
@@ -265,19 +364,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("clean", "ambient"))
     parser.add_argument("--ambient-extension", type=Path)
+    parser.add_argument("--duckdb-source", choices=("prebuilt", "subproject"))
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("executable", type=Path, nargs="?")
     arguments = parser.parse_args()
     if arguments.self_test:
         trace_parser_self_test()
         return 0
-    if arguments.mode is None or arguments.executable is None:
-        parser.error("--mode and executable are required outside --self-test")
+    if (arguments.mode is None or arguments.executable is None
+            or arguments.duckdb_source is None):
+        parser.error("--mode, --duckdb-source and executable are required "
+                     "outside --self-test")
     executable = arguments.executable.resolve()
     if arguments.mode == "clean":
-        run_clean(executable)
+        run_clean(executable, arguments.duckdb_source)
         return 0
-    return run_ambient(executable, arguments.ambient_extension)
+    return run_ambient(executable, arguments.ambient_extension,
+                       arguments.duckdb_source)
 
 
 if __name__ == "__main__":

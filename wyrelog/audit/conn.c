@@ -833,8 +833,9 @@ commit_transaction_unlocked (wyl_audit_conn_t *conn)
   if (service_exchange_fail (conn,
       WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_QUERY)) {
     /* Exercise DuckDB's query execution boundary with a syntactically invalid
-     * COMMIT. DuckDB returns failure and leaves the active transaction valid
-     * for the exactly-once rollback below. */
+     * COMMIT. DuckDB returns failure and leaves the transaction open but
+     * aborted (2.0 invalidates it on any error), so only the exactly-once
+     * rollback below can end it. */
     duckdb_result result = { 0 };
     duckdb_state state = duckdb_query (conn->conn,
             "COMMIT __wyrelog_injected_failure__;", &result);

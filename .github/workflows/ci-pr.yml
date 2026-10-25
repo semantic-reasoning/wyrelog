@@ -253,13 +253,13 @@ jobs:
             time_args=(-l)
           fi
           if [ "$RUNNER_OS" = macOS ]; then
-            meson compile -C build-secure-duckdb -j 1 \
+            meson compile -C build-secure-duckdb -j 3 \
               test-fact-darwin-provisioned-pair
             meson test -C build-secure-duckdb --no-rebuild \
               fact-darwin-provisioned-pair --print-errorlogs
           fi
           /usr/bin/time "${time_args[@]}" \
-            meson compile -C build-secure-duckdb -j 1 \
+            meson compile -C build-secure-duckdb -j 3 \
             test-fact-artifact-inventory \
             test-fact-artifact-inventory-consumers \
             test-fact-artifact-namespace \
@@ -293,7 +293,7 @@ jobs:
 
       - name: Test fact forget transaction cleanup with secure DuckDB
         run: |
-          meson compile -C build-secure-duckdb -j 1 \
+          meson compile -C build-secure-duckdb -j 3 \
             test-fact-store-provisioned \
             test-fact-graph-seal \
             test-daemon-http-facts \
@@ -307,7 +307,7 @@ jobs:
             fact-store-forget-transaction \
             fact-store-forget-transaction-provisioned \
             --print-errorlogs
-          meson compile -C build-secure-duckdb -j 1 \
+          meson compile -C build-secure-duckdb -j 3 \
             test-fact-store-duckdb-hardening
           meson test -C build-secure-duckdb --no-rebuild \
             fact-store-duckdb-hardening \
@@ -319,7 +319,7 @@ jobs:
 
       - name: Test opposing fact lifecycle wrappers with secure DuckDB
         run: |
-          meson compile -C build-secure-duckdb -j 1 \
+          meson compile -C build-secure-duckdb -j 3 \
             test-fact-seal-unseal-coordination
           meson test -C build-secure-duckdb --no-rebuild \
             fact-seal-unseal-coordination \
@@ -334,7 +334,7 @@ jobs:
       # runners, so a case lost on macOS fails here (#1391).
       - name: Test offline backup and restore with secure DuckDB
         run: |
-          meson compile -C build-secure-duckdb -j 1 \
+          meson compile -C build-secure-duckdb -j 3 \
             test-fact-offline-backup-source \
             wyctl
           meson test -C build-secure-duckdb --no-rebuild \
@@ -354,7 +354,7 @@ jobs:
       # platform-specific regression shows up.
       - name: Test fact-store platform regressions with secure DuckDB
         run: |
-          meson compile -C build-secure-duckdb -j 1 \
+          meson compile -C build-secure-duckdb -j 3 \
             test-fact-offline-backup-bundle \
             test-fact-publication-lock-matrix \
             test-fact-root-writer-lease \
@@ -374,7 +374,7 @@ jobs:
 
       - name: Test audit DuckDB hardening with source DuckDB
         run: |
-          meson compile -C build-secure-duckdb -j 1 \
+          meson compile -C build-secure-duckdb -j 3 \
             test-audit-conn-duckdb-hardening
           meson test -C build-secure-duckdb --no-rebuild \
             audit-conn-duckdb-hardening \
@@ -453,7 +453,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: subprojects/packagecache
-          key: ${{ runner.os }}-duckdb-source-${{ hashFiles('subprojects/duckdb-amalgamated.wrap') }}
+          key: ${{ runner.os }}-duckdb-source-${{ hashFiles('subprojects/duckdb-source.wrap') }}
 
       - name: Configure source-offbridge C-link closure
         env:
@@ -469,7 +469,7 @@ jobs:
       - name: Compile Clang/libstdc++ C consumer
         if: matrix.compiler == 'clang-libstdcxx'
         run: |
-          meson compile -C build-duckdb-linux-link -j 1 \
+          meson compile -C build-duckdb-linux-link -j 3 \
             test-duckdb-source-offbridge-c-consumer
 
       - name: Run Clang/libstdc++ C consumer proof
@@ -723,10 +723,10 @@ jobs:
           fi
           if [ "$RUNNER_OS" = Linux ]; then
             /usr/bin/time -v meson compile -C build-duckdb-seam \
-              -j 1 test-duckdb-after-walstart
+              -j 3 test-duckdb-after-walstart
           else
             /usr/bin/time -l meson compile -C build-duckdb-seam \
-              -j 1 test-duckdb-after-walstart
+              -j 3 test-duckdb-after-walstart
           fi
           test -z "$(find build-duckdb-seam -name libduckdb.a \
             -print -quit)"
@@ -1562,8 +1562,8 @@ jobs:
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
-          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%PATH%
-          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
+          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
+          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           rem GLib locates gspawn-win64-helper beside the loaded glib DLL
           rem (vcpkg bin), but vcpkg installs it under tools\glib. Stage it
@@ -1601,7 +1601,7 @@ jobs:
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
-          set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-fact-store-forget-transaction
           meson test -C builddir fact-store-forget-transaction --no-rebuild --print-errorlogs
           '@
@@ -1616,8 +1616,8 @@ jobs:
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
-          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%PATH%
-          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
+          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
+          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-fact-store-duckdb-hardening
           meson test -C builddir fact-store-duckdb-hardening fact-store-duckdb-autoload-runtime fact-store-duckdb-autoload-runtime-self-test fact-store-duckdb-hardening-boundary fact-store-duckdb-hardening-boundary-self-test --no-rebuild --print-errorlogs
@@ -1632,8 +1632,8 @@ jobs:
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
-          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%PATH%
-          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
+          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
+          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-audit-conn-duckdb-hardening
           if "${{ matrix.duckdb_source }}"=="subproject" (

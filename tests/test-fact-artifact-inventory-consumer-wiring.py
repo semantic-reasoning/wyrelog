@@ -32,6 +32,7 @@ POSIX_LOCK_HEADER_CLOSURE = (
     "wyrelog/fact/graph-locator-private.h",
     "wyrelog/fact/graph-windows-security-private.h",
     "wyrelog/fact/recovery-mac-private.h",
+    "wyrelog/fact/duckdb-temp-name-private.h",
 )
 WINDOWS_PROVIDER = "wyrelog/fact/graph-artifact-windows-namespace-private.c"
 MODEL_TEST = "tests/test-fact-artifact-inventory.c"
@@ -49,31 +50,31 @@ EXPECTED_POSIX_OPENAT_PROFILE_SHA256 = (
     "e53298e179e2c767efd021602bda7a69ae88ab46b28320d6f10dbb3ec86c0e17"
 )
 EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
-    "87024983a5d5431165bbe51e5fc2866d81936b3504bb0a9839b15f8d0c4dd50c"
+    "cd2142b6b47c0fe29c2aa4089e40cce8b130ac83cd62ec0d9982bd98900ca86f"
 )
 EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "82102f2b7c698170b306ff905e4c78522f891a70b99518e92885f91e6addd60c"
+    "4f2f3b11aa41425e3666013af9e388cbfcd0be444899e0bfbfd1749444213873"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "c002edede3a4a126121245485c934fa8bd65064b5812129198220e87ad0e0712"
+    "8d785fbd87bdb72a224655e93308f848e4ca660674f802e27b5f2ee929fb3a0e"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
-    "380fbc58dddc3de8832769aa4b0aa0869ad6a28ad60ceeec3fd36ef4505ecfb1"
+    "1671c10b11d69533b250a21c784e90c5b7bf61199ebfab5ffd78a47b23b9981d"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS = (
-    13, 7, 10, 8, 2, 3, 4, 41, 6, 5,
+    13, 7, 10, 8, 2, 3, 4, 41, 6, 5, 3,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256 = (
-    "df7fed5772f7e0192a88e0c747721c332eaad1e8be302543f2f19cdee82acc37"
+    "ed456a57146cad081cfdcc1b62a726be031200ad753043561806f79370ec8c90"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS = (
-    1326, 130, 65, 98, 109, 474, 532, 1835, 120, 315,
+    1326, 130, 65, 98, 109, 474, 532, 1835, 120, 315, 525,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "ca895595dfc32ea4681b39f58fb6f3d7a072c67f0a95095b67bf1449a67e6d79"
+    "93cc5156559e5aa2a538ac2a314e3f423ca24b3a4a97fc4c6a089fe0b3659b14"
 )
 POSIX_CALL_CALLEE_PATTERN = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
@@ -645,6 +646,7 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
         include_directives
         == [
             ("#", '"fact/graph-artifact-namespace-private.h"'),
+            ("#", '"fact/duckdb-temp-name-private.h"'),
             ("#", '"fact/artifact-durability-posix-private.h"'),
             ("#", '"fact/publication-lock-event-private.h"'),
             ("#", '"fact/graph-artifact-inventory-posix-private.h"'),
@@ -720,13 +722,13 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 32051)
+        artifact_lock_require(len(semantic_tokens) == 31769)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
         )
         call_profile = c_named_call_profile(commentless_source)
-        artifact_lock_require(call_profile is not None and len(call_profile) == 2164)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2142)
         assert call_profile is not None
         artifact_lock_require(
             hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
@@ -1323,10 +1325,10 @@ SECURE_POSIX_ACTIVE_COMMANDS = (
     "time_args=(-l)",
     "fi",
     'if [ "$RUNNER_OS" = macOS ]; then',
-    "meson compile -C build-secure-duckdb -j 1 test-fact-darwin-provisioned-pair",
+    "meson compile -C build-secure-duckdb -j 3 test-fact-darwin-provisioned-pair",
     "meson test -C build-secure-duckdb --no-rebuild fact-darwin-provisioned-pair --print-errorlogs",
     "fi",
-    '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-fact-artifact-transition-driver test-fact-artifact-transition-posix test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem test-fact-replay',
+    '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 3 test-fact-artifact-inventory test-fact-artifact-inventory-consumers test-fact-artifact-namespace test-fact-artifact-transition-driver test-fact-artifact-transition-posix test-secure-duckdb-bridge test-secure-duckdb-filesystem test-secure-duckdb-recording-filesystem test-fact-replay',
     "meson test -C build-secure-duckdb --no-rebuild fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-namespace-inventory fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-posix secure-duckdb-bridge secure-duckdb-filesystem secure-duckdb-recording-filesystem fact-replay --print-errorlogs",
     "if meson setup build-secure-duckdb-prebuilt -Denable_fact_store=enabled -Dduckdb_source=prebuilt -Denable_secure_duckdb_bridge=enabled; then",
     "echo 'secure DuckDB bridge unexpectedly accepted prebuilt DuckDB'",
@@ -1338,8 +1340,8 @@ WINDOWS_ACTIVE_COMMANDS = (
     "@echo off",
     'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"',
     "set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\\tools\\pkgconf\\pkgconf.exe",
-    'if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\\subprojects\\duckdb-prebuilt-windows-amd64;%PATH%',
-    'if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\\builddir\\subprojects\\duckdb-amalgamated-src;%PATH%',
+    'if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\\subprojects\\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%',
+    'if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\\builddir\\subprojects\\duckdb-2.0.0;%PATH%',
     "set PATH=%VCPKG_INSTALLED_DIR%\\tools\\pkgconf;%VCPKG_INSTALLED_DIR%\\bin;%PATH%",
     "rem GLib locates gspawn-win64-helper beside the loaded glib DLL",
     "rem (vcpkg bin), but vcpkg installs it under tools\\glib. Stage it",
@@ -1628,7 +1630,7 @@ def inventory_commands(workflow: str) -> tuple[tuple[str, ...], ...]:
         posix_command(default_step, "meson test -C builddir --no-rebuild"),
         posix_command(
             secure_step,
-            '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 1',
+            '/usr/bin/time "${time_args[@]}" meson compile -C build-secure-duckdb -j 3',
         ),
         posix_command(
             secure_step,
@@ -1793,7 +1795,7 @@ def validate_workflow(path: str, workflow: str) -> None:
             "-C",
             "build-secure-duckdb",
             "-j",
-            "1",
+            "3",
             *SECURE_COMPILE_TARGETS,
             *SECURE_HISTORICAL_COMPILE_TARGETS,
         )

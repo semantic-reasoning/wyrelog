@@ -1,6 +1,6 @@
 # Secure DuckDB backend
 
-The private secure backend is coupled to the DuckDB 1.5.5 C++ `FileSystem`
+The private secure backend is coupled to the DuckDB 2.0.0 C++ `FileSystem`
 and `FileHandle` ABI. It is not a general pathname filesystem. Its only
 authority is an imported, held graph directory and an existing, held
 `facts.duckdb` identity.
@@ -10,6 +10,15 @@ The adapter maps only these source-observed logical objects:
 - `facts.duckdb` through a reader-main or writer-main binding;
 - the fixed WAL/checkpoint/recovery names through sidecar bindings;
 - a provider-minted temporary root and source-pinned DuckDB spill children.
+
+DuckDB 2.0 names every spill child `duckdb_temp_<pid>_<instance>_...` and
+claims its instance id with an empty `..._owner` marker, created write-only
+with `FILE_CREATE_NEW`. The temporary authority accepts only this process's
+pid; the inventory, which observes what any process left behind, checks the
+grammar alone. Buffer-class `storage_*.tmp` files and the owner marker get a
+lifecycle; large-block `block-*.block` names are only ever probed, and the
+`GetStatsIfExists` probe DuckDB 2.0 uses for them is answered through the
+existence authority without opening the child.
 
 The graph mutation lease supplies writer locking. Every working descriptor is
 revalidated through its issuing provider immediately before and after raw I/O

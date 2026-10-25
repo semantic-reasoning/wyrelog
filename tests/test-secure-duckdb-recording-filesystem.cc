@@ -15,6 +15,8 @@
 #include <gio/gio.h>
 
 #include <duckdb.hpp>
+/* CompressedFileSystem is complete only here in DuckDB 2.0. */
+#include <duckdb/common/compressed_file_system.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -134,9 +136,42 @@ path_is_at_or_below (const std::string &recorded, const fs::path &root)
   return true;
 }
 
-static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5");
+static_assert (std::string_view (DUCKDB_VERSION) == "v2.0.0");
 static_assert (WYL_DUCKDB_SOURCE_BUILD == 1,
     "recording contract tests require the pinned DuckDB source build");
+
+/* DuckDB 2.0 names a compression scheme by string.  Traces keep the 1.5.5
+ * enum numbering, so a recorded line reads the same across the pin. */
+static unsigned
+compression_code (const duckdb::FileCompressionType &compression)
+{
+  if (compression.IsAutoDetect ())
+    return 0;
+  if (compression.IsUncompressed ())
+    return 1;
+  if (compression == duckdb::FileCompressionType::GZIP)
+    return 2;
+  if (compression == duckdb::FileCompressionType::ZSTD)
+    return 3;
+  return 255;
+}
+
+static duckdb::FileCompressionType
+compression_from_code (guint64 code)
+{
+  switch (code) {
+  case 0:
+    return duckdb::FileCompressionType::AUTO_DETECT;
+  case 1:
+    return duckdb::FileCompressionType::UNCOMPRESSED;
+  case 2:
+    return duckdb::FileCompressionType::GZIP;
+  case 3:
+    return duckdb::FileCompressionType::ZSTD;
+  default:
+    return duckdb::FileCompressionType ("unknown");
+  }
+}
 
 /* Assert a result cell renders to an expected string. duckdb::Value::ToString
  * returns a temporary std::string; passing its c_str() straight into
@@ -875,6 +910,50 @@ public:
     }
   }
 
+  /* DuckDB 2.0 retires a temporary directory it created with this
+   * non-recursive mode.  The FileSystem default for it does nothing, which
+   * would hide the request from the recording, so forward it exactly.  The
+   * recursive mode has no DuckDB caller in these scenarios and is denied. */
+  bool RemoveDirectoryExtended (const duckdb::string &path,
+      const duckdb::RemoveDirectoryOptions &options,
+      duckdb::optional_ptr<duckdb::FileOpener> opener) override
+  {
+    (void) opener;
+    const auto checked = check_path (path);
+    if (options.mode != duckdb::RemoveDirectoryMode::SINGLE)
+      reject ("recursive extended directory removal is not permitted", path);
+    const auto token = preflight ("remove-directory-single", path, {});
+    try {
+      ++recorder_->local_forwards;
+      const bool removed = local_->RemoveDirectoryExtended (
+          path_to_utf8 (checked), options, nullptr);
+      complete (token, removed ? 1 : 0, {});
+      record ("remove-directory-single", checked, {}, removed ? 1 : 0);
+      return removed;
+    } catch (const duckdb::IOException &) {
+      complete (token, 0, "IOException");
+      record ("remove-directory-single", checked, {}, 0, "IOException");
+      throw;
+    } catch (const duckdb::Exception &) {
+      complete (token, 0, "DuckDBException");
+      record ("remove-directory-single", checked, {}, 0, "DuckDBException");
+      throw;
+    }
+  }
+
+  /* DuckDB 2.0 asks whether a spilled block's file exists through
+   * GetStatsIfExists, whose FileSystem default opens the file (flags 129).
+   * Record it as the existence probe it is; only an existing file's metadata
+   * goes on to the recorded open. */
+  duckdb::optional<duckdb::FileMetadata> GetStatsIfExists (
+      const duckdb::OpenFileInfo &file,
+      duckdb::optional_ptr<duckdb::FileOpener> opener) override
+  {
+    if (!FileExists (file.path, opener))
+      return duckdb::nullopt;
+    return duckdb::FileSystem::GetStatsIfExists (file, opener);
+  }
+
   bool ListFiles (const duckdb::string &path,
       const std::function<void (const duckdb::string &, bool)> &callback,
       duckdb::FileOpener *opener) override
@@ -970,9 +1049,9 @@ public:
       duckdb::optional_ptr<duckdb::FileOpener> opener) override
   {
     (void) opener;
-    // DuckDB 1.5.5 asks this exact Linux cgroup probe while sizing its block
-    // allocator. Record the denied probe separately from filesystem events;
-    // it is never forwarded to LocalFileSystem.
+    // DuckDB 2.0 asks this exact Linux cgroup probe while DBConfig sizes its
+    // memory and thread defaults. Record the denied probe separately from
+    // filesystem events; it is never forwarded to LocalFileSystem.
     if (path == "/proc/self/cgroup") {
       record_control ("deny-host-exists", path);
       return false;
@@ -1183,10 +1262,9 @@ public:
     reject ("subsystem registration is not permitted");
   }
 
-  void RegisterSubSystem (duckdb::FileCompressionType compression,
-      duckdb::unique_ptr<duckdb::FileSystem> subsystem) override
+  void RegisterCompressionFilesystem
+    (duckdb::unique_ptr<duckdb::CompressedFileSystem> subsystem) override
   {
-    (void) compression;
     (void) subsystem;
     ++recorder_->subsystem_attempts;
     record_control ("register-compressed-subsystem");
@@ -1638,7 +1716,7 @@ private:
       g_printerr ("TRACE\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
           event.operation.c_str (), event.path.c_str (),
           (unsigned long long) event.flags, (unsigned) event.lock,
-          (unsigned) event.compression, event.outcome, event.error_class.c_str ());
+          compression_code (event.compression), event.outcome, event.error_class.c_str ());
     }
   }
   void record (const std::string &operation, const std::string &path)
@@ -1926,6 +2004,8 @@ static constexpr DirectWrapperManifestEntry direct_wrapper_manifest[] = {
   { "CreateDirectory", DirectWrapperDisposition::FORWARD_EXACT },
   { "CreateDirectoriesRecursive", DirectWrapperDisposition::FORWARD_EXACT },
   { "RemoveDirectory", DirectWrapperDisposition::FORWARD_EXACT },
+  { "RemoveDirectoryExtended", DirectWrapperDisposition::FORWARD_EXACT },
+  { "GetStatsIfExists", DirectWrapperDisposition::FORWARD_EXACT },
   { "MoveFile", DirectWrapperDisposition::FORWARD_EXACT },
   { "FileExists", DirectWrapperDisposition::FORWARD_EXACT },
   { "RemoveFile", DirectWrapperDisposition::FORWARD_EXACT },
@@ -1947,7 +2027,7 @@ static constexpr DirectWrapperManifestEntry direct_wrapper_manifest[] = {
   { "FileExists(outside)", DirectWrapperDisposition::PREFLIGHT_DENY },
   { "OpenCompressedFile", DirectWrapperDisposition::PREFLIGHT_DENY },
   { "RegisterSubSystem", DirectWrapperDisposition::PREFLIGHT_DENY },
-  { "RegisterCompressedSubSystem", DirectWrapperDisposition::PREFLIGHT_DENY },
+  { "RegisterCompressionFilesystem", DirectWrapperDisposition::PREFLIGHT_DENY },
   { "UnregisterSubSystem", DirectWrapperDisposition::PREFLIGHT_DENY },
   { "ExtractSubSystem", DirectWrapperDisposition::PREFLIGHT_DENY },
   { "SetDisabledFileSystems", DirectWrapperDisposition::PREFLIGHT_DENY },
@@ -1980,7 +2060,7 @@ direct_fwd (const std::string &operation, const std::string &path,
 static void
 test_recording_filesystem_direct_wrapper_dispositions (void)
 {
-  g_assert_cmpuint (G_N_ELEMENTS (direct_wrapper_manifest), ==, 56);
+  g_assert_cmpuint (G_N_ELEMENTS (direct_wrapper_manifest), ==, 58);
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-direct-XXXXXX", &error);
   g_assert_no_error (error);
@@ -2105,6 +2185,10 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
           1, "", {}),
       direct_fwd ("remove-directory", directory_utf8, 0, no_lock, plain, {}, {}, {},
           1, "", {}),
+      direct_fwd ("create-directory", directory_utf8, 0, no_lock, plain, {}, {}, {},
+          1, "", {}),
+      direct_fwd ("remove-directory-single", directory_utf8, 0, no_lock, plain, {}, {},
+          {}, 1, "", {}),
   });
   auto names_handle = names.OpenFile (database_utf8, flags, nullptr);
   g_assert_false (names.DirectoryExists (directory_utf8, nullptr));
@@ -2118,8 +2202,20 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
   names.RemoveFile (target_utf8, nullptr);
   names.RemoveDirectory (nested_directory_utf8, nullptr);
   names.RemoveDirectory (directory_utf8, nullptr);
+  names.CreateDirectory (directory_utf8, nullptr);
+  g_assert_true (names.RemoveDirectoryExtended (directory_utf8,
+      { duckdb::RemoveDirectoryMode::SINGLE }, nullptr));
+  g_assert_false (fs::exists (directory));
   names.AssertForwardingProtocolCompleteForTest ();
-  g_assert_cmpuint (names.local_forwards (), ==, 9);
+  g_assert_cmpuint (names.local_forwards (), ==, 11);
+  const guint recursive_forwards = names.local_forwards ();
+  try {
+    names.RemoveDirectoryExtended (directory_utf8,
+        { duckdb::RemoveDirectoryMode::RECURSIVE }, nullptr);
+    g_assert_not_reached ();
+  } catch (const duckdb::PermissionException &) {
+  }
+  g_assert_cmpuint (names.local_forwards (), ==, recursive_forwards);
   const auto direct_moves = names.move_snapshots ();
   g_assert_cmpuint (direct_moves.size (), ==, 1);
   const auto &direct_move = direct_moves.front ();
@@ -2275,8 +2371,7 @@ test_recording_filesystem_direct_wrapper_dispositions (void)
         filesystem.RegisterSubSystem (duckdb::FileSystem::CreateLocal ());
         break;
       case 2:
-        filesystem.RegisterSubSystem (duckdb::FileCompressionType::GZIP,
-            duckdb::FileSystem::CreateLocal ());
+        filesystem.RegisterCompressionFilesystem (nullptr);
         break;
       case 3:
         filesystem.UnregisterSubSystem ("httpfs");
@@ -2330,7 +2425,7 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
   const fs::path database = root / "facts.duckdb";
   const std::string database_utf8 = path_to_utf8 (database);
   duckdb::FileOpenFlags flags (11);
-  /* DuckDB 1.5.5's LocalFileSystem only implements hole-punch trimming on
+  /* DuckDB 2.0's LocalFileSystem only implements hole-punch trimming on
    * Linux. macOS and Windows return false without forwarding an error. Keep
    * that source-pinned result exact in the forwarding contract rather than
    * treating an optional filesystem capability as a portable success. */
@@ -2479,9 +2574,13 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
   remove_tree (sandbox);
 }
 
-/* The scenario streams below are complete source-pinned DuckDB 1.5.5
- * languages: every tuple is consumed once, including the two metadata-only
- * probes caused by the explicitly configured home directory. */
+/* The scenario streams below are complete source-pinned DuckDB 2.0
+ * languages: every tuple is consumed once.  DuckDB 2.0 no longer probes the
+ * explicitly configured home directory or its .duckdb metadata path on
+ * open; it instead joins every artifact path, so each open of the main file
+ * or a sidecar is preceded by two PathSeparator tokens on that same path.
+ * The HOME roles stay in the grammar for the Windows contender stream, which
+ * has not been re-recorded against 2.0. */
 enum class TracePathRole {
   HOME,
   HOME_METADATA,
@@ -2561,12 +2660,15 @@ assert_writer_contender_exact_trace (const std::vector<Event> &events,
   };
 #else
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
     { "open", TracePathRole::MAIN, 2307, duckdb::FileLockType::WRITE_LOCK,
         0, "IOException" },
   };
@@ -2580,46 +2682,51 @@ assert_writer_holder_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), M ("close", 2307, WRITE_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("writer-holder", events, database, tokens,
       G_N_ELEMENTS (tokens));
 }
 
 /* The writer that opens after the holder's RELEASE is not merely required to
- * succeed. This is its complete source-pinned 1.5.5 recovery/write/shutdown
+ * succeed. This is its complete source-pinned 2.0 recovery/write/shutdown
  * language, separate from both the holder and the failed contender streams. */
 static void
 assert_writer_restored_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
+    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
@@ -2627,7 +2734,8 @@ assert_writer_restored_exact_trace (const std::vector<Event> &events,
     M ("on-disk", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
-    W ("try-remove", 0, NO_LOCK, 1), M ("close", 2307, WRITE_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
+    M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("writer-restored", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2638,38 +2746,44 @@ assert_persistent_database_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
     M ("open", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
     M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
     M ("open", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 0),
-    W ("try-remove", 0, NO_LOCK, 0), M ("open", 2315, WRITE_LOCK, -1),
+    W ("try-remove", 0, NO_LOCK, 0), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 2315, WRITE_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
     W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    M ("on-disk", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
-    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
-    C ("try-remove", 0, NO_LOCK, 0), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
-    M ("close", 2315, WRITE_LOCK, -1), H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
+    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
+    M ("close", 2315, WRITE_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
     M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("exists", 0, NO_LOCK, 1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 2307, WRITE_LOCK, -1),
     M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
     W ("open", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    M ("close", 2307, WRITE_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("persistent-db", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2680,22 +2794,24 @@ assert_crash_writer_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
+    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
   };
   assert_exact_trace ("crash-writer", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2706,19 +2822,21 @@ assert_live_wal_read_only_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("open", 2433, READ_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
     M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("on-disk", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
-    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
-    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 2433, READ_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("close", 2433, READ_LOCK, -1),
   };
@@ -2731,21 +2849,24 @@ assert_wal_recovery_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    M ("on-disk", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
     W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
@@ -2753,8 +2874,8 @@ assert_wal_recovery_exact_trace (const std::vector<Event> &events,
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
     M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
-    M ("close", 2307, WRITE_LOCK, -1),
+    M ("sync", 0, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    W ("try-remove", 0, NO_LOCK, 1), M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("wal-recovery", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2762,36 +2883,40 @@ assert_wal_recovery_exact_trace (const std::vector<Event> &events,
 
 /* These three scenario-owned FSMs deliberately consume the complete VFS
  * lifecycle, rather than accepting an operation language around the query.
- * The trace comes from the pinned DuckDB 1.5.5 source build: startup probes,
+ * The trace comes from the pinned DuckDB 2.0 source build: startup probes,
  * checkpoint/recovery work, and destructor teardown are all grammar tokens. */
 static void
 assert_explicit_checkpoint_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("close", 129, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
-    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
+    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
+    C ("try-remove", 0, NO_LOCK, 0), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    M ("write-at", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
-    M ("on-disk", 0, NO_LOCK, -1), M ("close", 2307, WRITE_LOCK, -1),
+    M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("explicit-checkpoint", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2802,28 +2927,30 @@ assert_interrupted_checkpoint_child_exact_trace (const std::vector<Event> &event
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("close", 129, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
-    W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
-    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    M ("write-at", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1),
+    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
+    C ("try-remove", 0, NO_LOCK, 0), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+    M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
   };
   assert_exact_trace ("interrupted-checkpoint-child", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2834,19 +2961,22 @@ assert_interrupted_checkpoint_recovery_exact_trace (const std::vector<Event> &ev
     const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
-    W ("close", 129, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
+    C ("open", 129, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    W ("try-remove", 0, NO_LOCK, 1), M ("on-disk", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 2307, WRITE_LOCK, -1),
   };
@@ -2860,38 +2990,44 @@ assert_concurrent_checkpoint_event_exact_trace (
     const std::vector<Event> &events, const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
     W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
-    M ("on-disk", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
+    C ("try-remove", 0, NO_LOCK, 0), M ("on-disk", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
     C ("open", 2090, WRITE_LOCK, -1), C ("size", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), C ("size", 0, NO_LOCK, -1),
     C ("write", 0, NO_LOCK, -1), C ("sync", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
     M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1),
-    C ("close", 2090, WRITE_LOCK, -1), C ("move", 0, NO_LOCK, -1),
-    W ("move-target", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
+    M ("sync", 0, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    C ("close", 2090, WRITE_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), C ("move", 0, NO_LOCK, -1),
+    W ("move-target", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    M ("close", 2307, WRITE_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("close", 2307, WRITE_LOCK, -1),
+    W ("close", 2090, WRITE_LOCK, -1),
   };
   assert_exact_trace ("concurrent-checkpoint-move", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -2902,26 +3038,29 @@ assert_checkpoint_abort_event_exact_trace (const std::vector<Event> &events,
     const fs::path &database, bool checkpoint_completed)
 {
   std::vector<ExactTraceToken> tokens = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 2090, WRITE_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
-    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("write", 0, NO_LOCK, -1),
     W ("sync", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("close", 2090, WRITE_LOCK, -1), C ("try-remove", 0, NO_LOCK, 0),
-    M ("on-disk", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("close", 2090, WRITE_LOCK, -1),
+    C ("try-remove", 0, NO_LOCK, 0), M ("on-disk", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
     C ("open", 2090, WRITE_LOCK, -1), C ("size", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     C ("size", 0, NO_LOCK, -1), C ("size", 0, NO_LOCK, -1),
@@ -2932,6 +3071,7 @@ assert_checkpoint_abort_event_exact_trace (const std::vector<Event> &events,
     tokens.insert (tokens.end (), {
         M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
         M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
+        M ("size", 0, NO_LOCK, -1),
     });
   }
   assert_exact_trace (checkpoint_completed
@@ -2945,24 +3085,29 @@ assert_completed_checkpoint_recovery_event_exact_trace (
     const std::vector<Event> &events, const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
-    C ("close", 129, NO_LOCK, -1), C ("move", 0, NO_LOCK, -1),
-    W ("move-target", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
+    C ("open", 129, NO_LOCK, -1), C ("close", 129, NO_LOCK, -1),
+    W ("close", 129, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), C ("move", 0, NO_LOCK, -1),
+    W ("move-target", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
     W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
-    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("close", 2307, WRITE_LOCK, -1),
   };
@@ -2975,29 +3120,35 @@ assert_incomplete_checkpoint_recovery_event_exact_trace (
     const std::vector<Event> &events, const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
-    R ("open", 18, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), R ("write", 0, NO_LOCK, -1),
-    C ("size", 0, NO_LOCK, -1), C ("read", 0, NO_LOCK, -1),
-    R ("write", 0, NO_LOCK, -1), C ("close", 129, NO_LOCK, -1),
-    R ("sync", 0, NO_LOCK, -1), R ("close", 18, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
+    C ("open", 129, NO_LOCK, -1), R ("separator", 0, NO_LOCK, -1),
+    R ("separator", 0, NO_LOCK, -1), R ("open", 18, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    R ("write", 0, NO_LOCK, -1), C ("size", 0, NO_LOCK, -1),
+    C ("read", 0, NO_LOCK, -1), R ("write", 0, NO_LOCK, -1),
+    C ("close", 129, NO_LOCK, -1), R ("sync", 0, NO_LOCK, -1),
+    R ("close", 18, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
     R ("move", 0, NO_LOCK, -1), W ("move-target", 0, NO_LOCK, -1),
-    C ("remove", 0, NO_LOCK, -1), W ("open", 1, NO_LOCK, -1),
+    C ("remove", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 1, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
     W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("close", 1, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    W ("close", 1, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("close", 2307, WRITE_LOCK, -1),
   };
@@ -3010,21 +3161,24 @@ assert_incomplete_recovery_reopen_event_exact_trace (
     const std::vector<Event> &events, const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
     W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
@@ -3033,7 +3187,8 @@ assert_incomplete_recovery_reopen_event_exact_trace (
     M ("on-disk", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("sync", 0, NO_LOCK, -1),
-    W ("try-remove", 0, NO_LOCK, 1), M ("close", 2307, WRITE_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
+    M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("incomplete-recovery-reopen", events, database,
       tokens, G_N_ELEMENTS (tokens));
@@ -3044,21 +3199,24 @@ assert_fixed_wal_reopen_event_exact_trace (
     const std::vector<Event> &events, const fs::path &database)
 {
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
-    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
-    M ("separator", 0, NO_LOCK, -1), M ("canonicalize", 0, NO_LOCK, -1),
-    M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
     M ("close", 129, NO_LOCK, -1), M ("exists", 0, NO_LOCK, 1),
-    M ("open", 2307, WRITE_LOCK, -1), M ("size", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
-    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), W ("reset", 0, NO_LOCK, -1),
-    W ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
-    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 2307, WRITE_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("open", 129, NO_LOCK, -1),
+    W ("size", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
     W ("open", 2090, WRITE_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("size", 0, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
     W ("write", 0, NO_LOCK, -1), W ("sync", 0, NO_LOCK, -1),
@@ -3067,8 +3225,8 @@ assert_fixed_wal_reopen_event_exact_trace (
     M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
     M ("write-at", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
     M ("sync", 0, NO_LOCK, -1), M ("write-at", 0, NO_LOCK, -1),
-    M ("sync", 0, NO_LOCK, -1), W ("try-remove", 0, NO_LOCK, 1),
-    M ("close", 2307, WRITE_LOCK, -1),
+    M ("sync", 0, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    W ("try-remove", 0, NO_LOCK, 1), M ("close", 2307, WRITE_LOCK, -1),
   };
   assert_exact_trace ("fixed-wal-reopen", events, database, tokens,
       G_N_ELEMENTS (tokens));
@@ -3093,13 +3251,13 @@ is_expected_home_metadata_path (const std::string &path, const fs::path &databas
 }
 
 static void
-assert_source_155_platform_control_language (const std::vector<ControlEvent> &controls,
+assert_source_pinned_platform_control_language (const std::vector<ControlEvent> &controls,
     size_t baseline, guint database_opens)
 {
 #ifdef __linux__
-  // DBConfig queries this once for default memory and once for its block
-  // allocator in each of the two DuckDB 1.5.5 lifecycles above.
-  g_assert_cmpuint (controls.size (), ==, baseline + 2 * database_opens);
+  // DuckDB 2.0 asks this Linux cgroup probe five times per database
+  // lifecycle while DBConfig sizes its memory and thread defaults.
+  g_assert_cmpuint (controls.size (), ==, baseline + 5 * database_opens);
   for (size_t i = baseline; i < controls.size (); i++) {
     g_assert_cmpstr (controls[i].operation.c_str (), ==, "deny-host-exists");
     g_assert_cmpstr (controls[i].path.c_str (), ==, "/proc/self/cgroup");
@@ -3136,7 +3294,8 @@ normalized_trace_digest (const std::vector<Event> &events, const fs::path &root)
     fs::path normalized;
     for (const auto &part : path_from_utf8 (path)) {
       const std::string part_utf8 = path_to_utf8 (part);
-      if (part_utf8.rfind ("duckdb_temp_storage_", 0) == 0)
+      /* Every DuckDB 2.0 spill name starts so, and carries the pid. */
+      if (part_utf8.rfind ("duckdb_temp_", 0) == 0)
         normalized /= path_from_utf8 ("$DUCKDB_TEMP");
       else
         normalized /= part;
@@ -3153,7 +3312,7 @@ normalized_trace_digest (const std::vector<Event> &events, const fs::path &root)
     const std::string line = event.operation + "\t" + path + "\t"
         + std::to_string (event.flags) + "\t"
         + std::to_string ((unsigned) event.lock) + "\t"
-        + std::to_string ((unsigned) event.compression) + "\t"
+        + std::to_string (compression_code (event.compression)) + "\t"
         + std::to_string (event.outcome) + "\t" + event.error_class + "\n";
     g_checksum_update (checksum, (const guchar *) line.data (), line.size ());
   }
@@ -3439,7 +3598,7 @@ communicate_utf8_with_timeout (GSubprocess *process, guint timeout_ms)
 }
 
 static duckdb::FileOpenFlags
-source_155_open_flags (duckdb::idx_t flags,
+source_pinned_open_flags (duckdb::idx_t flags,
     duckdb::FileLockType lock = duckdb::FileLockType::NO_LOCK)
 {
   return duckdb::FileOpenFlags (flags, lock,
@@ -3468,24 +3627,24 @@ configure_test_database (duckdb::DBConfig *config, const fs::path &root,
 }
 
 static void
-assert_duckdb_155 (void)
+assert_duckdb_pinned (void)
 {
-  g_assert_cmpstr (duckdb_library_version (), ==, "v1.5.5");
+  g_assert_cmpstr (duckdb_library_version (), ==, "v2.0.0");
 }
 
 static int
 crash_writer_child (const gchar *sandbox)
 {
-  if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
+  if (g_strcmp0 (duckdb_library_version (), "v2.0.0") != 0)
     WYL_TEST_EXIT(90);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
   auto recorder = std::make_shared<RecorderState> ();
   duckdb::DBConfig config;
   configure_test_database (&config, root, database, recorder, {
-      source_155_open_flags (129),
-      source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-      source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+      source_pinned_open_flags (129),
+      source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+      source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
   duckdb::DuckDB db (path_to_utf8 (database), &config);
   duckdb::Connection connection (db);
   auto result = connection.Query ("INSERT INTO facts VALUES (99)");
@@ -3495,7 +3654,7 @@ crash_writer_child (const gchar *sandbox)
     if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
-            (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
+            compression_code (event.compression), event.outcome, event.error_class.c_str ()) < 0)
       WYL_TEST_EXIT(92);
   }
   for (const auto &control : recorder->controls) {
@@ -3515,7 +3674,7 @@ write_trace_or_exit (const RecorderState &recorder, int error_code)
     if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
-            (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
+            compression_code (event.compression), event.outcome, event.error_class.c_str ()) < 0)
       WYL_TEST_EXIT(error_code);
   }
   for (const auto &control : recorder.controls) {
@@ -3540,7 +3699,7 @@ write_checkpoint_trace_or_exit (const RecorderState &recorder, int error_code)
     if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
-            (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
+            compression_code (event.compression), event.outcome, event.error_class.c_str ()) < 0)
       WYL_TEST_EXIT(error_code);
   }
   if (dprintf (STDOUT_FILENO, "MARKER\tcheckpoint-main-sync-2\t%s\t2\n",
@@ -3552,7 +3711,7 @@ write_checkpoint_trace_or_exit (const RecorderState &recorder, int error_code)
 static int
 hold_writer_child (const gchar *sandbox)
 {
-  if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
+  if (g_strcmp0 (duckdb_library_version (), "v2.0.0") != 0)
     WYL_TEST_EXIT(100);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
@@ -3560,8 +3719,8 @@ hold_writer_child (const gchar *sandbox)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     const size_t ready_event_count = recorder->events.size ();
     guint main_write_locks = 0;
@@ -3598,7 +3757,7 @@ hold_writer_child (const gchar *sandbox)
 static int
 contend_writer_child (const gchar *sandbox)
 {
-  if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
+  if (g_strcmp0 (duckdb_library_version (), "v2.0.0") != 0)
     WYL_TEST_EXIT(106);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
@@ -3614,8 +3773,8 @@ contend_writer_child (const gchar *sandbox)
   try {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     opened = TRUE;
   } catch (const duckdb::IOException &exception) {
@@ -3647,9 +3806,9 @@ checkpoint_crash_child (const gchar *sandbox)
   auto recorder = std::make_shared<RecorderState> ();
   duckdb::DBConfig config;
   configure_test_database (&config, root, database, recorder, {
-      source_155_open_flags (129),
-      source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-      source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+      source_pinned_open_flags (129),
+      source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+      source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
   duckdb::DuckDB db (path_to_utf8 (database), &config);
   duckdb::Connection connection (db);
   recorder->checkpoint_main = path_to_utf8 (database);
@@ -3710,7 +3869,7 @@ parse_child_trace (const gchar *output, std::vector<Event> *events,
       g_assert_cmpint (outcome, >=, -1);
       g_assert_cmpint (outcome, <=, 1);
       events->push_back ({ fields[1], fields[2], (duckdb::idx_t) flags,
-          (duckdb::FileLockType) lock, (duckdb::FileCompressionType) compression,
+          (duckdb::FileLockType) lock, compression_from_code (compression),
           (int) outcome, fields[7] });
     } else if (g_strcmp0 (fields[0], "C") == 0) {
       g_assert_nonnull (fields[1]);
@@ -3729,7 +3888,7 @@ assert_read_only_live_wal_trace (const RecorderState &recorder,
     const fs::path &database)
 {
   assert_live_wal_read_only_exact_trace (recorder.events, database);
-  assert_source_155_platform_control_language (recorder.controls, 0, 1);
+  assert_source_pinned_platform_control_language (recorder.controls, 0, 1);
 }
 
 static void
@@ -3752,7 +3911,7 @@ assert_no_host_home_forwarding (const RecorderState &recorder, const fs::path &s
 static void
 test_recording_filesystem_home_directory_resolution (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-home-XXXXXX", &error);
   g_assert_no_error (error);
@@ -3769,8 +3928,8 @@ test_recording_filesystem_home_directory_resolution (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     auto filesystem = duckdb::make_uniq<RecordingFileSystem> (path_to_utf8 (root), recorder);
-    filesystem->AuthorizeOpenForScenario (source_155_open_flags (129));
-    filesystem->AuthorizeOpenForScenario (source_155_open_flags (2315,
+    filesystem->AuthorizeOpenForScenario (source_pinned_open_flags (129));
+    filesystem->AuthorizeOpenForScenario (source_pinned_open_flags (2315,
         duckdb::FileLockType::WRITE_LOCK));
     config.file_system = std::move (filesystem);
     config.options.maximum_threads = 1;
@@ -3786,8 +3945,8 @@ test_recording_filesystem_home_directory_resolution (void)
     duckdb::DBConfig config;
     auto filesystem = duckdb::make_uniq<RecordingFileSystem> (path_to_utf8 (root), recorder,
         RecordingFileSystem::HomeDirectoryBehavior::DENY);
-    filesystem->AuthorizeOpenForScenario (source_155_open_flags (129));
-    filesystem->AuthorizeOpenForScenario (source_155_open_flags (2315,
+    filesystem->AuthorizeOpenForScenario (source_pinned_open_flags (129));
+    filesystem->AuthorizeOpenForScenario (source_pinned_open_flags (2315,
         duckdb::FileLockType::WRITE_LOCK));
     config.file_system = std::move (filesystem);
     config.SetOption ("home_directory", duckdb::Value (path_to_utf8 (root)));
@@ -3805,8 +3964,8 @@ test_recording_filesystem_home_directory_resolution (void)
       duckdb::DBConfig config;
       auto filesystem = duckdb::make_uniq<RecordingFileSystem> (path_to_utf8 (root), recorder,
           RecordingFileSystem::HomeDirectoryBehavior::DENY);
-      filesystem->AuthorizeOpenForScenario (source_155_open_flags (129));
-      filesystem->AuthorizeOpenForScenario (source_155_open_flags (2315,
+      filesystem->AuthorizeOpenForScenario (source_pinned_open_flags (129));
+      filesystem->AuthorizeOpenForScenario (source_pinned_open_flags (2315,
           duckdb::FileLockType::WRITE_LOCK));
       config.file_system = std::move (filesystem);
       config.options.maximum_threads = 1;
@@ -3838,7 +3997,40 @@ assert_persistent_database_trace_language (const RecorderState &recorder,
   g_assert_cmpuint (event_baseline, ==, 0);
   assert_persistent_database_exact_trace (recorder.events, database);
   assert_no_host_home_forwarding (recorder, root);
-  assert_source_155_platform_control_language (recorder.controls, control_baseline, 2);
+  assert_source_pinned_platform_control_language (recorder.controls, control_baseline, 2);
+}
+
+/* DuckDB 2.0 names every temporary artifact after the process id and the
+ * per-process instance id that claimed the directory. */
+static long long
+current_process_id (void)
+{
+#ifdef G_OS_WIN32
+  return _getpid ();
+#else
+  return getpid ();
+#endif
+}
+
+static std::string
+temporary_owner_prefix_from_events (const std::vector<Event> &events,
+    const fs::path &temp)
+{
+  const std::regex owner_name ("^(duckdb_temp_[0-9]+_[0-9]+_)owner$");
+  std::string prefix;
+  for (const auto &event : events) {
+    if (event.operation != "open"
+        || path_from_utf8 (event.path).parent_path () != temp)
+      continue;
+    const std::string filename = path_to_utf8 (path_from_utf8 (event.path).filename ());
+    std::smatch match;
+    if (std::regex_match (filename, match, owner_name)) {
+      g_assert_true (prefix.empty ());
+      prefix = match[1].str ();
+    }
+  }
+  g_assert_false (prefix.empty ());
+  return prefix;
 }
 
 /* Consume the complete temporary-directory stream.  The exact number and
@@ -3847,18 +4039,23 @@ assert_persistent_database_trace_language (const RecorderState &recorder,
  * close, then retire.  Keeping that nondeterminism local prevents a broad
  * "under tmp" whitelist from hiding a new VFS token.
  *
- * Teardown of a pre-existing directory lists it, joins the directory with
- * every listed non-directory "duckdb_temp_" name, and only then removes them
- * all in one RemoveFiles call.  The suffix therefore holds one separator per
- * such entry, then one remove-many per entry in listing order.  How many
- * entries survive to the listing depends on which buffer classes the adaptive
- * compressor picked, so the count is taken from the listing, not fixed. */
+ * DuckDB 2.0 first claims an instance id by creating the empty owner marker
+ * duckdb_temp_<pid>_<instance>_owner (open 18, close), and names its
+ * children after that same prefix.  The first DuckDB lifecycle in this
+ * process to use a directory also lists it once to sweep files of dead
+ * processes.  Teardown lists the directory again and removes, in one
+ * RemoveFiles call and in listing order, exactly the non-marker entries that
+ * carry its own <pid>_<instance> prefix; anything else, including the
+ * broad "duckdb_temp_" prefix and 1.5.5-style names, is left alone.  The
+ * marker is retired last with TryRemoveFile.  How many own entries survive
+ * to the listing depends on which buffer classes the adaptive compressor
+ * picked, so that count is taken from the listing, not fixed. */
 static void
 assert_temporary_spill_trace_language (const RecorderState &recorder,
     const fs::path &root, const fs::path &database, const fs::path &temp,
     gboolean absent_root, gboolean seeded_foreign_entries)
 {
-  enum class FixedPath { ROOT, HOME, MAIN, WAL };
+  enum class FixedPath { MAIN, WAL };
   struct FixedToken {
     FixedPath path;
     const char *operation;
@@ -3870,56 +4067,55 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
    * Keep its non-spill prefix local and exact: the only intentionally dynamic
    * language below is the storage-child lifecycle itself. */
   static const std::vector<FixedToken> existing_prefix = {
-    { FixedPath::ROOT, "separator", 0, 0, -1 },
-    { FixedPath::HOME, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "open", 129, 0, -1 },
-    { FixedPath::MAIN, "read", 0, 0, -1 },
+    { FixedPath::MAIN, "size", 0, 0, -1 },
+    { FixedPath::MAIN, "read-at", 0, 0, -1 },
     { FixedPath::MAIN, "close", 129, 0, -1 },
     { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "canonicalize", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "open", 129, 0, -1 },
-    { FixedPath::MAIN, "read", 0, 0, -1 },
-    { FixedPath::MAIN, "close", 129, 0, -1 },
-    { FixedPath::MAIN, "exists", 0, 0, 1 },
-    { FixedPath::MAIN, "open", 2307, 2, -1 },
     { FixedPath::MAIN, "size", 0, 0, -1 },
     { FixedPath::MAIN, "read-at", 0, 0, -1 },
-    { FixedPath::MAIN, "read-at", 0, 0, -1 },
-    { FixedPath::MAIN, "read-at", 0, 0, -1 },
-    { FixedPath::MAIN, "read-at", 0, 0, -1 },
+    { FixedPath::MAIN, "close", 129, 0, -1 },
+    { FixedPath::MAIN, "exists", 0, 0, 1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "open", 2307, 2, -1 },
+    { FixedPath::WAL, "separator", 0, 0, -1 },
+    { FixedPath::WAL, "separator", 0, 0, -1 },
     { FixedPath::WAL, "open", 129, 0, -1 },
   };
   static const std::vector<FixedToken> absent_prefix = {
-    { FixedPath::ROOT, "separator", 0, 0, -1 },
-    { FixedPath::HOME, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "open", 129, 0, -1 },
     { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "canonicalize", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "open", 129, 0, -1 },
     { FixedPath::MAIN, "exists", 0, 0, 0 },
     { FixedPath::WAL, "try-remove", 0, 0, 0 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
+    { FixedPath::MAIN, "separator", 0, 0, -1 },
     { FixedPath::MAIN, "open", 2315, 2, -1 },
     { FixedPath::MAIN, "write-at", 0, 0, -1 },
     { FixedPath::MAIN, "write-at", 0, 0, -1 },
     { FixedPath::MAIN, "write-at", 0, 0, -1 },
     { FixedPath::MAIN, "sync", 0, 0, -1 },
   };
-  const std::string root_path = path_to_utf8 (root);
-  const std::string home = path_to_utf8 (root / ".duckdb");
   const std::string main = path_to_utf8 (database);
   const std::string wal = path_with_suffix (database, ".wal");
   const std::vector<FixedToken> &prefix = absent_root ? absent_prefix : existing_prefix;
   auto assert_fixed = [&] (const Event &event, const FixedToken &token) {
-    const std::string *expected_path = NULL;
-    switch (token.path) {
-    case FixedPath::ROOT: expected_path = &root_path; break;
-    case FixedPath::HOME: expected_path = &home; break;
-    case FixedPath::MAIN: expected_path = &main; break;
-    case FixedPath::WAL: expected_path = &wal; break;
-    }
-    g_assert_cmpstr (event.path.c_str (), ==, expected_path->c_str ());
+    const std::string &expected_path = token.path == FixedPath::MAIN ? main : wal;
+    g_assert_cmpstr (event.path.c_str (), ==, expected_path.c_str ());
     g_assert_cmpstr (event.operation.c_str (), ==, token.operation);
     g_assert_cmpuint (event.flags, ==, token.flags);
     g_assert_cmpuint ((unsigned) event.lock, ==, token.lock);
@@ -3929,22 +4125,36 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
   };
   const std::string temp_path = path_to_utf8 (temp);
   const std::string broad_prefix = path_to_utf8 (temp / "duckdb_temp_foreign");
+  const std::string legacy_storage = path_to_utf8 (temp / "duckdb_temp_storage_S32K-0.tmp");
   const std::string foreign = path_to_utf8 (temp / "foreign");
-  const std::regex storage_name ("^duckdb_temp_storage_(DEFAULT|S[0-9]+K)-[0-9]+\\.tmp$");
-  const std::regex block_name ("^duckdb_temp_block-[0-9]+\\.block$");
+  const std::string own_prefix = temporary_owner_prefix_from_events (recorder.events, temp);
+  g_assert_true (g_str_has_prefix (own_prefix.c_str (),
+      ("duckdb_temp_" + std::to_string (current_process_id ()) + "_").c_str ()));
+  const std::string owner = path_to_utf8 (temp / (own_prefix + "owner"));
+  const std::regex storage_name ("^" + own_prefix
+      + "storage_(DEFAULT|S(32|64|96|128|160|192|224)K)-[0-9]+\\.tmp$");
+  const std::regex block_name ("^" + own_prefix + "block-[0-9]+\\.block$");
+  /* A non-class own-prefix name that the workload never opens. */
+  const std::string unused_storage = path_to_utf8 (temp / (own_prefix + "storage_S16K-0.tmp"));
   struct ChildState { gboolean live = FALSE; gboolean retired = FALSE; guint opens = 0; guint closes = 0; };
   std::map<std::string, ChildState> storage;
-  gboolean saw_main_close = FALSE, suffix_started = FALSE, separator_pending = FALSE;
-  gboolean saw_directory_exists = FALSE, saw_create = FALSE, saw_remove_directory = FALSE;
+  enum class OwnerState { ABSENT, OPEN, CLAIMED, RETIRED };
+  OwnerState owner_state = OwnerState::ABSENT;
+  guint directory_exists = 0, separators_pending = 0;
+  std::string separator_path;
+  gboolean saw_main_close = FALSE, suffix_started = FALSE;
+  gboolean saw_create = FALSE, saw_remove_directory = FALSE;
   gboolean saw_storage_open = FALSE, saw_storage_truncate = FALSE, saw_storage_remove = FALSE;
   gboolean saw_storage_write = FALSE;
-  gboolean saw_block = FALSE, saw_list = FALSE, list_active = FALSE, saw_list_complete = FALSE;
+  gboolean saw_block = FALSE, list_active = FALSE;
+  guint sweep_lists = 0, teardown_lists = 0;
   gboolean list_callback_pending = FALSE;
   std::string pending_list_callback_path;
   guint pending_list_callback_type = 0;
-  gboolean saw_foreign_entry = FALSE, saw_broad_entry = FALSE, saw_broad_remove = FALSE;
+  gboolean saw_foreign_entry = FALSE, saw_broad_entry = FALSE, saw_legacy_entry = FALSE;
+  gboolean saw_unused_entry = FALSE, saw_owner_entry = FALSE;
   std::vector<std::string> cleanup_targets;
-  size_t cleanup_separators = 0, cleanup_removed = 0;
+  size_t cleanup_removed = 0;
 
   g_assert_cmpuint (recorder.events.size (), >, 0);
   g_assert_cmpuint (recorder.events.size (), >, prefix.size ());
@@ -3962,7 +4172,7 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
       const FixedToken suffix = { FixedPath::MAIN, "close",
           absent_root ? 2315u : 2307u, 2, -1 };
       g_assert_false (suffix_started);
-      g_assert_false (separator_pending);
+      g_assert_cmpuint (separators_pending, ==, 0);
       assert_fixed (event, suffix);
       saw_main_close = suffix_started = TRUE;
       continue;
@@ -3970,45 +4180,44 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
     g_assert_false (event.path == wal || event.path == path_with_suffix (
         path_from_utf8 (wal), ".checkpoint")
         || is_expected_home_metadata_path (event.path, database));
+    g_assert_true (event.compression == duckdb::FileCompressionType::UNCOMPRESSED);
+    g_assert_true (event.error_class.empty ());
 
     if (event.path == temp_path) {
       g_assert_cmpuint (event.flags, ==, 0);
       g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
-      g_assert_true (event.compression == duckdb::FileCompressionType::UNCOMPRESSED);
-      g_assert_true (event.error_class.empty ());
+      g_assert_cmpuint (separators_pending, ==, 0);
       if (event.operation == "directory-exists") {
         g_assert_false (suffix_started);
-        g_assert_false (saw_directory_exists);
+        g_assert_true (owner_state == OwnerState::ABSENT);
         g_assert_cmpint (event.outcome, ==, absent_root ? 0 : 1);
-        saw_directory_exists = TRUE;
+        directory_exists++;
       } else if (event.operation == "create-directory") {
         g_assert_false (suffix_started);
-        g_assert_true (absent_root && saw_directory_exists && !saw_create);
+        g_assert_true (absent_root && !saw_create);
+        g_assert_cmpuint (directory_exists, ==, 2);
         g_assert_cmpint (event.outcome, ==, 1);
         saw_create = TRUE;
-      } else if (event.operation == "separator") {
-        g_assert_false (separator_pending);
-        g_assert_true (saw_directory_exists);
+      } else if (event.operation == "list") {
+        g_assert_true (owner_state == OwnerState::CLAIMED && !list_active);
         g_assert_cmpint (event.outcome, ==, -1);
         if (suffix_started) {
-          g_assert_true (saw_list_complete && !list_active);
-          g_assert_cmpuint (cleanup_removed, ==, 0);
-          g_assert_cmpuint (cleanup_separators, <, cleanup_targets.size ());
-          cleanup_separators++;
+          g_assert_cmpuint (teardown_lists, ==, 0);
+          teardown_lists++;
         } else {
-          separator_pending = TRUE;
+          g_assert_false (saw_storage_open);
+          g_assert_cmpuint (sweep_lists, ==, 0);
+          sweep_lists++;
         }
-      } else if (event.operation == "list") {
-        g_assert_true (seeded_foreign_entries && suffix_started && !list_active);
-        g_assert_cmpint (event.outcome, ==, -1);
-        saw_list = list_active = TRUE;
+        list_active = TRUE;
       } else if (event.operation == "list-complete") {
-        g_assert_true (suffix_started && list_active && !list_callback_pending);
+        g_assert_true (list_active && !list_callback_pending);
         g_assert_cmpint (event.outcome, ==, 1);
         list_active = FALSE;
-        saw_list_complete = TRUE;
-      } else if (event.operation == "remove-directory") {
-        g_assert_true (absent_root && saw_main_close && !list_active && !separator_pending);
+      } else if (event.operation == "remove-directory-single") {
+        g_assert_true (absent_root && saw_main_close && !list_active);
+        g_assert_true (owner_state == OwnerState::RETIRED);
+        g_assert_false (saw_remove_directory);
         g_assert_cmpint (event.outcome, ==, 1);
         saw_remove_directory = TRUE;
       } else {
@@ -4018,39 +4227,48 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
     }
 
     /* The only children admitted by this scenario are the source-pinned
-     * storage/block grammar plus the two deliberately seeded boundary names. */
-    g_assert_true (path_is_at_or_below (event.path, temp));
-    if (event.operation == "open" || event.operation == "close")
-      g_assert_cmpuint (event.flags, ==, 11);
-    else if (event.operation == "list-entry" || event.operation == "list-callback-complete")
-      g_assert_cmpuint (event.flags, <=, 1);
-    else
+     * owner/storage/block grammar plus the deliberately seeded names. */
+    g_assert_true (path.parent_path () == temp);
+    g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
+    if (event.operation == "separator") {
+      g_assert_false (suffix_started);
       g_assert_cmpuint (event.flags, ==, 0);
-    g_assert_true (event.compression == duckdb::FileCompressionType::UNCOMPRESSED);
-    g_assert_true (event.error_class.empty ());
+      g_assert_cmpint (event.outcome, ==, -1);
+      g_assert_cmpuint (separators_pending, <, 2);
+      g_assert_true (separators_pending == 0 || separator_path == event.path);
+      separator_path = event.path;
+      separators_pending++;
+      continue;
+    }
     if (event.operation == "list-entry") {
-      g_assert_false (separator_pending);
-      g_assert_true (suffix_started && list_active && !list_callback_pending);
+      g_assert_cmpuint (separators_pending, ==, 0);
+      g_assert_true (list_active && !list_callback_pending);
+      g_assert_cmpuint (event.flags, ==, 0);
       g_assert_cmpint (event.outcome, ==, 0);
-      if (event.path == foreign) {
-        g_assert_true (seeded_foreign_entries);
-        saw_foreign_entry = TRUE;
-      } else if (event.path == broad_prefix) {
-        g_assert_true (seeded_foreign_entries);
-        saw_broad_entry = TRUE;
+      if (event.path == owner) {
+        saw_owner_entry = TRUE;
       } else {
-        g_assert_true (std::regex_match (filename, storage_name));
+        g_assert_true (suffix_started && seeded_foreign_entries);
+        if (event.path == foreign)
+          saw_foreign_entry = TRUE;
+        else if (event.path == broad_prefix)
+          saw_broad_entry = TRUE;
+        else if (event.path == legacy_storage)
+          saw_legacy_entry = TRUE;
+        else if (event.path == unused_storage)
+          saw_unused_entry = TRUE;
+        else
+          g_assert_true (std::regex_match (filename, storage_name));
+        if (g_str_has_prefix (filename.c_str (), own_prefix.c_str ()))
+          cleanup_targets.push_back (event.path);
       }
-      if (event.flags == 0 && g_str_has_prefix (filename.c_str (), "duckdb_temp_"))
-        cleanup_targets.push_back (event.path);
       pending_list_callback_path = event.path;
       pending_list_callback_type = event.flags;
       list_callback_pending = TRUE;
       continue;
     }
     if (event.operation == "list-callback-complete") {
-      g_assert_false (separator_pending);
-      g_assert_true (suffix_started && list_active && list_callback_pending);
+      g_assert_true (list_active && list_callback_pending);
       g_assert_cmpstr (event.path.c_str (), ==, pending_list_callback_path.c_str ());
       g_assert_cmpuint (event.flags, ==, pending_list_callback_type);
       g_assert_cmpint (event.outcome, ==, 1);
@@ -4058,62 +4276,93 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
       continue;
     }
     if (event.operation == "remove-many") {
-      /* This observes DuckDB's broad "duckdb_temp_" cleanup prefix; it is
-       * evidence, not a capability grant for #629's bounded temporary
+      /* DuckDB 2.0 removes only entries carrying its own owner prefix.  This
+       * is evidence, not a capability grant for #629's bounded temporary
        * authority. */
-      g_assert_true (seeded_foreign_entries && suffix_started && saw_list_complete);
-      g_assert_false (separator_pending);
-      g_assert_cmpuint (cleanup_separators, ==, cleanup_targets.size ());
+      g_assert_true (seeded_foreign_entries && suffix_started);
+      g_assert_true (teardown_lists == 1 && !list_active);
+      g_assert_true (owner_state == OwnerState::CLAIMED);
+      g_assert_cmpuint (event.flags, ==, 0);
       g_assert_cmpuint (cleanup_removed, <, cleanup_targets.size ());
       g_assert_cmpstr (event.path.c_str (), ==,
           cleanup_targets[cleanup_removed].c_str ());
       g_assert_cmpint (event.outcome, ==, -1);
-      saw_broad_remove = saw_broad_remove || event.path == broad_prefix;
       cleanup_removed++;
       continue;
     }
+    if (event.path == owner) {
+      g_assert_cmpuint (event.flags, ==, event.operation == "open"
+          || event.operation == "close" ? 18 : 0);
+      if (event.operation == "open") {
+        g_assert_true (owner_state == OwnerState::ABSENT);
+        g_assert_cmpuint (directory_exists, ==, absent_root ? 2 : 1);
+        g_assert_true (saw_create == absent_root);
+        g_assert_cmpuint (separators_pending, ==, 2);
+        g_assert_cmpstr (separator_path.c_str (), ==, event.path.c_str ());
+        g_assert_cmpint (event.outcome, ==, -1);
+        separators_pending = 0;
+        owner_state = OwnerState::OPEN;
+      } else if (event.operation == "close") {
+        g_assert_true (owner_state == OwnerState::OPEN);
+        g_assert_cmpint (event.outcome, ==, -1);
+        owner_state = OwnerState::CLAIMED;
+      } else {
+        g_assert_cmpstr (event.operation.c_str (), ==, "try-remove");
+        g_assert_true (owner_state == OwnerState::CLAIMED);
+        g_assert_true (suffix_started && teardown_lists == 1 && !list_active);
+        g_assert_cmpuint (cleanup_removed, ==, cleanup_targets.size ());
+        g_assert_cmpint (event.outcome, ==, 1);
+        owner_state = OwnerState::RETIRED;
+      }
+      continue;
+    }
     if (std::regex_match (filename, block_name)) {
+      /* A destroyed spilled buffer that is not in a shared storage file has
+       * its .block name probed for existence.  This is the only admitted
+       * block-name token.  DuckDB 2.0 asks GetStatsIfExists here instead,
+       * whose FileSystem default opens the name with READ|NULL_IF_NOT_EXISTS
+       * (129), a tuple the bounded filesystem never accepts for a temporary
+       * child. */
       g_assert_false (suffix_started);
-      g_assert_true (separator_pending);
+      g_assert_cmpuint (separators_pending, ==, 0);
       g_assert_cmpstr (event.operation.c_str (), ==, "exists");
+      g_assert_cmpuint (event.flags, ==, 0);
       g_assert_cmpint (event.outcome, ==, 0);
-      g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
       saw_block = TRUE;
-      separator_pending = FALSE;
       continue;
     }
     g_assert_true (std::regex_match (filename, storage_name));
     g_assert_false (suffix_started);
+    g_assert_true (owner_state == OwnerState::CLAIMED);
     auto &state = storage[filename];
+    if (event.operation == "open" || event.operation == "close")
+      g_assert_cmpuint (event.flags, ==, 11);
+    else
+      g_assert_cmpuint (event.flags, ==, 0);
+    g_assert_cmpint (event.outcome, ==, -1);
+    g_assert_cmpuint (separators_pending, ==, event.operation == "open" ? 2 : 0);
+    if (event.operation == "open")
+      g_assert_cmpstr (separator_path.c_str (), ==, event.path.c_str ());
+    separators_pending = 0;
     if (event.operation == "open") {
-      g_assert_true (separator_pending);
       if (state.retired)
         state = {};
       g_assert_false (state.live);
-      g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
-      g_assert_cmpint (event.outcome, ==, -1);
       state.live = TRUE;
       state.opens++;
       saw_storage_open = TRUE;
-      separator_pending = FALSE;
     } else if (event.operation == "close") {
-      g_assert_false (separator_pending);
       g_assert_false (state.retired);
       g_assert_true (state.live);
-      g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
-      g_assert_cmpint (event.outcome, ==, -1);
       state.live = FALSE;
       state.closes++;
     } else if (event.operation == "remove") {
-      g_assert_false (separator_pending);
       g_assert_false (state.retired);
       g_assert_false (state.live);
       g_assert_cmpuint (state.closes, >, 0);
-      g_assert_cmpint (event.outcome, ==, -1);
       state.retired = TRUE;
       saw_storage_remove = TRUE;
     } else {
-      g_assert_false (separator_pending);
       g_assert_false (state.retired);
       g_assert_true (event.operation == "read" || event.operation == "read-at"
           || event.operation == "write" || event.operation == "write-at"
@@ -4121,15 +4370,14 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
           || event.operation == "seek" || event.operation == "seek-position"
           || event.operation == "reset" || event.operation == "truncate");
       g_assert_true (state.live);
-      g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
-      g_assert_cmpint (event.outcome, ==, -1);
       saw_storage_truncate = saw_storage_truncate || event.operation == "truncate";
       saw_storage_write = saw_storage_write || event.operation == "write"
           || event.operation == "write-at";
     }
   }
-  g_assert_true (saw_main_close && saw_directory_exists);
-  g_assert_false (separator_pending);
+  g_assert_true (saw_main_close);
+  g_assert_cmpuint (directory_exists, ==, absent_root ? 2 : 1);
+  g_assert_cmpuint (separators_pending, ==, 0);
   /* The storage child is opened, has its backing extended, and is removed.
    * POSIX DuckDB extends the spill file with truncate(); the Windows build
    * extends it with write-at and never emits a truncate. Require the extend
@@ -4140,14 +4388,20 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
 #ifndef G_OS_WIN32
   g_assert_true (saw_storage_truncate);
 #endif
+  g_assert_true (owner_state == OwnerState::RETIRED && saw_owner_entry);
   g_assert_false (list_active);
   g_assert_false (list_callback_pending);
-  g_assert_cmpuint (cleanup_separators, ==, cleanup_targets.size ());
+  g_assert_cmpuint (teardown_lists, ==, 1);
+  /* Only the directory's first DuckDB lifecycle in this process sweeps it;
+   * the seeded scenario's lifecycle is its second. */
+  g_assert_cmpuint (sweep_lists, ==, seeded_foreign_entries ? 0 : 1);
   g_assert_cmpuint (cleanup_removed, ==, cleanup_targets.size ());
   if (seeded_foreign_entries)
-    g_assert_true (saw_list && saw_list_complete && saw_foreign_entry && saw_broad_entry && saw_broad_remove);
+    g_assert_true (saw_foreign_entry && saw_broad_entry && saw_legacy_entry
+        && saw_unused_entry && cleanup_removed > 0);
   else
-    g_assert_false (saw_list || saw_list_complete || saw_foreign_entry || saw_broad_entry || saw_broad_remove);
+    g_assert_false (saw_foreign_entry || saw_broad_entry || saw_legacy_entry
+        || saw_unused_entry || cleanup_removed > 0);
   g_assert_true (absent_root ? (saw_create && saw_remove_directory) : (!saw_create && !saw_remove_directory));
   for (const auto &[name, state] : storage) {
     (void) name;
@@ -4156,13 +4410,13 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
     g_assert_true (state.retired);
   }
   assert_no_host_home_forwarding (recorder, root);
-  assert_source_155_platform_control_language (recorder.controls, 0, 1);
+  assert_source_pinned_platform_control_language (recorder.controls, 0, 1);
 }
 
 static void
 test_recording_filesystem_persistent_database (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-recording-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4264,9 +4518,9 @@ test_recording_filesystem_persistent_database (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
@@ -4275,14 +4529,14 @@ test_recording_filesystem_persistent_database (void)
   {
     duckdb::DBConfig reopen_config;
     configure_test_database (&reopen_config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &reopen_config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("SELECT value FROM facts");
     g_assert_true (!result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 1);
-    assert_value_text (result->GetValue (0, 0), "42");
+    assert_value_text (result->Collection ().GetValue (0, 0), "42");
   }
   g_assert_cmpuint (recorder->rejected, ==, rejected_baseline);
   g_assert_cmpuint (recorder->subsystem_attempts, ==, subsystem_baseline);
@@ -4293,7 +4547,7 @@ test_recording_filesystem_persistent_database (void)
       recorder->controls.end ());
   assert_persistent_database_trace_language (scenario_recorder, 0, 0, root, database);
   assert_trace_fixture ("persistent-db", scenario_recorder.events, root,
-      "84302dc24ec80b11b3a1ad76afb9cc2de77d3cd0afa7d6d47d96b40c3ab80982");
+      "7174e2a39b1edfc23b5e4109bbf009a95b71996be9543ed6206f5287614d925d");
 
   remove_tree (sandbox);
 }
@@ -4301,7 +4555,7 @@ test_recording_filesystem_persistent_database (void)
 static void
 test_recording_filesystem_temporary_spill_cleanup (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-temp-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4314,12 +4568,13 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (11), source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (11), source_pinned_open_flags (18),
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
-    auto setup = connection.Query ("SET memory_limit='20MB'; SET temp_directory='" + path_to_utf8 (temp)
+    auto setup = connection.Query ("SET memory_limit='32MB'; SET temp_directory='" + path_to_utf8 (temp)
         + "';");
     g_assert_false (setup->HasError ());
     auto result = connection.Query (
@@ -4327,23 +4582,39 @@ test_recording_filesystem_temporary_spill_cleanup (void)
     g_assert_false (result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 5000000);
   }
+  /* DuckDB 2.0 hands out instance ids from one process-wide counter, and
+   * nothing else claims one before the next lifecycle below, so that
+   * lifecycle owns the prefix of the next instance id. */
+  const std::string first_prefix =
+      temporary_owner_prefix_from_events (recorder->events, temp);
+  const size_t instance_start = first_prefix.rfind ('_', first_prefix.size () - 2) + 1;
+  const unsigned long long first_instance = std::stoull (first_prefix.substr (
+      instance_start, first_prefix.size () - 1 - instance_start));
+  const std::string own_prefix = first_prefix.substr (0, instance_start)
+      + std::to_string (first_instance + 1) + "_";
   recorder->events.clear ();
   recorder->controls.clear ();
-  const fs::path stale_storage = temp / "duckdb_temp_storage_S32K-0.tmp";
-  /* DuckDB 1.5.5 has no S16K buffer class, so the workload never opens or
-   * retires this name and teardown always finds it in the listing.  The
-   * S32K seed above survives only when the adaptive compressor never picks
-   * that class, which is timing dependent. */
-  const fs::path unused_storage = temp / "duckdb_temp_storage_S16K-0.tmp";
+  const fs::path stale_storage = temp / (own_prefix + "storage_S32K-0.tmp");
+  /* DuckDB 2.0 has no S16K buffer class, so the workload never opens or
+   * retires this own-prefix name and teardown always finds and removes it.
+   * The S32K seed above survives to the listing only when the adaptive
+   * compressor never picks that class, which is timing dependent.  The
+   * 1.5.5-style name and the broad "duckdb_temp_" prefix carry no owner, so
+   * DuckDB 2.0 lists but never removes them. */
+  const fs::path unused_storage = temp / (own_prefix + "storage_S16K-0.tmp");
+  const fs::path legacy_storage = temp / "duckdb_temp_storage_S32K-0.tmp";
   const fs::path broad_prefix = temp / "duckdb_temp_foreign";
   const fs::path foreign = temp / "foreign";
   const std::string stale_storage_utf8 = path_to_utf8 (stale_storage);
   const std::string unused_storage_utf8 = path_to_utf8 (unused_storage);
+  const std::string legacy_storage_utf8 = path_to_utf8 (legacy_storage);
   const std::string broad_prefix_utf8 = path_to_utf8 (broad_prefix);
   const std::string foreign_utf8 = path_to_utf8 (foreign);
   g_assert_true (g_file_set_contents (stale_storage_utf8.c_str (), "stale", -1, &error));
   g_assert_no_error (error);
   g_assert_true (g_file_set_contents (unused_storage_utf8.c_str (), "stale", -1, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_file_set_contents (legacy_storage_utf8.c_str (), "stale", -1, &error));
   g_assert_no_error (error);
   g_assert_true (g_file_set_contents (broad_prefix_utf8.c_str (), "foreign", -1, &error));
   g_assert_no_error (error);
@@ -4353,12 +4624,13 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (11), source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (11), source_pinned_open_flags (18),
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
-    auto setup = connection.Query ("SET memory_limit='20MB'; SET temp_directory='" + path_to_utf8 (temp)
+    auto setup = connection.Query ("SET memory_limit='32MB'; SET temp_directory='" + path_to_utf8 (temp)
         + "';");
     g_assert_false (setup->HasError ());
     auto result = connection.Query (
@@ -4374,7 +4646,8 @@ test_recording_filesystem_temporary_spill_cleanup (void)
    * directory empty only after all injected-VFS owners have been destroyed. */
   g_assert_false (fs::exists (stale_storage));
   g_assert_false (fs::exists (unused_storage));
-  g_assert_false (fs::exists (broad_prefix));
+  g_assert_true (fs::exists (legacy_storage));
+  g_assert_true (fs::exists (broad_prefix));
   g_assert_true (fs::exists (foreign));
   remove_tree (sandbox);
 }
@@ -4382,7 +4655,7 @@ test_recording_filesystem_temporary_spill_cleanup (void)
 static void
 test_recording_filesystem_temporary_spill_absent_root (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-temp-absent-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4395,12 +4668,13 @@ test_recording_filesystem_temporary_spill_absent_root (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (11), source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (11), source_pinned_open_flags (18),
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
-    auto setup = connection.Query ("SET memory_limit='20MB'; SET temp_directory='" + path_to_utf8 (temp)
+    auto setup = connection.Query ("SET memory_limit='32MB'; SET temp_directory='" + path_to_utf8 (temp)
         + "';");
     g_assert_false (setup->HasError ());
     auto result = connection.Query (
@@ -4453,7 +4727,7 @@ assert_list_callback_trace_language (const std::vector<Event> &events,
 static void
 test_recording_filesystem_list_callback_trace (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-list-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4651,7 +4925,7 @@ test_recording_filesystem_utf8_path_boundary (void)
 static void
 test_recording_filesystem_utf8_lifecycle (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-utf8-life-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4673,12 +4947,13 @@ test_recording_filesystem_utf8_lifecycle (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (11), source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (11), source_pinned_open_flags (18),
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (database_utf8, &config);
     duckdb::Connection connection (db);
-    auto setup = connection.Query ("SET memory_limit='20MB'; SET temp_directory='" + temp_utf8
+    auto setup = connection.Query ("SET memory_limit='32MB'; SET temp_directory='" + temp_utf8
         + "'; CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42);");
     g_assert_false (setup->HasError ());
     auto result = connection.Query (
@@ -4739,7 +5014,7 @@ assert_wal_crash_writer_trace_language (const std::vector<Event> &events,
     const std::vector<ControlEvent> &controls, const fs::path &database)
 {
   assert_crash_writer_exact_trace (events, database);
-  assert_source_155_platform_control_language (controls, 0, 1);
+  assert_source_pinned_platform_control_language (controls, 0, 1);
 }
 
 static void
@@ -4747,7 +5022,7 @@ assert_wal_recovery_trace_language (const RecorderState &recorder,
     const fs::path &database)
 {
   assert_wal_recovery_exact_trace (recorder.events, database);
-  assert_source_155_platform_control_language (recorder.controls, 0, 1);
+  assert_source_pinned_platform_control_language (recorder.controls, 0, 1);
 }
 
 static void
@@ -4758,7 +5033,7 @@ assert_writer_contender_full_stream (const gchar *stream,
   std::vector<ControlEvent> controls;
   parse_child_trace (stream, &events, &controls);
   assert_writer_contender_exact_trace (events, database);
-  assert_source_155_platform_control_language (controls, 0, 1);
+  assert_source_pinned_platform_control_language (controls, 0, 1);
 }
 
 static void
@@ -4771,13 +5046,13 @@ assert_writer_holder_full_stream (const gchar *stream,
   std::vector<ControlEvent> controls;
   parse_child_trace (stream + sizeof ready - 1, &events, &controls);
   assert_writer_holder_exact_trace (events, database);
-  assert_source_155_platform_control_language (controls, 0, 1);
+  assert_source_pinned_platform_control_language (controls, 0, 1);
 }
 
 static void
 test_recording_filesystem_live_wal_read_only_recovery (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-live-wal-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4789,9 +5064,9 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
@@ -4829,8 +5104,8 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   try {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, read_only_recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2433, duckdb::FileLockType::READ_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2433, duckdb::FileLockType::READ_LOCK) });
     config.options.access_mode = duckdb::AccessMode::READ_ONLY;
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
@@ -4856,16 +5131,16 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recovery_recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 2);
-    assert_value_text (result->GetValue (0, 0), "42");
-    assert_value_text (result->GetValue (0, 1), "99");
+    assert_value_text (result->Collection ().GetValue (0, 0), "42");
+    assert_value_text (result->Collection ().GetValue (0, 1), "99");
   }
   assert_wal_recovery_trace_language (*recovery_recorder, database);
   g_assert_false (fs::exists (wal));
@@ -4877,7 +5152,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
 static void
 test_recording_filesystem_rw_writer_contention (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-writer-lock-XXXXXX", &error);
   g_assert_no_error (error);
@@ -4888,9 +5163,9 @@ test_recording_filesystem_rw_writer_contention (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
@@ -4951,9 +5226,9 @@ test_recording_filesystem_rw_writer_contention (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, restored_recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto write = connection.Query ("INSERT INTO facts VALUES (77)");
@@ -4963,7 +5238,7 @@ test_recording_filesystem_rw_writer_contention (void)
     g_assert_cmpuint (read->RowCount (), ==, 1);
   }
   assert_writer_restored_exact_trace (restored_recorder->events, database);
-  assert_source_155_platform_control_language (restored_recorder->controls, 0, 1);
+  assert_source_pinned_platform_control_language (restored_recorder->controls, 0, 1);
   remove_tree (sandbox);
 }
 
@@ -5007,14 +5282,14 @@ assert_transaction_values (duckdb::Connection &connection,
   g_assert_cmpuint (result->RowCount (), ==, expected.size ());
   duckdb::idx_t row = 0;
   for (const auto *value : expected)
-    assert_value_text (result->GetValue (0, row++), value);
+    assert_value_text (result->Collection ().GetValue (0, row++), value);
 }
 
 static void
 assert_transaction_control_failure (const char *control,
     const char *phase, const char *candidate)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox =
       g_dir_make_tmp ("wyl-duckdb-transaction-control-XXXXXX", &error);
@@ -5061,18 +5336,19 @@ assert_transaction_control_failure (const char *control,
     g_assert_cmpuint (failure.injected_count, ==, 1);
     g_assert_cmpstr (failure.injected_phase.c_str (), ==, phase);
 
+    /* DuckDB 2.0 aborts the transaction a failed transaction statement
+     * belongs to: every later statement on it except ROLLBACK is refused
+     * (1.5.5 left it usable).  The candidate stays invisible to others. */
     auto select_one = subject.Query ("SELECT 1;");
-    g_assert_false (select_one->HasError ());
-    g_assert_cmpuint (select_one->RowCount (), ==, 1);
-    assert_value_text (select_one->GetValue (0, 0), "1");
-    assert_transaction_values (subject, { "42", candidate });
+    g_assert_true (select_one->HasError ());
+    g_assert_true (select_one->GetError ().find (
+        "Current transaction is aborted") != std::string::npos);
     assert_transaction_values (observer, { "42" });
 
     auto nested_begin = subject.Query ("BEGIN TRANSACTION;");
     g_assert_true (nested_begin->HasError ());
     const std::string nested_error = nested_begin->GetError ();
-    g_assert_true (nested_error.find (
-        "cannot start a transaction within a transaction")
+    g_assert_true (nested_error.find ("Current transaction is aborted")
         != std::string::npos);
 
     auto cleanup = subject.Query ("ROLLBACK;");
@@ -5182,7 +5458,7 @@ count_after_wal_start_callback (const char *phase, void *context)
 static void
 test_recording_filesystem_after_wal_start_no_wal (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox =
       g_dir_make_tmp ("wyl-duckdb-no-wal-seam-XXXXXX", &error);
@@ -5194,9 +5470,9 @@ test_recording_filesystem_after_wal_start_no_wal (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto create = connection.Query ("CREATE TABLE facts(value INTEGER)");
@@ -5208,9 +5484,9 @@ test_recording_filesystem_after_wal_start_no_wal (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.test_after_wal_start = count_after_wal_start_callback;
     config.options.test_after_wal_start_context = &callback_count;
     duckdb::DuckDB db (path_to_utf8 (database), &config);
@@ -5225,7 +5501,7 @@ test_recording_filesystem_after_wal_start_no_wal (void)
 static void
 test_recording_filesystem_after_wal_start_rendezvous (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox =
       g_dir_make_tmp ("wyl-duckdb-walstart-seam-XXXXXX", &error);
@@ -5239,9 +5515,9 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto create = connection.Query (
@@ -5260,9 +5536,9 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.checkpoint_on_shutdown = false;
     config.SetOptionByName ("debug_checkpoint_abort",
         duckdb::Value ("BEFORE_HEADER"));
@@ -5343,9 +5619,13 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
     if (event.path == checkpoint)
       checkpoint_events.push_back (&event);
   }
+  /* DuckDB 2.0 joins the sidecar path before opening it, so the
+   * checkpoint-WAL stream starts with two PathSeparator probes. */
   const std::vector<const char *> expected_operations {
-    "open", "size", "size", "size", "size", "write", "sync", "size"
+    "separator", "separator", "open", "size", "size", "size", "size",
+    "write", "sync", "size"
   };
+  const size_t open_index = 2;
   g_assert_cmpuint (checkpoint_events.size (), ==,
       expected_operations.size ());
   for (size_t i = 0; i < checkpoint_events.size (); i++) {
@@ -5353,8 +5633,8 @@ test_recording_filesystem_after_wal_start_rendezvous (void)
     g_assert_cmpstr (event->operation.c_str (), ==,
         expected_operations[i]);
     g_assert_cmpint (event->outcome, ==, -1);
-    g_assert_cmpuint (event->flags, ==, i == 0 ? 2090 : 0);
-    g_assert_true (event->lock == (i == 0
+    g_assert_cmpuint (event->flags, ==, i == open_index ? 2090 : 0);
+    g_assert_true (event->lock == (i == open_index
         ? duckdb::FileLockType::WRITE_LOCK
         : duckdb::FileLockType::NO_LOCK));
     g_assert_true (
@@ -5372,9 +5652,9 @@ create_fixed_wal_fixture (const fs::path &root, const fs::path &database)
   auto recorder = std::make_shared<RecorderState> ();
   duckdb::DBConfig config;
   configure_test_database (&config, root, database, recorder, {
-      source_155_open_flags (129),
-      source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-      source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+      source_pinned_open_flags (129),
+      source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+      source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
   duckdb::DuckDB db (path_to_utf8 (database), &config);
   duckdb::Connection connection (db);
   auto result = connection.Query (
@@ -5468,7 +5748,7 @@ dump_handle_lifecycle_if_requested (
         (unsigned long long) event.sequence, event.operation.c_str (),
         (unsigned long long) event.handle_id, (unsigned) event.role,
         event.path.c_str (), (unsigned long long) event.flags,
-        (unsigned) event.lock, (unsigned) event.compression,
+        (unsigned) event.lock, compression_code (event.compression),
         (unsigned) event.caching, event.outcome);
   }
   for (const auto &move : recorder->move_snapshots) {
@@ -5479,7 +5759,7 @@ dump_handle_lifecycle_if_requested (
       g_printerr ("LIVE\t%llu\t%u\t%s\t%llu\t%u\t%u\t%u\t%u\t%s\n",
           (unsigned long long) handle.handle_id, (unsigned) handle.role,
           handle.path.c_str (), (unsigned long long) handle.flags,
-          (unsigned) handle.lock, (unsigned) handle.compression,
+          (unsigned) handle.lock, compression_code (handle.compression),
           (unsigned) handle.caching, (unsigned) handle.state,
           handle.active_operation.c_str ());
     }
@@ -5550,7 +5830,7 @@ assert_fixed_wal_reopen_exact_grammar (
     lifecycle = recorder->handle_lifecycle;
   }
   assert_fixed_wal_reopen_event_exact_trace (recorder->events, database);
-  g_assert_cmpuint (lifecycle.size (), ==, 46);
+  g_assert_cmpuint (lifecycle.size (), ==, 45);
   const auto main_ids = successful_open_ids (
       lifecycle, FixedHandleRole::MAIN, main);
   const auto wal_ids = successful_open_ids (
@@ -5559,16 +5839,15 @@ assert_fixed_wal_reopen_exact_grammar (
   g_assert_cmpuint (wal_ids.size (), ==, 2);
   assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
       main, 2307, duckdb::FileLockType::WRITE_LOCK,
-      { "open", "size", "read-at", "read-at", "read-at", "read-at",
-        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
-        "on-disk", "on-disk", "on-disk", "write-at", "write-at", "sync",
-        "write-at", "sync", "close", "destroy" });
+      { "open", "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+        "on-disk", "on-disk", "on-disk", "on-disk", "on-disk", "write-at",
+        "write-at", "sync", "write-at", "sync", "size", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
       wal, 129, duckdb::FileLockType::NO_LOCK,
       { "open", "size", "read", "reset", "read", "close", "destroy" });
@@ -5594,7 +5873,7 @@ assert_incomplete_recovery_reopen_exact_grammar (
   }
   assert_incomplete_recovery_reopen_event_exact_trace (
       recorder->events, database);
-  g_assert_cmpuint (lifecycle.size (), ==, 45);
+  g_assert_cmpuint (lifecycle.size (), ==, 44);
   const auto main_ids = successful_open_ids (
       lifecycle, FixedHandleRole::MAIN, main);
   const auto wal_ids = successful_open_ids (
@@ -5603,16 +5882,15 @@ assert_incomplete_recovery_reopen_exact_grammar (
   g_assert_cmpuint (wal_ids.size (), ==, 2);
   assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
       main, 2307, duckdb::FileLockType::WRITE_LOCK,
-      { "open", "size", "read-at", "read-at", "read-at", "read-at",
-        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
-        "on-disk", "on-disk", "write-at", "write-at", "sync", "write-at",
-        "sync", "close", "destroy" });
+      { "open", "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+        "on-disk", "on-disk", "on-disk", "on-disk", "write-at", "write-at",
+        "sync", "write-at", "sync", "size", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
       wal, 129, duckdb::FileLockType::NO_LOCK,
       { "open", "size", "read", "reset", "read", "close", "destroy" });
@@ -5645,7 +5923,7 @@ assert_concurrent_checkpoint_exact_grammar (
     overlaps = recorder->move_overlap_rejections;
   }
   assert_concurrent_checkpoint_event_exact_trace (events, database);
-  g_assert_cmpuint (lifecycle.size (), ==, 59);
+  g_assert_cmpuint (lifecycle.size (), ==, 58);
 
   const auto main_ids = successful_open_ids (
       lifecycle, FixedHandleRole::MAIN, main);
@@ -5659,16 +5937,15 @@ assert_concurrent_checkpoint_exact_grammar (
 
   assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
       main, 2307, duckdb::FileLockType::WRITE_LOCK,
-      { "open", "size", "read-at", "read-at", "read-at", "read-at",
-        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
-        "write-at", "sync", "write-at", "sync", "on-disk", "on-disk",
-        "on-disk", "close", "destroy" });
+      { "open", "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+        "on-disk", "write-at", "sync", "write-at", "sync", "size", "on-disk",
+        "on-disk", "on-disk", "on-disk", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
       wal, 2090, duckdb::FileLockType::WRITE_LOCK,
       { "open", "size", "size", "size", "size", "write", "sync", "size",
@@ -5768,7 +6045,7 @@ assert_checkpoint_abort_child_exact_grammar (
   assert_checkpoint_abort_event_exact_trace (
       events, database, checkpoint_completed);
   g_assert_cmpuint (lifecycle.size (), ==,
-      checkpoint_completed ? 48 : 44);
+      checkpoint_completed ? 46 : 41);
   g_assert_true (moves.empty ());
   g_assert_cmpuint (recorder->move_overlap_rejections, ==, 0);
 
@@ -5783,23 +6060,21 @@ assert_checkpoint_abort_child_exact_grammar (
   g_assert_cmpuint (checkpoint_ids.size (), ==, 1);
   assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   if (checkpoint_completed) {
     assert_exact_handle_grammar (lifecycle, main_ids[2],
         FixedHandleRole::MAIN, main, 2307,
         duckdb::FileLockType::WRITE_LOCK,
-        { "open", "size", "read-at", "read-at", "read-at", "read-at",
-          "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
-          "on-disk", "write-at", "sync", "write-at", "sync" });
+        { "open", "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+          "on-disk", "write-at", "sync", "write-at", "sync", "size" });
   } else {
     assert_exact_handle_grammar (lifecycle, main_ids[2],
         FixedHandleRole::MAIN, main, 2307,
         duckdb::FileLockType::WRITE_LOCK,
-        { "open", "size", "read-at", "read-at", "read-at", "read-at",
-          "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+        { "open", "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
           "on-disk" });
   }
   assert_exact_handle_grammar (lifecycle, wal_ids[0], FixedHandleRole::WAL,
@@ -5881,7 +6156,7 @@ assert_recovery_replacement_exact_grammar (
   else
     assert_incomplete_checkpoint_recovery_event_exact_trace (events, database);
   g_assert_cmpuint (lifecycle.size (), ==,
-      checkpoint_completed ? 37 : 47);
+      checkpoint_completed ? 35 : 45);
   g_assert_cmpuint (moves.size (), ==, 1);
   g_assert_cmpuint (overlaps, ==, 0);
 
@@ -5900,15 +6175,14 @@ assert_recovery_replacement_exact_grammar (
       checkpoint_completed ? 0 : 1);
   assert_exact_handle_grammar (lifecycle, main_ids[0], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[1], FixedHandleRole::MAIN,
       main, 129, duckdb::FileLockType::NO_LOCK,
-      { "open", "read", "close", "destroy" });
+      { "open", "size", "read-at", "close", "destroy" });
   assert_exact_handle_grammar (lifecycle, main_ids[2], FixedHandleRole::MAIN,
       main, 2307, duckdb::FileLockType::WRITE_LOCK,
-      { "open", "size", "read-at", "read-at", "read-at", "read-at",
-        "read-at", "on-disk", "on-disk", "on-disk", "on-disk", "on-disk",
-        "close", "destroy" });
+      { "open", "read-at", "on-disk", "on-disk", "on-disk", "on-disk",
+        "on-disk", "on-disk", "close", "destroy" });
   if (checkpoint_completed) {
     assert_exact_handle_grammar (lifecycle, wal_ids[0],
         FixedHandleRole::WAL, wal, 129, duckdb::FileLockType::NO_LOCK,
@@ -5942,12 +6216,13 @@ assert_recovery_replacement_exact_grammar (
       checkpoint_completed ? checkpoint : recovery;
   g_assert_cmpstr (move.source.c_str (), ==, source.c_str ());
   g_assert_cmpstr (move.destination.c_str (), ==, wal.c_str ());
-  g_assert_cmpuint (move.live_handles.size (), ==, 2);
+  /* DuckDB 2.0 closes and destroys the WAL reader before it replaces the
+   * WAL, so the complete relevant live-handle set across the move is the
+   * main file's writer handle alone. */
+  g_assert_cmpuint (move.live_handles.size (), ==, 1);
   assert_live_handle_snapshot (move.live_handles[0], main_ids[2],
       FixedHandleRole::MAIN, main, 2307,
       duckdb::FileLockType::WRITE_LOCK);
-  assert_live_handle_snapshot (move.live_handles[1], wal_ids[0],
-      FixedHandleRole::WAL, wal, 129, duckdb::FileLockType::NO_LOCK);
 
   const auto source_id = checkpoint_completed
       ? checkpoint_ids[0] : recovery_ids[0];
@@ -5967,20 +6242,12 @@ assert_recovery_replacement_exact_grammar (
   g_assert_cmpuint (checkpoint_events.back ()->sequence, <, move.sequence);
 
   const auto old_wal_events = events_for_handle (lifecycle, wal_ids[0]);
-  bool crossed_move = false;
-  for (const auto *event : old_wal_events) {
-    if (event->sequence <= move.sequence)
-      continue;
-    crossed_move = true;
-    g_assert_true (
-        event->operation == "close" || event->operation == "destroy");
-  }
-  g_assert_true (crossed_move);
+  for (const auto *event : old_wal_events)
+    g_assert_cmpuint (event->sequence, <, move.sequence);
   g_assert_cmpstr (
       old_wal_events[old_wal_events.size () - 2]->operation.c_str (),
       ==, "close");
   g_assert_cmpstr (old_wal_events.back ()->operation.c_str (), ==, "destroy");
-  g_assert_cmpuint (old_wal_events.back ()->sequence, >, move.sequence);
   const auto new_wal_events = events_for_handle (lifecycle, wal_ids[1]);
   g_assert_cmpuint (new_wal_events.front ()->sequence, >, move.sequence);
 }
@@ -5994,9 +6261,9 @@ fixed_wal_checkpoint_abort_child (const gchar *sandbox,
   auto recorder = std::make_shared<RecorderState> ();
   duckdb::DBConfig config;
   configure_test_database (&config, root, database, recorder, {
-      source_155_open_flags (129),
-      source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-      source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+      source_pinned_open_flags (129),
+      source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+      source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
   config.options.checkpoint_on_shutdown = false;
   config.SetOptionByName ("debug_checkpoint_abort",
       duckdb::Value (abort_setting));
@@ -6061,16 +6328,16 @@ assert_fixed_wal_rows (duckdb::Connection &connection)
   auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
   g_assert_false (rows->HasError ());
   g_assert_cmpuint (rows->RowCount (), ==, 3);
-  assert_value_text (rows->GetValue (0, 0), "42");
-  assert_value_text (rows->GetValue (0, 1), "99");
-  assert_value_text (rows->GetValue (0, 2), "100");
+  assert_value_text (rows->Collection ().GetValue (0, 0), "42");
+  assert_value_text (rows->Collection ().GetValue (0, 1), "99");
+  assert_value_text (rows->Collection ().GetValue (0, 2), "100");
 }
 
 static void
 exercise_interrupted_checkpoint_replacement (const char *child_mode,
     const char *expected_source_suffix)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox =
       g_dir_make_tmp ("wyl-duckdb-fixed-recovery-XXXXXX", &error);
@@ -6095,11 +6362,11 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (1),
-        source_155_open_flags (18),
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (1),
+        source_pinned_open_flags (18),
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.checkpoint_on_shutdown = false;
     g_printerr ("WYRELOG_FIXED_WAL phase=first-open mode=%s\n", child_mode);
     duckdb::DuckDB db (path_to_utf8 (database), &config);
@@ -6123,9 +6390,9 @@ exercise_interrupted_checkpoint_replacement (const char *child_mode,
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, reopen_recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     g_printerr ("WYRELOG_FIXED_WAL phase=second-open mode=%s\n", child_mode);
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
@@ -6165,7 +6432,7 @@ test_recording_filesystem_incomplete_checkpoint_recovery_move (void)
 static void
 test_recording_filesystem_concurrent_checkpoint_move (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox =
       g_dir_make_tmp ("wyl-duckdb-fixed-checkpoint-XXXXXX", &error);
@@ -6181,9 +6448,9 @@ test_recording_filesystem_concurrent_checkpoint_move (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.checkpoint_on_shutdown = false;
     AfterWalStartLatch latch;
     latch.recorder = recorder;
@@ -6211,17 +6478,17 @@ test_recording_filesystem_concurrent_checkpoint_move (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, reopen_recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (rows->HasError ());
     g_assert_cmpuint (rows->RowCount (), ==, 3);
-    assert_value_text (rows->GetValue (0, 0), "42");
-    assert_value_text (rows->GetValue (0, 1), "99");
-    assert_value_text (rows->GetValue (0, 2), "100");
+    assert_value_text (rows->Collection ().GetValue (0, 0), "42");
+    assert_value_text (rows->Collection ().GetValue (0, 1), "99");
+    assert_value_text (rows->Collection ().GetValue (0, 2), "100");
   }
   dump_handle_lifecycle_if_requested (reopen_recorder);
   assert_fixed_wal_reopen_exact_grammar (reopen_recorder, database);
@@ -6238,7 +6505,7 @@ test_recording_filesystem_concurrent_checkpoint_move (void)
 static void
 test_recording_filesystem_explicit_checkpoint_discovery (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-checkpoint-XXXXXX", &error);
   g_assert_no_error (error);
@@ -6252,9 +6519,9 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
@@ -6264,9 +6531,9 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
     auto recorder = std::make_shared<RecorderState> ();
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     config.options.checkpoint_on_shutdown = false;
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
@@ -6288,9 +6555,9 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     checkpoint_begin = recorder->events.size ();
@@ -6304,8 +6571,8 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
     auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (rows->HasError ());
     g_assert_cmpuint (rows->RowCount (), ==, 2);
-    assert_value_text (rows->GetValue (0, 0), "42");
-    assert_value_text (rows->GetValue (0, 1), "99");
+    assert_value_text (rows->Collection ().GetValue (0, 0), "42");
+    assert_value_text (rows->Collection ().GetValue (0, 1), "99");
   }
   g_assert_cmpuint (post_checkpoint.files.size (), ==, 1);
   g_assert_cmpstr (post_checkpoint.files[0].first.c_str (), ==, "facts.duckdb");
@@ -6314,7 +6581,7 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   g_assert_false (fs::exists (recovery));
   assert_explicit_checkpoint_full_stream (recorder->events, checkpoint_begin,
       checkpoint_end, database);
-  assert_source_155_platform_control_language (recorder->controls, 0, 1);
+  assert_source_pinned_platform_control_language (recorder->controls, 0, 1);
   remove_tree (sandbox);
 }
 
@@ -6335,7 +6602,7 @@ assert_interrupted_checkpoint_recovery_full_stream (const std::vector<Event> &ev
 static void
 test_recording_filesystem_checkpoint_crash_phase_a (void)
 {
-  assert_duckdb_155 ();
+  assert_duckdb_pinned ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-checkpoint-crash-XXXXXX", &error);
   g_assert_no_error (error);
@@ -6345,17 +6612,17 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   {
     auto state = std::make_shared<RecorderState> (); duckdb::DBConfig config;
     configure_test_database (&config, root, database, state, {
-        source_155_open_flags (129),
-        source_155_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) }); duckdb::DuckDB db (path_to_utf8 (database), &config);
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) }); duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection c (db); g_assert_false (c.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)")->HasError ());
   }
   {
     auto state = std::make_shared<RecorderState> (); duckdb::DBConfig config;
     configure_test_database (&config, root, database, state, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) }); config.options.checkpoint_on_shutdown = false;
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) }); config.options.checkpoint_on_shutdown = false;
     duckdb::DuckDB db (path_to_utf8 (database), &config); duckdb::Connection c (db);
     g_assert_false (c.Query ("INSERT INTO facts VALUES (99)")->HasError ());
   }
@@ -6390,7 +6657,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   assert_interrupted_checkpoint_full_stream (events, database);
   /* The child emits controls before its event stream; consume that independent
    * channel rather than treating the crash trace as events-only evidence. */
-  assert_source_155_platform_control_language (controls, 0, 1);
+  assert_source_pinned_platform_control_language (controls, 0, 1);
   const ArtifactSet artifacts = snapshot_artifacts (root);
   g_assert_cmpuint (artifacts.files.size (), ==, 2);
   g_assert_cmpstr (artifacts.files[0].first.c_str (), ==, "facts.duckdb");
@@ -6402,20 +6669,20 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   {
     duckdb::DBConfig config;
     configure_test_database (&config, root, database, recovery_recorder, {
-        source_155_open_flags (129),
-        source_155_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
-        source_155_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2307, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 2);
-    assert_value_text (result->GetValue (0, 0), "42");
-    assert_value_text (result->GetValue (0, 1), "99");
+    assert_value_text (result->Collection ().GetValue (0, 0), "42");
+    assert_value_text (result->Collection ().GetValue (0, 1), "99");
   }
   assert_interrupted_checkpoint_recovery_full_stream (recovery_recorder->events,
       database);
-  assert_source_155_platform_control_language (recovery_recorder->controls, 0, 1);
+  assert_source_pinned_platform_control_language (recovery_recorder->controls, 0, 1);
   const ArtifactSet recovered = snapshot_artifacts (root);
   g_assert_cmpuint (recovered.files.size (), ==, 1);
   g_assert_cmpstr (recovered.files[0].first.c_str (), ==, "facts.duckdb");

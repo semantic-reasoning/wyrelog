@@ -167,6 +167,12 @@ REQUIRED_MESON_TESTS = (
 # meson test spells this two ways; banning only the long one bans nothing.
 # meson's parser sets allow_abbrev, so --timeout-mul and --timeout-m reach
 # the same option as the full spelling.  Banning the exact word bans nothing.
+# The deadline a Windows host gets: a plain literal, or the Windows arm of a
+# host split.  Any other spelling, including the inverted test, reads as no
+# deadline at all rather than as whichever literal happens to come first.
+WINDOWS_DEADLINE = re.compile(
+    r"(timeout\s*:\s*(?:host_machine\.system\(\)\s*==\s*'windows'\s*\?\s*)?)"
+    r"(\d+)")
 TIMEOUT_MULTIPLIER = re.compile(r"(?:^|\s)(?:-t\s*\d|--timeout-m[a-z-]*)")
 # Steps that may fail without failing the job: caches and telemetry only.
 # Anything else tolerating failure can retire a gate silently, including the
@@ -328,12 +334,12 @@ def validate_repository(root: Path,
     if WINDOWS_SERIAL not in entry:
       errors.append(
           f"{test_name} must stay serialized on Windows: {WINDOWS_SERIAL}")
-    deadline = re.search(r"timeout\s*:\s*(\d+)", entry)
+    deadline = WINDOWS_DEADLINE.search(entry)
     if deadline is None:
       errors.append(f"{test_name} must carry an explicit timeout")
-    elif int(deadline.group(1)) > ceiling:
+    elif int(deadline.group(2)) > ceiling:
       errors.append(
-          f"{test_name} deadline {deadline.group(1)}s exceeds the recorded "
+          f"{test_name} deadline {deadline.group(2)}s exceeds the recorded "
           f"ceiling of {ceiling}s without evidence")
   return errors
 
@@ -412,12 +418,17 @@ def self_test(root: Path) -> list[str]:
          entry.replace(indent + "  " + WINDOWS_SERIAL,
              indent + "  # " + WINDOWS_SERIAL)),
         (f"{test_name} deadline raised without evidence", entry,
-         re.sub(r"timeout : \d+", "timeout : 4000", entry)),
+         WINDOWS_DEADLINE.sub(r"\g<1>4000", entry, count=1)),
         (f"{test_name} deadline deleted", entry,
-         re.sub(r"\n[ \t]*timeout : \d+,", "", entry)),
+         re.sub(r"\n[ \t]*timeout : [^\n]*,", "", entry)),
         (f"{test_name} registration unregistered", entry,
          entry.replace(f"test('{test_name}'", f"test('retired-{test_name}'")),
     ]
+    if "== 'windows' ?" in entry:
+      # Inverting the split hands Windows the other hosts' deadline.
+      meson_mutations.append(
+          (f"{test_name} deadline split inverted", entry,
+           entry.replace("== 'windows' ?", "!= 'windows' ?")))
   meson_mutations.append(
       ("boundary self-test unregistered",
        "test('windows-ci-timeout-boundary-self-test'",

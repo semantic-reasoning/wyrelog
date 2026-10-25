@@ -35,6 +35,7 @@ tests/test-decide.c
 tests/test-decision-latency.c
 tests/test-dl-static.c
 tests/test-duckdb-source-offbridge-c-consumer.c
+tests/test-duckdb-temp-name.c
 tests/test-engine-intern.c
 tests/test-engine-io.c
 tests/test-engine.c
@@ -248,6 +249,7 @@ wyrelog/fact/artifact-io-session-windows-private.c
 wyrelog/fact/artifact-stat-change-test-private.h
 wyrelog/fact/compound-private.h
 wyrelog/fact/compound.c
+wyrelog/fact/duckdb-temp-name-private.h
 wyrelog/fact/graph-artifact-durability-journal-codec-private.c
 wyrelog/fact/graph-artifact-durability-journal-codec-private.h
 wyrelog/fact/graph-artifact-durability-private.c

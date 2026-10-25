@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Structural gate for source-built DuckDB codegen policy.
 
-The duckdb-amalgamated fallback compiles upstream's single-TU
-amalgamation inside the parent build. Without an effective override the
-subproject inherits the parent's buildtype, and a default (debug)
-configure produces an -O0 libduckdb that runs the DuckDB-backed audit
+The duckdb-source fallback compiles upstream's source tree, in the unity
+units upstream's package_build.py produces, inside the parent build.
+Without an effective override the subproject inherits the parent's
+buildtype, and a default (debug) configure produces an -O0 libduckdb
+that runs the DuckDB-backed audit
 and fact tests 4-8x slower than the prebuilt package -- slow enough to
 blow fixed per-test budgets on shared CI runners (issue #386).
 
@@ -23,7 +24,7 @@ import sys
 root = Path(sys.argv[1])
 
 subproject = (
-    root / "subprojects" / "packagefiles" / "duckdb-amalgamated"
+    root / "subprojects" / "packagefiles" / "duckdb-source"
     / "meson.build")
 text = subproject.read_text(encoding="utf-8")
 
@@ -64,11 +65,11 @@ if "dependencies : duckdb_deps" not in dependency:
         "dependencies to its consumers")
 
 parent = (root / "meson.build").read_text(encoding="utf-8")
-call_start = parent.index("duckdb_dep = dependency('duckdb-amalgamated',")
+call_start = parent.index("duckdb_dep = dependency('duckdb-source',")
 call = parent[call_start:parent.index(")", call_start)]
 if "default_options" in call:
     raise SystemExit(
-        "caller default_options on the duckdb-amalgamated fallback are "
+        "caller default_options on the duckdb-source fallback are "
         "inert on meson 1.3.2; keep the codegen pin on the library target")
 
 print("duckdb source codegen boundary: OK")
