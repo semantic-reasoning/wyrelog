@@ -199,7 +199,7 @@ def require_straight_line(source: str, contract: str) -> None:
 
 def validate_secure_temp_fixture(source: str) -> None:
     source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    if source_digest != "c59928ab8339bd234febb2edf999b07e0c184256f0e105603ce46127fe823d3b":
+    if source_digest != "9fbaaf2b5b6b9fb556346ffc4b7155a850ac44a48a7132bbce564c28f6b92d51":
         raise FixtureContractError(
             "secure fixture changed outside its reviewed full-source allowlist"
         )
@@ -224,7 +224,7 @@ def validate_secure_temp_fixture(source: str) -> None:
         "ProvisionedPairFixture ()":
             "e7bd8defef11bd4bfd29f64250d8a1587ed34dd3275049203800aadb84fb182e",
         "test_secure_temp_child_lifecycle (void)":
-            "c282d91d2a740ea9363cf030e5639806f9995f187b8be768e4e7448b03a779ee",
+            "4819ca707512270e1984ebbc87c5b3b0699ef3440f7feb7ebc20607f08d14068",
         "main (int argc, char **argv)":
             "322ed0506c58c308e7bd89235c197cd47857f14d3e3ee8c1c7a4dffd14694752",
     }
@@ -1055,6 +1055,7 @@ if not secure_temp_fixture_path.is_file():
     raise SystemExit("missing native Windows secure-DuckDB temp-child fixture")
 secure_temp_fixture = secure_temp_fixture_path.read_text(encoding="utf-8")
 for token in (
+    "#include <process.h>",
     "wyl_test_make_secure_fact_root",
     "wyl_fact_graph_directory_stage_create_exact",
     "wyl_fact_graph_stage_get_windows_operation_evidence",
@@ -1064,7 +1065,7 @@ for token in (
     "WylSecureDuckdbFileSystem",
     "TemporaryDirectory",
     "_0_storage_S32K-0.tmp",
-    "std::to_string (GetCurrentProcessId ())",
+    "std::to_string (_getpid ())",
     "TempChildrenCreatedForTest",
     "TryRemoveFile",
 ):

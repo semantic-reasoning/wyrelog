@@ -27,7 +27,7 @@ def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
         if synthetic_db.is_daemon_http_output(e.get("output"), real_compiler_id))
     if real.get("arguments"):
         real_argv = real["arguments"]
-    elif compiler_id in ("clang-cl", "msvc"):
+    elif real_compiler_id in ("clang-cl", "msvc"):
         real_argv = synthetic_db.windows_split(real["command"])
     else:
         real_argv = shlex.split(real["command"])
@@ -36,9 +36,12 @@ def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
         arg=real_argv[i]
         if arg in ("-I","-D","-isystem","-include","-imacros","-iquote","--sysroot"):
             inherited.extend((arg,real_argv[i+1])); i+=2; continue
+        if arg == "/clang:-isystem":
+            inherited.extend((arg,real_argv[i+1])); i+=2; continue
         if arg.upper() in ("/I","/D","/FI"):
             inherited.extend((arg,real_argv[i+1])); i+=2; continue
-        if arg.startswith(("-I","-D","--sysroot=")): inherited.append(arg)
+        if arg.startswith(("-I","-D","-isystem","--sysroot=",
+                           "/clang:-isystem")): inherited.append(arg)
         elif arg.upper().startswith(("/I","/D","/FI")): inherited.append(arg)
         i+=1
     defines = tuple(defines)
@@ -48,9 +51,15 @@ def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
             arg=inherited[i]
             if arg in ("-I","-isystem"):
                 translated.append("/I"+inherited[i+1]); i+=2; continue
+            if arg == "/clang:-isystem":
+                translated.append("/I"+inherited[i+1].removeprefix("/clang:"))
+                i+=2; continue
             if arg=="-D": translated.append("/D"+inherited[i+1]); i+=2; continue
             if arg.startswith("-I"): translated.append("/I"+arg[2:])
+            elif arg.startswith("-isystem"): translated.append("/I"+arg[len("-isystem"):])
             elif arg.startswith("-D"): translated.append("/D"+arg[2:])
+            elif arg.startswith("/clang:-isystem"):
+                translated.append("/I"+arg[len("/clang:-isystem"):])
             elif arg.upper() in ("/I","/D","/FI"):
                 translated.extend((arg,inherited[i+1])); i+=2; continue
             elif arg.upper().startswith(("/I","/D","/FI")): translated.append(arg)
@@ -147,6 +156,62 @@ def fake_clang_script(compiler, actual_cl):
         "for x in sys.argv[1:] if x.startswith(('/D','/I'))]+" + \
         "[sys.argv[-1]]\nraise SystemExit(subprocess.run(cmd).returncode)\n"
 
+def check_inherited_system_includes(module, compiler_id, compiler):
+    with tempfile.TemporaryDirectory(prefix="wyrelog-system-includes-") as temp:
+        root = Path(temp) / "source"
+        source = root / "wyrelog/daemon/http.c"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            '#include <inherited-only.h>\n'
+            '#ifndef WYL_INHERITED_ONLY\n#error missing inherited header\n#endif\n'
+            'int inherited_include_probe;\n', encoding="utf-8")
+        include = Path(temp) / "system include only"
+        include.mkdir()
+        (include / "inherited-only.h").write_text(
+            "#define WYL_INHERITED_ONLY 1\n", encoding="utf-8")
+        real_build = Path(temp) / "real-build"
+        real_build.mkdir()
+        actual_cl = compiler_id in ("clang-cl", "msvc")
+        fake = Path(temp) / "clang-cl.py"
+        fake.write_text(fake_clang_script(compiler, actual_cl), encoding="utf-8")
+        destinations = [(compiler_id, compiler),
+            ("clang-cl", [sys.executable, str(fake)])]
+        cases = [
+            ("gcc", ["-isystem", str(include)]),
+            ("gcc", ["-isystem" + str(include)]),
+            ("clang-cl", ["/clang:-isystem" + str(include)]),
+            ("clang-cl", ["/clang:-isystem", "/clang:" + str(include)]),
+        ]
+        for destination_id, destination in destinations:
+            for source_id, flags in cases:
+                if source_id == "clang-cl" and destination_id not in ("clang-cl", "msvc"):
+                    continue
+                output = ("wyrelog/wyrelogd.exe.p/daemon_http.c.obj"
+                    if source_id == "clang-cl"
+                    else "wyrelog/wyrelogd.p/daemon_http.c.o")
+                arguments = ["cc"] + flags + ["-c", str(source)]
+                for command_only in (False, True):
+                    entry = {"directory": str(real_build),
+                        "file": str(source), "output": output}
+                    if command_only:
+                        entry["command"] = (subprocess.list2cmdline(arguments)
+                            if source_id == "clang-cl" else shlex.join(arguments))
+                    else:
+                        entry["arguments"] = arguments
+                    (real_build / "compile_commands.json").write_text(
+                        json.dumps([entry]), encoding="utf-8")
+                    build = synthetic_db(root, root, real_build,
+                        destination_id, destination, real_compiler_id=source_id)
+                    try:
+                        active = module.preprocess(root, build, destination_id)
+                    except module.GuardError as error:
+                        raise SystemExit(
+                            f"inherited system include rejected ({source_id} -> "
+                            f"{destination_id}, command={command_only}, {flags}): "
+                            f"{error}") from error
+                    if "int inherited_include_probe;" not in active:
+                        raise SystemExit("inherited-only include probe was not preprocessed")
+
 def mutate_function(source, name, old, new):
     start = source.index(name + " (")
     pos = source.index(old, start)
@@ -201,6 +266,7 @@ def main():
     invoke.real_root = Path(ns.root).resolve()
     invoke.real_build_root = Path(ns.build_root).resolve()
     invoke.real_compiler_id = ns.compiler_id
+    check_inherited_system_includes(guard_module, ns.compiler_id, compiler)
     source = (Path(ns.root) / "wyrelog/daemon/http.c").read_text(encoding="utf-8")
     test_source = (Path(ns.root) /
         "tests/test-daemon-http-decide.c").read_text(encoding="utf-8")

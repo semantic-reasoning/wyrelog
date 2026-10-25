@@ -5,6 +5,12 @@ and `FileHandle` ABI. It is not a general pathname filesystem. Its only
 authority is an imported, held graph directory and an existing, held
 `facts.duckdb` identity.
 
+DuckDB 2.0's `duckdb.hpp` only forward-declares `CompressedFileSystem`.
+The adapter header also includes `duckdb/common/compressed_file_system.hpp`
+because its rejecting registration overrides consume owning pointers to that
+type; destroying those arguments requires the complete definition, including
+with the MSVC standard library.
+
 The adapter maps only these source-observed logical objects:
 
 - `facts.duckdb` through a reader-main or writer-main binding;

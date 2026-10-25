@@ -56,6 +56,7 @@
 #define TOKEN_READER "00000000-0000-4000-8000-00000000001d"
 #include "fact/artifact-io-session-private.h"
 
+#ifndef G_OS_WIN32
 /* DuckDB 2.0 names a spill child "duckdb_temp_<pid>_<instance>_<rest>", and
  * the authority accepts only this process's pid. */
 static const gchar *
@@ -69,7 +70,6 @@ temp_name_for (const gchar *prefix, const gchar *rest)
 #define TEMP_NAME(rest) temp_name_for ("", (rest))
 #define TEMP_SUFFIX(rest) temp_name_for ("/", (rest))
 
-#ifndef G_OS_WIN32
 typedef struct
 {
   guint8 key[32];
