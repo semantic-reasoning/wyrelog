@@ -404,6 +404,10 @@ jobs:
             -Dduckdb_source=subproject \
             -Denable_secure_duckdb_bridge=disabled
 
+      - name: Run DuckDB source overlay proof
+        run: |
+          meson test -C build-duckdb-linux-link --no-rebuild --print-errorlogs duckdb-source-overlay
+
       - name: Compile Clang/libstdc++ C consumer
         if: matrix.compiler == 'clang-libstdcxx'
         run: |

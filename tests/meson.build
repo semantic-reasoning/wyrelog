@@ -4202,9 +4202,9 @@ test('duckdb-source-codegen-boundary', python3,
     meson.project_source_root()])
 
 # The committed build overlay must be exactly what the generator derives from
-# the pinned source; only a source-subproject build has that archive.
-if get_option('duckdb_source') == 'subproject' and \
-    fs.exists(duckdb_source_overlay_archive)
+# the pinned source. Register even without the archive so missing source
+# provenance fails explicitly instead of silently removing this check.
+if get_option('duckdb_source') == 'subproject'
   test('duckdb-source-overlay', python3,
     args : [files('test-duckdb-source-overlay.py'),
       meson.project_source_root(), duckdb_source_overlay_archive],
