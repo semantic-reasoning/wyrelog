@@ -20,7 +20,7 @@
     "wyrelog_log_max_level": "warn"
   },
   "subprojects": {
-    "duckdb-prebuilt-linux": "1.5.5",
+    "duckdb-prebuilt-linux": "2.0.0",
     "libchronoid": "1.2.0",
     "nanoarrow": "0.10.0-SNAPSHOT",
     "wirelog": "0.70.0",
@@ -36,9 +36,9 @@
   },
   "external_libraries": {
     "libduckdb.so": {
-      "build_artifact": "subprojects/duckdb-prebuilt-linux-amd64/libduckdb.so",
+      "build_artifact": "subprojects/duckdb-prebuilt-linux-amd64-v2.0.0/libduckdb.so",
       "package": "DuckDB",
-      "version": "1.5.5"
+      "version": "2.0.0"
     }
   },
   "system_libraries": [

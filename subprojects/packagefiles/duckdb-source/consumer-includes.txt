@@ -1,0 +1,9 @@
+src/include
+third_party/concurrentqueue
+third_party/fast_float
+third_party/fastpforlib
+third_party/fmt/include
+third_party/fsst
+third_party/re2
+third_party/utf8proc/include
+third_party/yyjson/include

@@ -90,13 +90,12 @@ option('duckdb_source',
               + '"prebuilt" downloads the upstream-published library '
               + 'binary for the host platform (fast: ~30 MB download '
               + 'and zero compile). "subproject" downloads the '
-              + 'upstream amalgamated source release at v1.5.5 and '
-              + 'compiles the single 25 MB duckdb.cpp translation unit '
-              + 'in tree (slow: multi-minute single-TU compile). '
+              + 'upstream v2.0.0 source tree and compiles it in tree '
+              + '(slow: several hundred large unity translation units). '
               + 'Default is prebuilt; main-branch CI runs the '
               + 'from-source validation on the macOS runner while the '
-              + 'Linux runners stay on prebuilt to avoid recompiling the '
-              + 'amalgamation on every push.'
+              + 'Linux runners stay on prebuilt to avoid recompiling '
+              + 'DuckDB on every push.'
 )
 
 option('product_install',

@@ -770,7 +770,7 @@ def validate(files: dict[str, str]) -> None:
         "      - name: Test fact forget transaction cleanup with secure DuckDB"
     )
     posix_commands = (
-        "meson compile -C build-secure-duckdb -j 1 \\\n"
+        "meson compile -C build-secure-duckdb -j 3 \\\n"
         "            test-fact-store-provisioned \\\n"
         "            test-fact-graph-seal \\\n"
         "            test-daemon-http-facts \\\n"
@@ -789,7 +789,7 @@ def validate(files: dict[str, str]) -> None:
         "      - name: Test opposing fact lifecycle wrappers with secure DuckDB"
     )
     coordination_commands = (
-        "meson compile -C build-secure-duckdb -j 1 \\\n"
+        "meson compile -C build-secure-duckdb -j 3 \\\n"
         "            test-fact-seal-unseal-coordination\n"
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-seal-unseal-coordination \\\n"
@@ -1645,7 +1645,7 @@ def self_test(baseline: dict[str, str]) -> None:
         coordination_step = (
             "      - name: Test opposing fact lifecycle wrappers with secure DuckDB\n"
             "        run: |\n"
-            "          meson compile -C build-secure-duckdb -j 1 \\\n"
+            "          meson compile -C build-secure-duckdb -j 3 \\\n"
             "            test-fact-seal-unseal-coordination\n"
             "          meson test -C build-secure-duckdb --no-rebuild \\\n"
             "            fact-seal-unseal-coordination \\\n"

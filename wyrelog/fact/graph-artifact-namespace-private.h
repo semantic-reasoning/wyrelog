@@ -89,7 +89,7 @@ typedef enum
 
 /* The DuckDB spill directory is a separate, opaque authority.  It is not a
  * general directory capability: its root is minted internally, child names
- * are accepted only when they match the source-pinned DuckDB 1.5.5 grammar,
+ * are accepted only when they match the source-pinned DuckDB 2.0.0 grammar,
  * and child lifecycle always uses an identity binding. */
 typedef enum
 {

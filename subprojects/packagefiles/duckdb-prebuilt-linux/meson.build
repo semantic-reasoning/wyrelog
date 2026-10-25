@@ -1,5 +1,5 @@
 project('duckdb-prebuilt-linux', 'c',
-  version : '1.5.5',
+  version : '2.0.0',
   license : 'MIT',
 )
 

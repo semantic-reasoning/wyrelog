@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard the DuckDB v1.5.5 fixed-WAL lifecycle evidence boundary."""
+"""Guard the DuckDB v2.0.0 fixed-WAL lifecycle evidence boundary."""
 
 from pathlib import Path
 import sys
@@ -34,10 +34,10 @@ required_source = (
     '"BEFORE_HEADER"',
     "Checkpoint aborted before header write because of PRAGMA",
     "Checkpoint aborted before truncate because of PRAGMA",
-    "source_155_open_flags (18)",
-    "source_155_open_flags (1)",
-    'event->operation == "close" || event->operation == "destroy"',
-    "move.live_handles.size (), ==, 2",
+    "source_pinned_open_flags (18)",
+    "source_pinned_open_flags (1)",
+    "g_assert_cmpuint (event->sequence, <, move.sequence);",
+    "move.live_handles.size (), ==, 1",
     "assert_fixed_wal_rows",
     "drain_thread_until",
     "checkpoint concurrency threads did not drain within ",
@@ -114,7 +114,7 @@ required_docs = (
     "BEFORE_WAL_FINISH",
     "BEFORE_HEADER",
     "complete relevant live-handle set",
-    "v1.5.5",
+    "v2.0.0",
 )
 for token in required_docs:
     if token not in docs:

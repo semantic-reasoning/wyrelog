@@ -74,7 +74,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
     )
     compile_command = (
         '/usr/bin/time "${time_args[@]}" '
-        "meson compile -C build-secure-duckdb -j 1 "
+        "meson compile -C build-secure-duckdb -j 3 "
         "test-fact-artifact-inventory "
         "test-fact-artifact-inventory-consumers "
         "test-fact-artifact-namespace "

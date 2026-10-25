@@ -17,7 +17,7 @@ if enable_secure_duckdb_bridge_opt.enabled() and \
     duckdb_patch_tool_name = host_machine.system() == 'darwin' ? 'gpatch' : 'patch'
     duckdb_patch_tool = find_program(duckdb_patch_tool_name, required : true)
     duckdb_patch_archive = meson.project_source_root() / \
-      'subprojects/packagecache/libduckdb-src-v1.5.5.zip'
+      'subprojects/packagecache/duckdb-v2.0.0.tar.gz'
     if not fs.exists(duckdb_patch_archive)
       error('strict DuckDB patch replay requires the resolved pinned archive')
     endif
@@ -57,6 +57,13 @@ test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
   dependencies : [glib_dep],
 )
 test('fact-offline-backup-manifest', test_offline_backup_manifest)
+
+test_duckdb_temp_name = executable('test-duckdb-temp-name',
+  'test-duckdb-temp-name.c',
+  include_directories : [include_directories('../wyrelog')],
+  dependencies : [glib_dep],
+)
+test('duckdb-temp-name', test_duckdb_temp_name)
 
 test_offline_restore_journal = executable('test-fact-offline-restore-journal',
   'test-fact-offline-restore-journal.c',
@@ -429,7 +436,11 @@ if get_option('enable_fact_store').allowed() and \
             '-x', '/fact-offline-backup-source/import',
             '-x', '/fact-offline-backup-source/tenant-provisioned-binding'],
     protocol : 'tap',
-    timeout : 900,
+    # DuckDB 2.0 made this binary 1.19 times slower (#1449): 934.0 to 1107.7
+    # seconds in the secure-bridge suite at one wyrelog commit on one Linux
+    # host.  ubuntu-latest took 718 seconds on 1.5.5, which that factor puts
+    # at 855 against the former 900-second deadline.
+    timeout : 1200,
   )
   test('fact-offline-restore-tenant-old-binding', test_offline_backup_source,
     args : ['--tap',
@@ -1047,13 +1058,15 @@ if build_client
     # (CI run 35311765477) with every assertion passing, and later between
     # 44.01 and 91.12 seconds with the test unchanged (runs 38666073545,
     # 38570747241, 38566692465, 38676358194 and 38681889499; issue #1413),
-    # where 91.12 seconds was a TIMEOUT against the 90-second limit.  Keep
-    # the normal 60-second deadline on other hosts, but leave measured
-    # headroom on the hosted Windows runner instead of treating scheduler
-    # contention as a functional failure.
-    test_daemon_http_facts_timeout = 60
+    # where 91.12 seconds was a TIMEOUT against the 90-second limit.
+    # DuckDB 2.0 then made every database open and query slower (#1449): at
+    # one wyrelog commit on one Linux host this case went from 41.6 to 67.9
+    # seconds with the source-built DuckDB and from 32.7 to 46.1 with the
+    # prebuilt one.  Scale both deadlines by that measured factor instead of
+    # treating the upstream slowdown as a functional failure.
+    test_daemon_http_facts_timeout = 120
     if host_machine.system() == 'windows'
-      test_daemon_http_facts_timeout = 150
+      test_daemon_http_facts_timeout = 240
     endif
     test('daemon-http-facts', test_daemon_http_facts,
       env : test_daemon_http_facts_env,
@@ -2255,8 +2268,14 @@ if get_option('enable_fact_store').allowed()
   # This runner shows no growth regression -- 32 to 39 seconds before and
   # after the policy test's step change -- so its one recorded overrun is a
   # contention sample, which is precisely what serialization addresses.
+  # DuckDB 2.0 doubled this case's runtime (#1449): 30.6 to 60.7 seconds with
+  # the source-built DuckDB and 28.9 to 45.7 with the prebuilt one, at one
+  # wyrelog commit on one Linux host.  Only the other hosts get that headroom:
+  # the Windows deadline is bound to its hosted-runner measurements by
+  # test-windows-ci-timeout-boundary.py, which hold 21.14 seconds against 60
+  # and have not been re-taken on 2.0.
   test('fact-store', test_fact_store,
-    timeout : 60,
+    timeout : host_machine.system() == 'windows' ? 60 : 120,
     is_parallel : host_machine.system() != 'windows',
   )
 
@@ -2274,6 +2293,7 @@ if get_option('enable_fact_store').allowed()
   test('fact-store-duckdb-autoload-runtime', python3,
     args : [
       files('test-fact-store-duckdb-autoload-runtime.py'),
+      '--duckdb-source', get_option('duckdb_source'),
       test_fact_store_duckdb_hardening,
     ],
     timeout : 60,
@@ -2318,9 +2338,9 @@ if get_option('enable_fact_store').allowed()
   )
 
   # Registered on Windows again.  It was compile-only because pinned DuckDB
-  # 1.5.5 cross-checks a de Bruijn result against __builtin_clzl, whose
-  # argument is 32-bit under clang-cl's LLP64 -- so the oracle was wrong, not
-  # the result.  Patch 0005 moves that check to __builtin_clzll.
+  # cross-checks a de Bruijn result against __builtin_clzl, whose argument is
+  # 32-bit under clang-cl's LLP64 -- so the oracle was wrong, not the result.
+  # Patch 0003 moves that check to __builtin_clzll.
   test('fact-store-forget-transaction',
     test_fact_store_forget_transaction,
     timeout : 60,
@@ -4175,9 +4195,21 @@ test('supply-chain-pins', check_supply_chain_pins,
   args : [meson.project_source_root()],
 )
 
+duckdb_source_overlay_archive = meson.project_source_root() / \
+  'subprojects/packagecache/duckdb-v2.0.0.tar.gz'
 test('duckdb-source-codegen-boundary', python3,
   args : [files('test-duckdb-source-codegen-boundary.py'),
     meson.project_source_root()])
+
+# The committed build overlay must be exactly what the generator derives from
+# the pinned source; only a source-subproject build has that archive.
+if get_option('duckdb_source') == 'subproject' and \
+    fs.exists(duckdb_source_overlay_archive)
+  test('duckdb-source-overlay', python3,
+    args : [files('test-duckdb-source-overlay.py'),
+      meson.project_source_root(), duckdb_source_overlay_archive],
+    timeout : 120)
+endif
 
 duckdb_prepare_destroy_guard = find_program(
   '../tools/check-duckdb-prepare-destroy.py')
@@ -4496,7 +4528,7 @@ if get_option('enable_audit').allowed()
     # directory here.
     audit_conn_test_env.prepend('PATH',
       meson.project_source_root() / 'subprojects'
-        / 'duckdb-prebuilt-windows-amd64',
+        / 'duckdb-prebuilt-windows-amd64-v2.0.0',
       separator : ';')
   endif
 
@@ -4521,7 +4553,7 @@ if get_option('enable_audit').allowed()
     dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep],
   )
 
-  # Issue #920: DuckDB 1.5.5 compares 64-bit CountZeros results with
+  # Issue #920: DuckDB 2.0.0 compares 64-bit CountZeros results with
   # 32-bit unsigned-long builtins under clang-cl/LLP64.  Until #920 fixes
   # those assertion oracles, positive/effective source-Windows runtime is
   # temporarily waived.  The retained child and structural gates below are
@@ -4541,6 +4573,7 @@ if get_option('enable_audit').allowed()
     args : [
       files('test-audit-conn-duckdb-autoload-runtime.py'),
       '--mode', 'clean',
+      '--duckdb-source', get_option('duckdb_source'),
       test_audit_conn_duckdb_hardening,
     ],
     env : audit_conn_test_env,
@@ -4550,6 +4583,7 @@ if get_option('enable_audit').allowed()
     args : [
       files('test-audit-conn-duckdb-autoload-runtime.py'),
       '--mode', 'ambient',
+      '--duckdb-source', get_option('duckdb_source'),
       test_audit_conn_duckdb_hardening,
     ],
     env : audit_conn_test_env,

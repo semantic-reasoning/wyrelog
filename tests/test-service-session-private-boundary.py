@@ -589,6 +589,52 @@ def main() -> int:
         assert "#include <dependency.h>" in vendored_expansion
         assert "VENDORED_DEPENDENCY" not in vendored_expansion
         assert "OWNED_HEADER" in vendored_expansion
+        # A Meson wrap extracts its dependency under subprojects/ too.  The
+        # wrap names the directory, or its own stem when it names none; the
+        # hand-written packagefiles beside the wraps, a directory no wrap
+        # names, and a subprojects/ below the checkout stay project source.
+        subprojects = vendored_root / "subprojects"
+        for relative in ("named-1.0/include", "unnamed", "packagefiles/named",
+                         "unwrapped", "nested/subprojects/named-1.0",
+                         "provide-only"):
+            (subprojects / relative).mkdir(parents=True)
+        (subprojects / "nested/subprojects/named.wrap").write_text(
+            "[wrap-file]\ndirectory = named-1.0\n", encoding="utf-8")
+        (subprojects / "provide-only.wrap").write_text(
+            "[provide]\ndependency_names = provided\n", encoding="utf-8")
+        (subprojects / "named.wrap").write_text(
+            "[wrap-file]\ndirectory = named-1.0\n", encoding="utf-8")
+        (subprojects / "unnamed.wrap").write_text(
+            "[wrap-git]\nurl = https://example.invalid/unnamed\n",
+            encoding="utf-8")
+        (subprojects / "broken.wrap").write_text(
+            "not an ini file\n", encoding="utf-8")
+        wrap_snapshot = guard_module.IncludeSnapshot((vendored_root,))
+        for relative, local in (
+                ("named-1.0/include/dependency.h", False),
+                ("named-1.0/top.h", False),
+                ("unnamed/dependency.h", False),
+                ("packagefiles/named/overlay.h", True),
+                ("unwrapped/owned.h", True),
+                ("nested/subprojects/named-1.0/owned.h", True),
+                ("provide-only/owned.h", True),
+                ("named.h", True)):
+            assert wrap_snapshot.is_local(subprojects / relative) is local, (
+                relative)
+        wrapped_source = vendored_root / "wrapped.c"
+        wrapped_source.write_text(
+            '#include <dependency.h>\n#include "owned.h"\n', encoding="utf-8")
+        (subprojects / "named-1.0/include/dependency.h").write_text(
+            "#define WRAPPED_DEPENDENCY 1\n", encoding="utf-8")
+        wrapped_expansion = guard_module.flatten_expansion(
+            guard_module.distilled_expansion(
+                "wrapped.c", wrapped_source.read_text(encoding="utf-8"),
+                wrapped_source.resolve(), [vendored_root],
+                [vendored_root, subprojects / "named-1.0/include"],
+                (vendored_root,), wrap_snapshot))
+        assert "#include <dependency.h>" in wrapped_expansion
+        assert "WRAPPED_DEPENDENCY" not in wrapped_expansion
+        assert "OWNED_HEADER" in wrapped_expansion
     with tempfile.TemporaryDirectory() as cache_directory:
         cache_root = Path(cache_directory)
         canonical_root = cache_root.resolve()

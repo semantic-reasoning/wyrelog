@@ -19,6 +19,8 @@
 #include <vector>
 
 #include <duckdb.hpp>
+/* DatabaseWrapper, for the C-API handoff below. */
+#include <duckdb/main/capi/capi_internal.hpp>
 
 extern "C" G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
@@ -26,8 +28,8 @@ wyl_fact_artifact_namespace_open_provisioned_pair_internal
 extern "C" gchar *wyl_fact_store_projection_table_name
   (const wyl_policy_fact_relation_schema_options_t *);
 
-static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5",
-    "secure DuckDB bridge requires DuckDB v1.5.5 headers");
+static_assert (std::string_view (DUCKDB_VERSION) == "v2.0.0",
+    "secure DuckDB bridge requires DuckDB v2.0.0 headers");
 
 struct LeaseDeleter
 {
@@ -383,8 +385,8 @@ public:
       Reject ("subsystem registration");
     }
 
-    void RegisterSubSystem (duckdb::FileCompressionType,
-        duckdb::unique_ptr<duckdb::FileSystem>) override
+    void RegisterCompressionFilesystem
+      (duckdb::unique_ptr<duckdb::CompressedFileSystem>) override
     {
       Reject ("compression subsystem registration");
     }
@@ -978,20 +980,21 @@ private:
             return WYRELOG_E_IO;
         }
       }
-      auto query = statement->Execute (values, false);
-      if (query == nullptr || query->HasError ()
-          || query->type != duckdb::QueryResultType::MATERIALIZED_RESULT)
+      /* DuckDB 2.0 has one QueryResult; Collection () completes it and
+       * returns the retained rows, as MaterializedQueryResult did. */
+      auto query = statement->Execute (values);
+      if (query == nullptr || query->HasError ())
         return WYRELOG_E_IO;
-      auto &result = query->Cast<duckdb::MaterializedQueryResult> ();
-      *out_rows = result.RowCount ();
-      for (duckdb::idx_t row = 0;
-          row < result.RowCount () && row_func != nullptr; row++) {
+      auto &rows = query->Collection ();
+      *out_rows = rows.Count ();
+      for (duckdb::idx_t row = 0; row < rows.Count () && row_func != nullptr;
+          row++) {
         std::vector<WylFactStoreIdentityCell> cells (query->ColumnCount ());
         std::vector<duckdb::string> bytes (query->ColumnCount ());
         bool valid = true;
         for (duckdb::idx_t column = 0; column < query->ColumnCount ();
             column++) {
-          auto value = result.GetValue (column, row);
+          auto value = rows.GetValue (column, row);
           if (value.IsNull ()) {
             cells[column].type = WYL_FACT_STORE_IDENTITY_CELL_NULL;
           } else if (value.type ().id () == duckdb::LogicalTypeId::BIGINT) {
@@ -1197,18 +1200,19 @@ private:
         value = duckdb::Value (duckdb::StringValue::Get (value).c_str ());
       if (source == ID::BLOB && type != WYL_FACT_REPLAY_CELL_TEXT)
         return cell;
+      /* DuckDB 2.0's DefaultTryCastAs returns the cast value and leaves the
+       * source untouched; 1.5.5's cast in place and returned a bool. */
       if (type == WYL_FACT_REPLAY_CELL_TEXT) {
-        if (value.DefaultTryCastAs (duckdb::LogicalType::VARCHAR)) {
-          text = duckdb::StringValue::Get (value);
+        if (auto cast = value.DefaultTryCastAs (duckdb::LogicalType::VARCHAR)) {
+          text = duckdb::StringValue::Get (*cast);
           cell.value.text = text.c_str ();
         }
-      } else {
-        if (type == WYL_FACT_REPLAY_CELL_INT64
-            && value.DefaultTryCastAs (duckdb::LogicalType::BIGINT))
-          cell.value.int64_value = value.GetValue<int64_t> ();
-        else if (type == WYL_FACT_REPLAY_CELL_BOOL
-            && value.DefaultTryCastAs (duckdb::LogicalType::BOOLEAN))
-          cell.value.bool_value = value.GetValue<bool> ();
+      } else if (type == WYL_FACT_REPLAY_CELL_INT64) {
+        if (auto cast = value.DefaultTryCastAs (duckdb::LogicalType::BIGINT))
+          cell.value.int64_value = cast->GetValue<int64_t> ();
+      } else if (type == WYL_FACT_REPLAY_CELL_BOOL) {
+        if (auto cast = value.DefaultTryCastAs (duckdb::LogicalType::BOOLEAN))
+          cell.value.bool_value = cast->GetValue<bool> ();
       }
     } catch (...) { /* Match C adapter conversion-failure defaults. */
     }
@@ -1306,16 +1310,17 @@ private:
         rc = wyl_fact_replay_job_context_checkpoint (context);
         return rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
       }
-      auto query = statement->Execute (params, false);
+      auto query = statement->Execute (params);
+      if (query && !query->HasError ())
+        query->Complete ();
       restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_REPLAY_QUERY);
       rc = wyl_fact_replay_job_context_checkpoint (context);
       if (rc != WYRELOG_E_OK) return rc;
       if (!query || query->HasError ()
-          || query->type != duckdb::QueryResultType::MATERIALIZED_RESULT
           || query->ColumnCount () != types.size ())
         return WYRELOG_E_IO;
-      auto &result = query->Cast<duckdb::MaterializedQueryResult> ();
-      for (duckdb::idx_t row = 0; row < result.RowCount (); ++row) {
+      auto &result = query->Collection ();
+      for (duckdb::idx_t row = 0; row < result.Count (); ++row) {
         restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_REPLAY_ROW);
         rc = wyl_fact_replay_job_context_checkpoint (context);
         if (rc != WYRELOG_E_OK) return rc;
@@ -1453,7 +1458,7 @@ bridge_query_health (WylSecureDuckdbBridge *self)
   if (self->finalized)
     return WYRELOG_E_OK;
   if (self->connection == nullptr
-      || std::strcmp (duckdb_library_version (), "v1.5.5") != 0)
+      || std::strcmp (duckdb_library_version (), "v2.0.0") != 0)
     return WYRELOG_E_POLICY;
   try {
     auto result = self->connection->Query ("SELECT 1");
@@ -1707,7 +1712,8 @@ wyl_secure_duckdb_bridge_new_with_namespace (WylFactArtifactNamespace
             ("SELECT count(*) FROM duckdb_tables() WHERE NOT internal");
       if (emptiness == nullptr || emptiness->HasError ()
           || emptiness->RowCount () != 1
-          || emptiness->GetValue (0, 0).GetValue<int64_t> () != 0) {
+          || emptiness->Collection ().GetValue (0, 0).GetValue<int64_t> ()
+          != 0) {
         const auto storage_health = bridge->health->Status ();
         if (storage_health != WYRELOG_E_OK)
           return storage_health;
@@ -1762,7 +1768,7 @@ bridge_open_live_common (WylFactArtifactNamespace *namespace_,
   /* The C-API handoff reinterprets the bounded instance as duckdb's internal
    * DatabaseWrapper (a single shared_ptr<DuckDB>); duckdb_connect/duckdb_close
    * consume it symmetrically.  Legitimate only against the vendored,
-   * version-pinned amalgamation -- guard the layout so a bump fails loudly. */
+   * version-pinned source -- guard the layout so a bump fails loudly. */
   static_assert (sizeof (duckdb::DatabaseWrapper)
       == sizeof (duckdb::shared_ptr<duckdb::DuckDB>),
       "duckdb::DatabaseWrapper must be a single shared_ptr<DuckDB>");

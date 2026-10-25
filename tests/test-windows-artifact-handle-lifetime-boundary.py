@@ -1052,10 +1052,11 @@ def self_test(root: Path) -> None:
 
     test_source = "tests/test-fact-artifact-namespace-windows.c"
     test_text = (root / test_source).read_text(encoding="utf-8")
+    # Every call: the spill test also drives the wrapper to a refusal, and a
+    # bypass that left that call in place would still reach the wrapper.
     without_binding_wrapper = test_text.replace(
         "wyl_fact_artifact_win_temp_root_create_child_binding (root,",
         "wyl_fact_artifact_win_temp_root_create_child_with_orphan_evidence (root,",
-        1,
     )
     problems = validate(root, INVENTORY, {test_source: without_binding_wrapper})
     if not any(

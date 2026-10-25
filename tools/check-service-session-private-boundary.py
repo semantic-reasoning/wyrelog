@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import configparser
+import functools
 import hashlib
 import json
 import locale
@@ -639,8 +641,12 @@ def dependency_prefix(path: Path, bases: tuple[Path, ...]) -> Path | None:
     preprocessor.  Honour the vcpkg sentinel rather than a directory name so
     the layout, not the platform, decides.
 
-    CI installs its dependencies outside the checkout, so this guards the
-    developer who vendors one in-tree rather than any configured runner.
+    CI installs its vcpkg dependencies outside the checkout, so that sentinel
+    guards the developer who vendors one in-tree rather than any configured
+    runner.  A Meson wrap is different: every build extracts it under the
+    base's own subprojects/, and DuckDB 2.0's source subproject alone puts
+    hundreds of C++ headers behind the duckdb.hpp a shared header names.
+    The wraps decide which directories those are, as they do for Meson.
 
     Only vendored trees strictly inside a local base qualify.  The search stops
     at the base so a sentinel at or above the checkout cannot classify the
@@ -653,7 +659,31 @@ def dependency_prefix(path: Path, bases: tuple[Path, ...]) -> Path | None:
             break
         if (parent / ".vcpkg-root").exists():
             return parent
+        if (parent.parent.name == "subprojects"
+                and parent.parent.parent in bases
+                and parent.name in wrap_directories(parent.parent)):
+            return parent
     return None
+
+
+@functools.lru_cache(maxsize=None)
+def wrap_directories(subprojects: Path) -> frozenset[str]:
+    """Return the directory names the wraps in @subprojects extract into.
+
+    Meson takes a wrap's `directory` key, or the wrap's own stem when it has
+    none.  A wrap that does not parse names nothing; Meson rejects it anyway.
+    """
+    names = set()
+    for wrap in subprojects.glob("*.wrap"):
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read_string(wrap.read_text(encoding="utf-8"))
+        except (configparser.Error, OSError, UnicodeDecodeError):
+            continue
+        for section in parser.sections():
+            if section.startswith("wrap-"):
+                names.add(parser[section].get("directory", wrap.stem))
+    return frozenset(names)
 
 
 class IncludeSnapshot:

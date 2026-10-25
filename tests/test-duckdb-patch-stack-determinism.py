@@ -1,39 +1,49 @@
 #!/usr/bin/env python3
-"""Prove the pinned DuckDB 1.5.5 patch prefix composes deterministically."""
+"""Prove the pinned DuckDB 2.0.0 patch stack composes deterministically."""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
 import hashlib
+import io
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import tarfile
 import subprocess
 import sys
 import tempfile
 from typing import Callable
-from zipfile import ZipFile
 
 
 ARCHIVE_SHA256 = (
-    "102813201cf8072b8a56b6013978963f3c89202a148fd152d06909477e36fbf8"
+    "7e89053255046bfb26afbd7f524a2fb84df7dbef496aa911ea35e4a1182fdc00"
 )
-ARCHIVE_MEMBERS = frozenset(
-    ("duckdb.cpp", "duckdb.hpp", "duckdb.h", "duckdb_extension.h")
-)
-PATCH_DIR = "subprojects/packagefiles/duckdb-amalgamated"
+# The release tarball's single top-level directory.
+ARCHIVE_ROOT = "duckdb-2.0.0"
+WRAP = "subprojects/duckdb-source.wrap"
+PATCH_DIR = "subprojects/packagefiles/duckdb-source"
 PACKAGE_MESON = f"{PATCH_DIR}/meson.build"
 PATCHES = (
     "0001-vfs-dynamic-cast.patch",
-    "0002-windows-amalgamation-compat.patch",
-    "0003-test-after-walstart-rendezvous.patch",
-    "0004-windows-posix-rename.patch",
-    "0005-llp64-clzll-oracle.patch",
+    "0002-test-seams.patch",
+    "0003-llp64-clzll-oracle.patch",
 )
 PATCH_PATHS = tuple(f"{PATCH_DIR}/{name}" for name in PATCHES)
+# Every source file the stack touches, relative to the archive root.  Strict
+# replay extracts exactly these and hashes them together after each stage.
+PATCHED_FILES = (
+    "src/common/file_system.cpp",
+    "src/include/duckdb/common/bit_utils.hpp",
+    "src/include/duckdb/common/opener_file_system.hpp",
+    "src/include/duckdb/main/config.hpp",
+    "src/main/client_context.cpp",
+    "src/main/database.cpp",
+    "src/storage/checkpoint_manager.cpp",
+)
 WORKFLOWS = (
     ".github/workflows/ci-pr.yml",
     ".github/workflows/ci-main.yml",
@@ -48,7 +58,7 @@ EXPECTED_TRIGGER_BLOCKS = {
 }
 SNAPSHOT_PATHS = (
     ".gitattributes",
-    "subprojects/duckdb-amalgamated.wrap",
+    WRAP,
     PACKAGE_MESON,
     "tests/meson.build",
     *PATCH_PATHS,
@@ -56,40 +66,22 @@ SNAPSHOT_PATHS = (
 )
 SELF_TEST_TEXT_PATHS = (
     ".gitattributes",
-    "subprojects/duckdb-amalgamated.wrap",
+    WRAP,
     PACKAGE_MESON,
     "tests/meson.build",
     *WORKFLOWS,
 )
 EXPECTED_STAGE_HASHES = {
-    PATCHES[0]: (
-        "7c7255a94955efe0d64612998159a11805c35bc0e155214ccc8f07549606083e",
-        "88a24983c3f2dd792a3bb5cfba1d6f8ed910380c892d2fdbdcfed754ee94dba6",
-    ),
-    PATCHES[1]: (
-        "2010b41750f72bf2cbfee8cbc880f7bd5484d261d15057eb4450f388aec1d3b5",
-        "88a24983c3f2dd792a3bb5cfba1d6f8ed910380c892d2fdbdcfed754ee94dba6",
-    ),
-    PATCHES[2]: (
-        "4a766471de4a8112c5d703ac52141b16c5f57d65ce31304e01e7b519fc98d69e",
-        "b84c3242dde1409d7c2303d8a4dfc2f178b609a58438e3ff9f3ded7aa09406d4",
-    ),
-    PATCHES[3]: (
-        "7ee8f12117b56ea55831d37488981bc1f3fa5b68300286ac131fd4557e6bd765",
-        "b84c3242dde1409d7c2303d8a4dfc2f178b609a58438e3ff9f3ded7aa09406d4",
-    ),
-    PATCHES[4]: (
-        "7ee8f12117b56ea55831d37488981bc1f3fa5b68300286ac131fd4557e6bd765",
-        "0a84a87c382de711e86a4f2d100816644bd57e13613eabeee126e886d366606d",
-    ),
+    PATCHES[0]: "fb2cff6cc92b069a3f75266a978927da065b8c976981f4891bfec0ef44d78865",
+    PATCHES[1]: "5afae06a41de5d456b5b7f634d04c0c8a5b225e83cf4b665c66bbb2e611dc51e",
+    PATCHES[2]: "1b9abfca239118cd6443e395b23322f6f69aaeb2facd8b717cbb3825267998de",
 }
 EXPECTED_TRANSACTION_PATCH_SHA256 = (
-    "3468aee40e24b223f9cce9a765ce012b7f44d91f47856bd4649d7c933ca10340"
+    "7c06447b638c219cbc0f7dfb0a7972d6f786695ca8122a07f45185c513554d32"
 )
 EXPECTED_LINUX_LINK_JOB_SHA256 = (
-    "8c42943cbd1cc47a960ec6c888e3a5a5fab329d2ec78a286c9c092654f181507"
+    "2f231dfda010c27e0a8936a07fbb1b00a7212e004339f28e93a113d031eba7fa"
 )
-INTERFACE_GUARD = "#ifdef interface\n#undef interface\n#endif"
 EXPECTED_MESON_HEADER = """fs = import('fs')
 python3 = find_program('python3')
 
@@ -110,7 +102,7 @@ if enable_secure_duckdb_bridge_opt.enabled() and \
     duckdb_patch_tool_name = host_machine.system() == 'darwin' ? 'gpatch' : 'patch'
     duckdb_patch_tool = find_program(duckdb_patch_tool_name, required : true)
     duckdb_patch_archive = meson.project_source_root() / \
-      'subprojects/packagecache/libduckdb-src-v1.5.5.zip'
+      'subprojects/packagecache/duckdb-v2.0.0.tar.gz'
     if not fs.exists(duckdb_patch_archive)
       error('strict DuckDB patch replay requires the resolved pinned archive')
     endif
@@ -316,10 +308,10 @@ EXPECTED_BUILD_STEP = r"""      - name: Build focused checkpoint seam
           fi
           if [ "$RUNNER_OS" = Linux ]; then
             /usr/bin/time -v meson compile -C build-duckdb-seam \
-              -j 1 test-duckdb-after-walstart
+              -j 3 test-duckdb-after-walstart
           else
             /usr/bin/time -l meson compile -C build-duckdb-seam \
-              -j 1 test-duckdb-after-walstart
+              -j 3 test-duckdb-after-walstart
           fi
           test -z "$(find build-duckdb-seam -name libduckdb.a \
             -print -quit)"
@@ -487,12 +479,11 @@ def validate_attributes(snapshot: dict[str, bytes]) -> None:
         snapshot[".gitattributes"], ".gitattributes", universal=True
     )
     logical = [line for line in attributes.splitlines() if line.strip()]
-    expected = (
-        "subprojects/packagefiles/duckdb-amalgamated/"
-        "000[1-5]-*.patch text eol=lf"
-    )
+    # The whole overlay is LF: GNU patch needs LF patches, and the overlay
+    # test compares the generated files byte for byte.
+    expected = "subprojects/packagefiles/duckdb-source/** text eol=lf"
     if logical != [expected]:
-        fail("E_ATTR_RULE", "historical DuckDB patches need the exact LF rule")
+        fail("E_ATTR_RULE", "the DuckDB source overlay needs the exact LF rule")
 
 
 def validate_patch_bytes(snapshot: dict[str, bytes]) -> None:
@@ -500,8 +491,7 @@ def validate_patch_bytes(snapshot: dict[str, bytes]) -> None:
         data = snapshot[relative]
         if b"\r" in data:
             fail("E_PATCH_CRLF", f"CR byte in {relative}")
-    for relative in (*PATCH_PATHS[1:3], PATCH_PATHS[4]):
-        for line_number, line in enumerate(snapshot[relative].splitlines(), 1):
+        for line_number, line in enumerate(data.splitlines(), 1):
             if line == b" ":
                 continue
             if line.endswith((b" ", b"\t")):
@@ -512,72 +502,101 @@ def validate_patch_bytes(snapshot: dict[str, bytes]) -> None:
 
 
 def validate_patch_order(snapshot: dict[str, bytes]) -> None:
-    wrap = decode_utf8(
-        snapshot["subprojects/duckdb-amalgamated.wrap"],
-        "subprojects/duckdb-amalgamated.wrap",
-    )
+    wrap = decode_utf8(snapshot[WRAP], WRAP)
     require_once(
         wrap,
         f"source_hash = {ARCHIVE_SHA256}",
         "E_ARCHIVE_PIN",
         "DuckDB archive SHA pin drifted",
     )
+    require_once(
+        wrap,
+        f"directory = {ARCHIVE_ROOT}",
+        "E_ARCHIVE_PIN",
+        "DuckDB archive root drifted",
+    )
     expected = "diff_files = " + ", ".join(
-        f"duckdb-amalgamated/{name}" for name in PATCHES
+        f"duckdb-source/{name}" for name in PATCHES
     )
     require_once(
         wrap,
         expected,
         "E_PATCH_ORDER",
-        "historical patch order must be exact",
+        "patch order must be exact",
     )
+
+
+def patched_paths(patch: str) -> set[str]:
+    return set(re.findall(r"(?m)^\+\+\+ b/(\S+)$", patch))
 
 
 def validate_patch_semantics(snapshot: dict[str, bytes]) -> None:
-    patch2 = decode_utf8(snapshot[PATCH_PATHS[1]], PATCH_PATHS[1])
-    patch3 = decode_utf8(snapshot[PATCH_PATHS[2]], PATCH_PATHS[2])
-    added_guard = "+#ifdef interface\n+#undef interface\n+#endif"
-    if patch2.count(added_guard) != 6:
-        fail("E_INTERFACE_GUARD_COUNT", "0002 must add exactly six guards")
-    mbedtls_anchor = (
-        " #include <string.h>\n"
-        "-\n"
-        "+\n"
-        " #if defined(_WIN32)\n"
-        " #include <windows.h>\n"
-        "+#ifdef interface\n"
-        "+#undef interface\n"
-        "+#endif\n"
-        " #endif\n"
-        "-\n"
-        "+\n"
-        " // Detect platforms known to support explicit_bzero()"
+    patches = [decode_utf8(snapshot[path], path) for path in PATCH_PATHS]
+    touched = set()
+    for name, patch in zip(PATCHES, patches):
+        paths = patched_paths(patch)
+        if not paths or paths & touched:
+            fail("E_PATCH_FILES", f"{name}: patches must touch disjoint files")
+        touched |= paths
+    if touched != set(PATCHED_FILES):
+        fail("E_PATCH_FILES", "patched file inventory drifted")
+
+    vfs = patches[0]
+    resolver = (
+        "-\tauto &vfs = static_cast<VirtualFileSystem &>(*db.config.file_system);\n"
+        "-\tauto &default_fs = vfs.GetDefaultFileSystem();\n"
+        "-\tif (default_fs.IsLocalFileSystem()) {\n"
+        "-\t\treturn default_fs;\n"
+        "+\tauto *vfs = dynamic_cast<VirtualFileSystem *>(db.config.file_system.get());\n"
+        "+\tif (vfs) {\n"
+        "+\t\tauto &default_fs = vfs->GetDefaultFileSystem();\n"
+        "+\t\tif (default_fs.IsLocalFileSystem()) {\n"
+        "+\t\t\treturn default_fs;\n"
+        "+\t\t}\n"
+        "+\t} else if (db.config.file_system->IsLocalFileSystem()) {\n"
+        "+\t\treturn *db.config.file_system;\n"
     )
-    if patch2.count(mbedtls_anchor) != 1:
-        fail(
-            "E_MBEDTLS_ANCHOR",
-            "mbedtls zeroize guard must retain both unique boundaries",
-        )
+    disabled = (
+        "-\tif (db.config.file_system->SubSystemIsDisabled(local_fs.GetName())) {\n"
+        "+\tauto *vfs = dynamic_cast<VirtualFileSystem *>(db.config.file_system.get());\n"
+        "+\tif (vfs && vfs->SubSystemIsDisabled(local_fs.GetName())) {\n"
+    )
+    home = (
+        "-\t\treturn FileSystem::GetHomeDirectory(GetOpener());\n"
+        "+\t\tstring home_directory;\n"
+        "+\t\tif (TryGetConfiguredHomeDirectory(GetOpener(), home_directory)) {\n"
+        "+\t\t\treturn home_directory;\n"
+        "+\t\t}\n"
+        "+\t\treturn GetFileSystem().GetHomeDirectory();\n"
+    )
+    if vfs.count(resolver) != 1 or vfs.count(disabled) != 1:
+        fail("E_VFS_CAST", "0001 must cast only a VirtualFileSystem, at both sites")
+    if vfs.count(home) != 1:
+        fail("E_VFS_HOME", "0001 must delegate the home directory to the wrapped filesystem")
+
+    seams = patches[1]
     option_anchor = (
         "+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START\n"
         "+\t//! Wyrelog's source-pinned test seam. This field is absent from regular\n"
         "+\t//! DuckDB builds and is not a SQL- or user-visible checkpoint control."
     )
     callback_anchor = (
-        "+\tauto has_wal = storage_manager.WALStartCheckpoint(meta_block, options);\n"
-        "+\n"
+        " \tauto has_wal = storage_manager.WALStartCheckpoint(meta_block, options, "
+        "active_checkpoint);\n"
+        " \tcheckpoint_context = active_checkpoint.GetCheckpointContext();\n"
+        " \n"
         "+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START\n"
         "+\tauto &test_options = DBConfig::GetConfig(db.GetDatabase()).options;\n"
         "+\tif (has_wal && test_options.test_after_wal_start) {\n"
         "+\t\ttest_options.test_after_wal_start(\"AFTER_WAL_START\", "
         "test_options.test_after_wal_start_context);"
     )
-    if patch3.count(option_anchor) != 1 or patch3.count(callback_anchor) != 1:
+    if seams.count(option_anchor) != 1 or seams.count(callback_anchor) != 1:
         fail(
             "E_AFTER_WAL_ANCHOR",
             "AFTER_WAL_START fields and callback boundary must be unique",
         )
-    if patch3.count("+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START") != 2:
+    if seams.count("+#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START") != 2:
         fail("E_AFTER_WAL_SCOPE", "test seam must have exactly two compile guards")
     transaction_fields = (
         "+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
@@ -590,61 +609,67 @@ def validate_patch_semantics(snapshot: dict[str, bytes]) -> None:
         "+#endif"
     )
     commit_callback = (
-        "+\t\t\t// explicitly commit the current transaction\n"
+        " \t\t\tthrow TransactionException(\"cannot commit - no transaction is active\");\n"
+        " \t\t}\n"
         "+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
-        "+\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
+        "+\t\t{\n"
+        "+\t\t\tauto &test_options = DBConfig::GetConfig(*this).options;\n"
         "+\t\t\tif (test_options.test_transaction_control &&\n"
-        "+\t\t\t    test_options.test_transaction_control(\"BEFORE_COMMIT\",\n"
-        "+\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "+\t\t\t    test_options.test_transaction_control(\"BEFORE_COMMIT\", "
+        "test_options.test_transaction_control_context)) {\n"
         "+\t\t\t\tthrow PermissionException(\"Test-injected COMMIT failure\");\n"
         "+\t\t\t}\n"
+        "+\t\t}\n"
         "+#endif\n"
-        "+\t\t\tclient.transaction.Commit();"
+        " \t\ttransaction.Commit();"
     )
     rollback_callback = (
-        "+\t\t} else {\n"
+        " \t\t\tthrow TransactionException(\"cannot rollback - no transaction is active\");\n"
+        " \t\t}\n"
         "+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
-        "+\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
-        "+\t\t\tif (info->type == TransactionType::ROLLBACK &&\n"
-        "+\t\t\t    test_options.test_transaction_control &&\n"
-        "+\t\t\t    test_options.test_transaction_control(\"BEFORE_ROLLBACK\",\n"
-        "+\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "+\t\t{\n"
+        "+\t\t\tauto &test_options = DBConfig::GetConfig(*this).options;\n"
+        "+\t\t\tif (info.type == TransactionType::ROLLBACK && "
+        "test_options.test_transaction_control &&\n"
+        "+\t\t\t    test_options.test_transaction_control(\"BEFORE_ROLLBACK\", "
+        "test_options.test_transaction_control_context)) {\n"
         "+\t\t\t\tthrow PermissionException(\"Test-injected ROLLBACK failure\");\n"
         "+\t\t\t}\n"
+        "+\t\t}\n"
         "+#endif\n"
-        "+\t\t\t// Explicitly rollback the current transaction"
+        " \t\tauto &valid_checker = ValidChecker::Get(transaction.ActiveTransaction());"
     )
-    if patch3.count(transaction_fields) != 1:
+    if seams.count(transaction_fields) != 1:
         fail("E_TRANSACTION_FIELDS", "transaction callback fields drifted")
-    if patch3.count(commit_callback) != 1 or patch3.count(rollback_callback) != 1:
+    if seams.count(commit_callback) != 1 or seams.count(rollback_callback) != 1:
         fail("E_TRANSACTION_BRANCH", "transaction callbacks left branch-local boundaries")
-    if patch3.count("+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL") != 3:
+    if seams.count("+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL") != 3:
         fail("E_TRANSACTION_SCOPE", "transaction seam must have exactly three guards")
 
-    patch5 = decode_utf8(snapshot[PATCH_PATHS[4]], PATCH_PATHS[4])
+    clz = patches[2]
     for narrow in ("clzl", "ctzl"):
         retired = (
             f"-\t\tD_ASSERT(result == static_cast<uint64_t>"
             f"(__builtin_{narrow}(value_in)));"
         )
-        if patch5.count(retired) != 1:
+        if clz.count(retired) != 1:
             fail(
                 "E_CLZ_ORACLE_SOURCE",
-                f"0005 must retire exactly one __builtin_{narrow} oracle",
+                f"0003 must retire exactly one __builtin_{narrow} oracle",
             )
         installed = (
             f"+\t\tD_ASSERT(result == static_cast<uint64_t>"
             f"(__builtin_{narrow}l(value_in)));"
         )
-        if patch5.count(installed) != 1:
+        if clz.count(installed) != 1:
             fail(
                 "E_CLZ_ORACLE_TARGET",
-                f"0005 must install exactly one __builtin_{narrow}l oracle",
+                f"0003 must install exactly one __builtin_{narrow}l oracle",
             )
     for token in ("-\t\tauto result =", "-\t\treturn result;", "-\t\tvalue |=",
                   "-\t\tconstexpr uint64_t"):
-        if token in patch5:
-            fail("E_CLZ_COMPUTATION", "0005 may only move the debug cross-checks")
+        if token in clz:
+            fail("E_CLZ_COMPUTATION", "0003 may only move the debug cross-checks")
 
 
 def validate_seam_build_boundary(snapshot: dict[str, bytes]) -> None:
@@ -934,12 +959,14 @@ def verify_archive_hash(archive: Path) -> None:
         fail("E_ARCHIVE_HASH", "DuckDB archive SHA-256 mismatch")
 
 
-def checked_zip_members(archive: Path) -> list[tuple[object, str]]:
-    checked: list[tuple[object, str]] = []
+def checked_archive_members(archive: Path) -> dict[str, tarfile.TarInfo]:
+    """Return the patched files' members after vetting every member name."""
+    wanted = {f"{ARCHIVE_ROOT}/{relative}": relative for relative in PATCHED_FILES}
+    found: dict[str, tarfile.TarInfo] = {}
     seen: set[str] = set()
-    with ZipFile(archive) as bundle:
-        for info in bundle.infolist():
-            name = info.filename.replace("\\", "/")
+    with tarfile.open(archive, "r:gz") as bundle:
+        for info in bundle:
+            name = info.name
             pure = PurePosixPath(name)
             if (
                 not name
@@ -947,39 +974,49 @@ def checked_zip_members(archive: Path) -> list[tuple[object, str]]:
                 or re.match(r"^[A-Za-z]:", name)
                 or ".." in pure.parts
                 or pure.is_absolute()
+                or pure.parts[0] != ARCHIVE_ROOT
             ):
-                fail("E_ARCHIVE_MEMBER", f"unsafe ZIP member: {info.filename}")
+                fail("E_ARCHIVE_MEMBER", f"unsafe archive member: {name}")
             normalized = str(pure)
             if normalized in seen:
-                fail("E_ARCHIVE_MEMBER", f"duplicate ZIP member: {normalized}")
+                fail("E_ARCHIVE_MEMBER", f"duplicate archive member: {normalized}")
             seen.add(normalized)
-            mode = info.external_attr >> 16
-            kind = stat.S_IFMT(mode)
-            if info.is_dir() or kind not in (0, stat.S_IFREG):
-                fail("E_ARCHIVE_MEMBER", f"unsupported ZIP member: {normalized}")
-            checked.append((info, normalized))
-    if seen != ARCHIVE_MEMBERS:
-        fail("E_ARCHIVE_MEMBER", "DuckDB archive member inventory drifted")
-    return checked
+            if normalized in wanted:
+                if not info.isfile():
+                    fail("E_ARCHIVE_MEMBER", f"unsupported member: {normalized}")
+                found[wanted[normalized]] = info
+    if set(found) != set(PATCHED_FILES):
+        fail("E_ARCHIVE_MEMBER", "DuckDB archive lacks a patched file")
+    return found
 
 
 def extract_checked_archive(archive: Path, destination: Path) -> None:
-    members = checked_zip_members(archive)
-    with ZipFile(archive) as bundle:
-        for info, normalized in members:
-            target = destination / normalized
-            with bundle.open(info, "r") as source, target.open("xb") as output:
+    members = checked_archive_members(archive)
+    with tarfile.open(archive, "r:gz") as bundle:
+        for relative, info in members.items():
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = bundle.extractfile(info)
+            if source is None:
+                fail("E_ARCHIVE_MEMBER", f"unreadable member: {relative}")
+            with source, target.open("xb") as output:
                 shutil.copyfileobj(source, output)
 
 
+def stage_digest(directory: Path) -> str:
+    """One hash over every patched file: its path, a NUL, then its bytes."""
+    digest = hashlib.sha256()
+    for relative in PATCHED_FILES:
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update((directory / relative).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def check_stage_hashes(directory: Path, stage: str) -> None:
-    expected_cpp, expected_hpp = EXPECTED_STAGE_HASHES[stage]
-    actual = (sha256_path(directory / "duckdb.cpp"), sha256_path(directory / "duckdb.hpp"))
-    if actual != (expected_cpp, expected_hpp):
-        fail(
-            "E_COMPOSED_HASH",
-            f"{stage}: composed source hash drifted: {actual[0]} {actual[1]}",
-        )
+    actual = stage_digest(directory)
+    if actual != EXPECTED_STAGE_HASHES[stage]:
+        fail("E_COMPOSED_HASH", f"{stage}: composed source hash drifted: {actual}")
 
 
 def check_clz_oracle(hpp: str) -> None:
@@ -1008,23 +1045,20 @@ def check_clz_oracle(hpp: str) -> None:
 
 
 def validate_composed_semantics(directory: Path) -> None:
-    cpp = (directory / "duckdb.cpp").read_text(encoding="utf-8")
-    hpp = (directory / "duckdb.hpp").read_text(encoding="utf-8")
-    if cpp.count(INTERFACE_GUARD) != 6:
-        fail("E_COMPOSED_INTERFACE", "composed source needs six interface guards")
-    neighborhoods = (
-        "#undef CreateDirectory\n" + INTERFACE_GUARD + "\n\n#undef MoveFile",
-        "#include <windows.h>\n" + INTERFACE_GUARD + "\n#elif defined(__GNUC__)",
-        "#include <windows.h>\n" + INTERFACE_GUARD + "\n#if defined(WINVER)",
-        "#include <string.h>\n\n#if defined(_WIN32)\n#include <windows.h>\n"
-        + INTERFACE_GUARD
-        + "\n#endif\n\n// Detect platforms known to support explicit_bzero()",
-        "#include <windows.h>\n" + INTERFACE_GUARD + "\nmbedtls_ms_time_t mbedtls_ms_time",
-        "#include <windows.h>\n" + INTERFACE_GUARD + "\n#undef ERROR\n#define ERROR(name)",
-    )
-    for neighborhood in neighborhoods:
-        if cpp.count(neighborhood) != 1:
-            fail("E_COMPOSED_INTERFACE", "an intended interface site drifted")
+    def read(relative: str) -> str:
+        return (directory / relative).read_text(encoding="utf-8")
+
+    database = read("src/main/database.cpp")
+    if database.count(
+        "dynamic_cast<VirtualFileSystem *>(db.config.file_system.get())"
+    ) != 2 or "static_cast<VirtualFileSystem &>" in database:
+        fail("E_COMPOSED_VFS", "composed database.cpp still assumes a VirtualFileSystem")
+    if "vfs && vfs->SubSystemIsDisabled(local_fs.GetName())" not in database:
+        fail("E_COMPOSED_VFS", "composed disabled-subsystem check drifted")
+    opener = read("src/include/duckdb/common/opener_file_system.hpp")
+    if "return GetFileSystem().GetHomeDirectory();" not in opener:
+        fail("E_COMPOSED_VFS", "composed home-directory delegation drifted")
+
     option_fields = (
         "#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START\n"
         "\t//! Wyrelog's source-pinned test seam. This field is absent from regular\n"
@@ -1035,7 +1069,9 @@ def validate_composed_semantics(directory: Path) -> None:
         "#endif"
     )
     callback = (
-        "auto has_wal = storage_manager.WALStartCheckpoint(meta_block, options);\n\n"
+        "\tauto has_wal = storage_manager.WALStartCheckpoint(meta_block, options, "
+        "active_checkpoint);\n"
+        "\tcheckpoint_context = active_checkpoint.GetCheckpointContext();\n\n"
         "#ifdef WYL_DUCKDB_TEST_AFTER_WAL_START\n"
         "\tauto &test_options = DBConfig::GetConfig(db.GetDatabase()).options;\n"
         "\tif (has_wal && test_options.test_after_wal_start) {\n"
@@ -1043,7 +1079,9 @@ def validate_composed_semantics(directory: Path) -> None:
         "test_options.test_after_wal_start_context);\n"
         "\t}\n#endif\n\n\tcatalog_entry_vector_t catalog_entries;"
     )
-    if hpp.count(option_fields) != 1 or cpp.count(callback) != 1:
+    config = read("src/include/duckdb/main/config.hpp")
+    checkpoint = read("src/storage/checkpoint_manager.cpp")
+    if config.count(option_fields) != 1 or checkpoint.count(callback) != 1:
         fail("E_COMPOSED_AFTER_WAL", "composed AFTER_WAL_START seam drifted")
     transaction_fields = (
         "#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
@@ -1056,42 +1094,47 @@ def validate_composed_semantics(directory: Path) -> None:
         "#endif"
     )
     commit_callback = (
-        "\t\t\t// explicitly commit the current transaction\n"
+        "\t\t\tthrow TransactionException(\"cannot commit - no transaction is active\");\n"
+        "\t\t}\n"
         "#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
-        "\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
+        "\t\t{\n"
+        "\t\t\tauto &test_options = DBConfig::GetConfig(*this).options;\n"
         "\t\t\tif (test_options.test_transaction_control &&\n"
-        "\t\t\t    test_options.test_transaction_control(\"BEFORE_COMMIT\",\n"
-        "\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "\t\t\t    test_options.test_transaction_control(\"BEFORE_COMMIT\", "
+        "test_options.test_transaction_control_context)) {\n"
         "\t\t\t\tthrow PermissionException(\"Test-injected COMMIT failure\");\n"
         "\t\t\t}\n"
+        "\t\t}\n"
         "#endif\n"
-        "\t\t\tclient.transaction.Commit();"
+        "\t\ttransaction.Commit();"
     )
     rollback_callback = (
-        "\t\t} else {\n"
         "#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n"
-        "\t\t\tauto &test_options = DBConfig::GetConfig(client).options;\n"
-        "\t\t\tif (info->type == TransactionType::ROLLBACK &&\n"
-        "\t\t\t    test_options.test_transaction_control &&\n"
-        "\t\t\t    test_options.test_transaction_control(\"BEFORE_ROLLBACK\",\n"
-        "\t\t\t        test_options.test_transaction_control_context)) {\n"
+        "\t\t{\n"
+        "\t\t\tauto &test_options = DBConfig::GetConfig(*this).options;\n"
+        "\t\t\tif (info.type == TransactionType::ROLLBACK && "
+        "test_options.test_transaction_control &&\n"
+        "\t\t\t    test_options.test_transaction_control(\"BEFORE_ROLLBACK\", "
+        "test_options.test_transaction_control_context)) {\n"
         "\t\t\t\tthrow PermissionException(\"Test-injected ROLLBACK failure\");\n"
         "\t\t\t}\n"
+        "\t\t}\n"
         "#endif\n"
-        "\t\t\t// Explicitly rollback the current transaction"
+        "\t\tauto &valid_checker = ValidChecker::Get(transaction.ActiveTransaction());"
     )
-    if hpp.count(transaction_fields) != 1:
+    client = read("src/main/client_context.cpp")
+    if config.count(transaction_fields) != 1:
         fail("E_COMPOSED_TRANSACTION", "composed transaction fields drifted")
-    if cpp.count(commit_callback) != 1 or cpp.count(rollback_callback) != 1:
+    if client.count(commit_callback) != 1 or client.count(rollback_callback) != 1:
         fail("E_COMPOSED_TRANSACTION", "composed transaction callbacks drifted")
-    check_clz_oracle(hpp)
+    check_clz_oracle(read("src/include/duckdb/common/bit_utils.hpp"))
 
 
 def strict_replay(root: Path, archive: Path, tool: Path) -> None:
     verify_archive_hash(archive)
     verify_gnu_patch(tool)
-    if sha256_path(root / PATCH_PATHS[2]) != EXPECTED_TRANSACTION_PATCH_SHA256:
-        fail("E_PATCH_HASH", "transaction-control patch byte hash drifted")
+    if sha256_path(root / PATCH_PATHS[1]) != EXPECTED_TRANSACTION_PATCH_SHA256:
+        fail("E_PATCH_HASH", "test-seam patch byte hash drifted")
     with tempfile.TemporaryDirectory(prefix="wyrelog-duckdb-patches-") as temporary:
         source = Path(temporary)
         extract_checked_archive(archive, source)
@@ -1271,15 +1314,15 @@ def run_self_tests(
             mutated(
                 snapshot,
                 ".gitattributes",
-                lambda data: replace_once(data, b"000[1-5]", b"*"),
+                lambda data: replace_once(data, b"duckdb-source/**", b"duckdb-source/*.patch"),
             ),
         ),
         (
             "E_PATCH_ORDER",
             mutated(
                 snapshot,
-                "subprojects/duckdb-amalgamated.wrap",
-                lambda data: replace_once(data, b"0002-windows", b"0092-windows"),
+                WRAP,
+                lambda data: replace_once(data, b"0002-test-seams", b"0092-test-seams"),
             ),
         ),
         (
@@ -1292,13 +1335,13 @@ def run_self_tests(
         ),
         (
             "E_PATCH_TRAILING_WS",
-            mutated(snapshot, PATCH_PATHS[4], lambda data: data.replace(b"\n", b" \n", 1)),
+            mutated(snapshot, PATCH_PATHS[2], lambda data: data.replace(b"\n", b" \n", 1)),
         ),
         (
             "E_CLZ_ORACLE_SOURCE",
             mutated(
                 snapshot,
-                PATCH_PATHS[4],
+                PATCH_PATHS[2],
                 lambda data: replace_once(
                     data, b"__builtin_ctzl(value_in)));", b"__builtin_ctzq(value_in)));"
                 ),
@@ -1308,7 +1351,7 @@ def run_self_tests(
             "E_CLZ_ORACLE_TARGET",
             mutated(
                 snapshot,
-                PATCH_PATHS[4],
+                PATCH_PATHS[2],
                 lambda data: replace_once(
                     data, b"__builtin_ctzll(value_in)));", b"__builtin_ctzq(value_in)));"
                 ),
@@ -1318,7 +1361,7 @@ def run_self_tests(
             "E_CLZ_COMPUTATION",
             mutated(
                 snapshot,
-                PATCH_PATHS[4],
+                PATCH_PATHS[2],
                 lambda data: replace_once(
                     data, b" \t\tconstexpr uint64_t debruijn64lsb",
                     b"-\t\tconstexpr uint64_t debruijn64lsb"
@@ -1326,22 +1369,38 @@ def run_self_tests(
             ),
         ),
         (
-            "E_INTERFACE_GUARD_COUNT",
+            "E_VFS_CAST",
             mutated(
                 snapshot,
-                PATCH_PATHS[1],
-                lambda data: data + b"+#ifdef interface\n+#undef interface\n+#endif\n",
+                PATCH_PATHS[0],
+                lambda data: replace_once(
+                    data,
+                    b"+\tif (vfs && vfs->SubSystemIsDisabled(local_fs.GetName())) {",
+                    b"+\tif (db.config.file_system->SubSystemIsDisabled(local_fs.GetName())) {",
+                ),
             ),
         ),
         (
-            "E_MBEDTLS_ANCHOR",
+            "E_VFS_HOME",
             mutated(
                 snapshot,
-                PATCH_PATHS[1],
+                PATCH_PATHS[0],
                 lambda data: replace_once(
                     data,
-                    b" // Detect platforms known to support explicit_bzero()",
-                    b" // moved platform boundary",
+                    b"+\t\treturn GetFileSystem().GetHomeDirectory();",
+                    b"+\t\treturn FileSystem::GetHomeDirectory(GetOpener());",
+                ),
+            ),
+        ),
+        (
+            "E_PATCH_FILES",
+            mutated(
+                snapshot,
+                PATCH_PATHS[2],
+                lambda data: replace_once(
+                    data,
+                    b"+++ b/src/include/duckdb/common/bit_utils.hpp",
+                    b"+++ b/src/main/database.cpp",
                 ),
             ),
         ),
@@ -1349,7 +1408,7 @@ def run_self_tests(
             "E_AFTER_WAL_ANCHOR",
             mutated(
                 snapshot,
-                PATCH_PATHS[2],
+                PATCH_PATHS[1],
                 lambda data: replace_once(data, b'"AFTER_WAL_START"', b'"MOVED"'),
             ),
         ),
@@ -1357,7 +1416,7 @@ def run_self_tests(
             "E_TRANSACTION_FIELDS",
             mutated(
                 snapshot,
-                PATCH_PATHS[2],
+                PATCH_PATHS[1],
                 lambda data: replace_once(
                     data,
                     b"test_transaction_control_context = nullptr",
@@ -1369,7 +1428,7 @@ def run_self_tests(
             "E_TRANSACTION_BRANCH",
             mutated(
                 snapshot,
-                PATCH_PATHS[2],
+                PATCH_PATHS[1],
                 lambda data: replace_once(
                     data, b'"BEFORE_COMMIT"', b'"BEFORE_SWITCH"'
                 ),
@@ -1379,11 +1438,11 @@ def run_self_tests(
             "E_TRANSACTION_BRANCH",
             mutated(
                 snapshot,
-                PATCH_PATHS[2],
+                PATCH_PATHS[1],
                 lambda data: replace_once(
                     data,
-                    b"info->type == TransactionType::ROLLBACK",
-                    b"type == TransactionType::ROLLBACK",
+                    b"info.type == TransactionType::ROLLBACK && ",
+                    b"",
                 ),
             ),
         ),
@@ -1391,7 +1450,7 @@ def run_self_tests(
             "E_TRANSACTION_SCOPE",
             mutated(
                 snapshot,
-                PATCH_PATHS[2],
+                PATCH_PATHS[1],
                 lambda data: data
                 + b"+#ifdef WYL_DUCKDB_TEST_TRANSACTION_CONTROL\n+#endif\n",
             ),
@@ -1403,8 +1462,8 @@ def run_self_tests(
                 PACKAGE_MESON,
                 lambda data: replace_once(
                     data,
-                    b"  cpp_args : duckdb_compile_args,\n",
-                    b"  cpp_args : duckdb_compile_args + "
+                    b"  cpp_args : duckdb_compile_args + duckdb_library_args,\n",
+                    b"  cpp_args : duckdb_compile_args + duckdb_library_args + "
                     b"['-DWYL_DUCKDB_TEST_TRANSACTION_CONTROL=1'],\n",
                 ),
             ),
@@ -1998,15 +2057,36 @@ def run_self_tests(
         bad_archive = Path(temporary) / "bad.zip"
         bad_archive.write_bytes(b"not the pinned archive")
         expect_error(lambda: verify_archive_hash(bad_archive), "E_ARCHIVE_HASH")
+    for unsafe in ("../escape.cpp", f"{ARCHIVE_ROOT}/../escape.cpp",
+                   "other-root/src/main/database.cpp"):
+        with tempfile.TemporaryDirectory(prefix="wyrelog-member-probe-") as temporary:
+            bad_bundle = Path(temporary) / "unsafe.tar.gz"
+            with tarfile.open(bad_bundle, "w:gz") as bundle:
+                payload = b"unsafe"
+                info = tarfile.TarInfo(unsafe)
+                info.size = len(payload)
+                bundle.addfile(info, io.BytesIO(payload))
+            expect_error(
+                lambda bad_bundle=bad_bundle: checked_archive_members(bad_bundle),
+                "E_ARCHIVE_MEMBER",
+            )
     with tempfile.TemporaryDirectory(prefix="wyrelog-member-probe-") as temporary:
-        bad_bundle = Path(temporary) / "unsafe.zip"
-        with ZipFile(bad_bundle, "w") as bundle:
-            bundle.writestr("../duckdb.cpp", b"unsafe")
-        expect_error(lambda: checked_zip_members(bad_bundle), "E_ARCHIVE_MEMBER")
+        linked = Path(temporary) / "linked.tar.gz"
+        with tarfile.open(linked, "w:gz") as bundle:
+            for relative in PATCHED_FILES:
+                info = tarfile.TarInfo(f"{ARCHIVE_ROOT}/{relative}")
+                if relative == PATCHED_FILES[0]:
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = "/etc/passwd"
+                    bundle.addfile(info)
+                else:
+                    bundle.addfile(info, io.BytesIO(b""))
+        expect_error(lambda: checked_archive_members(linked), "E_ARCHIVE_MEMBER")
     with tempfile.TemporaryDirectory(prefix="wyrelog-source-hash-probe-") as temporary:
         source = Path(temporary)
-        (source / "duckdb.cpp").write_bytes(b"wrong cpp")
-        (source / "duckdb.hpp").write_bytes(b"wrong hpp")
+        for relative in PATCHED_FILES:
+            (source / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source / relative).write_bytes(b"wrong")
         expect_error(
             lambda: check_stage_hashes(source, PATCHES[0]),
             "E_COMPOSED_HASH",

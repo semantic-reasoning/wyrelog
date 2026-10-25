@@ -199,7 +199,7 @@ def require_straight_line(source: str, contract: str) -> None:
 
 def validate_secure_temp_fixture(source: str) -> None:
     source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    if source_digest != "f1135efb4423a27d0ec2f638d6e9a4d08ab8d33a6a0e25ca834eba3a41ca8821":
+    if source_digest != "c59928ab8339bd234febb2edf999b07e0c184256f0e105603ce46127fe823d3b":
         raise FixtureContractError(
             "secure fixture changed outside its reviewed full-source allowlist"
         )
@@ -224,7 +224,7 @@ def validate_secure_temp_fixture(source: str) -> None:
         "ProvisionedPairFixture ()":
             "e7bd8defef11bd4bfd29f64250d8a1587ed34dd3275049203800aadb84fb182e",
         "test_secure_temp_child_lifecycle (void)":
-            "b3e7a35f64937ee241ff79f7785e315c887c1ccc6983c557309c2a94721ab90b",
+            "c282d91d2a740ea9363cf030e5639806f9995f187b8be768e4e7448b03a779ee",
         "main (int argc, char **argv)":
             "322ed0506c58c308e7bd89235c197cd47857f14d3e3ee8c1c7a4dffd14694752",
     }
@@ -1063,7 +1063,8 @@ for token in (
     "wyl_fact_artifact_namespace_open_provisioned_pair_internal",
     "WylSecureDuckdbFileSystem",
     "TemporaryDirectory",
-    "duckdb_temp_storage_S32K-0.tmp",
+    "_0_storage_S32K-0.tmp",
+    "std::to_string (GetCurrentProcessId ())",
     "TempChildrenCreatedForTest",
     "TryRemoveFile",
 ):

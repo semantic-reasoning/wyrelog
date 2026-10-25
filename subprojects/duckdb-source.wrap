@@ -1,0 +1,10 @@
+[wrap-file]
+directory = duckdb-2.0.0
+source_url = https://github.com/duckdb/duckdb/archive/refs/tags/v2.0.0.tar.gz
+source_filename = duckdb-v2.0.0.tar.gz
+source_hash = 7e89053255046bfb26afbd7f524a2fb84df7dbef496aa911ea35e4a1182fdc00
+patch_directory = duckdb-source
+diff_files = duckdb-source/0001-vfs-dynamic-cast.patch, duckdb-source/0002-test-seams.patch, duckdb-source/0003-llp64-clzll-oracle.patch
+
+[provide]
+duckdb-source = duckdb_dep

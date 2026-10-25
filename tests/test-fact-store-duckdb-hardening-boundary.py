@@ -125,6 +125,8 @@ def validate_repository(root: Path, overrides: dict[str, str] | None = None) -> 
         "settings[i] == WYL_FACT_STORE_DUCKDB_CONFIG_ACCESS_MODE",
         "g_stat (path, &before)",
         "mode, &result, &store), ==,\n        WYRELOG_E_OK",
+        "#define RAW_SQLITE_NO_EXTENSION_LOADER 31",
+        '"this build does not link the loadable_extensions library"',
     )
     for requirement in c_requirements:
         if requirement not in c_test:
@@ -148,10 +150,19 @@ def validate_repository(root: Path, overrides: dict[str, str] | None = None) -> 
         "f'newfstatat(AT_FDCWD, \"{staged}\", 0) = 0'",
         "f'openat(AT_FDCWD, \"{staged}\", O_RDONLY) = -1 EACCES'",
         'raise RuntimeError("positive control modified extension artifacts")',
+        "NO_EXTENSION_LOADER = 31",
+        "expect_loader_posture(duckdb_source, status)",
+        'root / "clean-positive.strace", None, arguments.duckdb_source,',
+        "        if status == NO_EXTENSION_LOADER:\n"
+        "            # A library without a loader must not even look for the scanner.\n"
+        "            validate_trace(evidence)\n",
     )
     for requirement in runtime_requirements:
         if requirement not in runtime:
             errors.append(f"portable runtime evidence drifted: {requirement}")
+    if ("'--duckdb-source', get_option('duckdb_source'),\n"
+            "      test_fact_store_duckdb_hardening,") not in meson:
+        errors.append("runtime driver does not learn the DuckDB source")
     for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         workflow = read(f".github/workflows/{workflow_name}")
         if "meson ninja-build pkg-config patch strace time" not in workflow:
@@ -241,6 +252,27 @@ def self_test(root: Path) -> list[str]:
         ("failed open fixture", "tests/test-fact-store-duckdb-autoload-runtime.py",
          "f'openat(AT_FDCWD, \"{staged}\", O_RDONLY) = -1 EACCES'",
          "f'fixture-removed-{staged}'"),
+        ("loader refusal code", "tests/test-fact-store-duckdb-hardening.c",
+         "#define RAW_SQLITE_NO_EXTENSION_LOADER 31",
+         "#define RAW_SQLITE_NO_EXTENSION_LOADER 30"),
+        ("loader refusal text", "tests/test-fact-store-duckdb-hardening.c",
+         '"this build does not link the loadable_extensions library"',
+         '"loadable_extensions"'),
+        ("driver refusal code", "tests/test-fact-store-duckdb-autoload-runtime.py",
+         "NO_EXTENSION_LOADER = 31", "NO_EXTENSION_LOADER = 30"),
+        ("loader posture", "tests/test-fact-store-duckdb-autoload-runtime.py",
+         "expect_loader_posture(duckdb_source, status)", "pass"),
+        ("clean positive control", "tests/test-fact-store-duckdb-autoload-runtime.py",
+         'root / "clean-positive.strace", None, arguments.duckdb_source,',
+         'root / "clean-positive.strace", None, "prebuilt",'),
+        ("loader-less trace", "tests/test-fact-store-duckdb-autoload-runtime.py",
+         "            validate_trace(evidence)\n        elif",
+         '            validate_no_network(evidence, "positive control")\n'
+         "        elif"),
+        ("driver DuckDB source", "tests/meson.build",
+         "'--duckdb-source', get_option('duckdb_source'),\n"
+         "      test_fact_store_duckdb_hardening,",
+         "test_fact_store_duckdb_hardening,"),
         ("runtime self-test registration", "tests/meson.build",
          "test('fact-store-duckdb-autoload-runtime-self-test'",
          "test('removed-runtime-self-test'"),

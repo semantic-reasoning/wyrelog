@@ -1923,7 +1923,7 @@ check_fact_store_persists_logical_bytes (void)
  * so it cannot also mean "we do not know" (#1013).
  *
  * The fixture drops the column to get back to the old shape, which DuckDB
- * 1.5.5 only permits once fact_event_log's foreign key is gone.  Nothing is
+ * only permits once fact_event_log's foreign key is gone.  Nothing is
  * appended afterwards: create_schema recreates that table empty, so the
  * sequence counter would restart at 1 and collide with the projection rows
  * the seeded batch already holds.  This checks the migration, not a write.
@@ -4744,16 +4744,16 @@ check_fact_forget_reconcile_zeroes_outcome_on_invalid (void)
  * everything else fails loudly.
  *
  * The property is currently guaranteed only by a trace of vendored
- * third-party code.  Line numbers below are against the IN-TREE PATCHED
- * amalgamation of DuckDB v1.5.5; the same sites sit 73 lines earlier in
- * duckdb.cpp.orig, so check the version before concluding a citation is
- * stale rather than that behaviour changed.  Replay is unconditional WITH
- * RESPECT TO READ-ONLY at :430010 (the branch selector at :429896 sends
- * read-only down the replaying arm; its polarity is the opposite of a
- * suppressor), and the read-only guards at :448100, :448249 and :448266
- * suppress only mutation of the WAL -- file removal and a MoveFile -- never
- * its replay.  A version bump can invalidate that trace with no other
- * signal, which is why this is an assertion and not a comment.
+ * third-party code.  Paths below are in the pinned DuckDB v2.0.0 source tree,
+ * which wyrelog's patches do not touch there.  Replay is unconditional WITH
+ * RESPECT TO READ-ONLY at src/storage/storage_manager.cpp:587 (the branch at
+ * :511 is taken for an existing file "or read-only mode"; its polarity is the
+ * opposite of a suppressor), and the read-only guards in
+ * src/storage/wal_replay.cpp at :394, :565, :574 and :594 suppress only
+ * mutation of the WAL -- file removal, marker truncation, a MoveFile and the
+ * recovery merge -- never its replay.  A version bump can invalidate that
+ * trace with no other signal, which is why this is an assertion and not a
+ * comment.
  *
  * READ THESE THREE LIMITS BEFORE CITING THIS TEST.
  *

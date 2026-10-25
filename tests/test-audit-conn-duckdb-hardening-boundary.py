@@ -21,7 +21,7 @@ FILES = (
     ".github/workflows/ci-main.yml",
 )
 
-SOURCE_WINDOWS_WAIVER = """  # Issue #920: DuckDB 1.5.5 compares 64-bit CountZeros results with
+SOURCE_WINDOWS_WAIVER = """  # Issue #920: DuckDB 2.0.0 compares 64-bit CountZeros results with
   # 32-bit unsigned-long builtins under clang-cl/LLP64.  Until #920 fixes
   # those assertion oracles, positive/effective source-Windows runtime is
   # temporarily waived.  The retained child and structural gates below are
@@ -281,9 +281,23 @@ def validate_repository(root: Path,
         "validate_positive_trace",
         "return 77",
         "file_digest(catalog)",
+        "NO_EXTENSION_LOADER = 31",
+        "(30, NO_EXTENSION_LOADER),",
+        'validate_hardened_trace(positive, home / ".duckdb" / "extensions")',
     ):
         if required not in runtime:
             errors.append(f"runtime evidence lacks: {required}")
+    if runtime.count("expect_loader_posture(duckdb_source, status)") != 2:
+        errors.append("runtime does not check the loader posture in both modes")
+    if hardening_block.count(
+            "'--duckdb-source', get_option('duckdb_source'),") != 2:
+        errors.append("runtime registrations do not learn the DuckDB source")
+    for required in (
+        "#define RAW_SQLITE_NO_EXTENSION_LOADER 31",
+        '"this build does not link the loadable_extensions library"',
+    ):
+        if required not in focused:
+            errors.append(f"positive control lacks: {required}")
 
     ledger = set(texts["tools/formatted-files.txt"].splitlines())
     for path in (
@@ -426,6 +440,27 @@ def self_test(root: Path) -> list[str]:
          "meson compile -C builddir test-audit-conn-duckdb-hardening",
          "set NDEBUG=1\n          meson compile -C builddir "
          "test-audit-conn-duckdb-hardening"),
+        ("loader refusal code", "tests/test-audit-conn-duckdb-hardening.c",
+         "#define RAW_SQLITE_NO_EXTENSION_LOADER 31",
+         "#define RAW_SQLITE_NO_EXTENSION_LOADER 30"),
+        ("loader refusal text", "tests/test-audit-conn-duckdb-hardening.c",
+         '"this build does not link the loadable_extensions library"',
+         '"loadable_extensions"'),
+        ("driver refusal code", "tests/test-audit-conn-duckdb-autoload-runtime.py",
+         "NO_EXTENSION_LOADER = 31", "NO_EXTENSION_LOADER = 30"),
+        ("loader posture", "tests/test-audit-conn-duckdb-autoload-runtime.py",
+         "        expect_loader_posture(duckdb_source, status)\n        if",
+         "        if"),
+        ("clean positive control",
+         "tests/test-audit-conn-duckdb-autoload-runtime.py",
+         "(30, NO_EXTENSION_LOADER),", "(0, 30, NO_EXTENSION_LOADER),"),
+        ("loader-less trace", "tests/test-audit-conn-duckdb-autoload-runtime.py",
+         'validate_hardened_trace(positive, home / ".duckdb" / "extensions")',
+         "pass"),
+        ("driver DuckDB source", "tests/meson.build",
+         "      '--duckdb-source', get_option('duckdb_source'),\n"
+         "      test_audit_conn_duckdb_hardening,",
+         "      test_audit_conn_duckdb_hardening,"),
         ("effective row count", "tests/test-audit-conn-duckdb-hardening.c",
          "duckdb_row_count (&result), ==, G_N_ELEMENTS (expected)",
          "duckdb_row_count (&result), >=, 1"),

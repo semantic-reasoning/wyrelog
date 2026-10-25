@@ -7,7 +7,7 @@ import sys
 
 root = Path(sys.argv[1])
 package = (
-    root / "subprojects" / "packagefiles" / "duckdb-amalgamated"
+    root / "subprojects" / "packagefiles" / "duckdb-source"
     / "meson.build").read_text(encoding="utf-8")
 parent = (root / "meson.build").read_text(encoding="utf-8")
 tests = (root / "tests" / "meson.build").read_text(encoding="utf-8")
@@ -27,8 +27,9 @@ seam_start = package.index(
     "duckdb_test_seam_lib = static_library('duckdb-test-after-wal-start'")
 seam_end = package.index("\n  )\n", seam_start)
 seam = package[seam_start:seam_end]
-if seam.count("duckdb.cpp") != 1:
-    raise SystemExit("test seam must compile the pinned amalgamation directly")
+if seam.count("duckdb_sources,") != 1 or regular.count("duckdb_sources,") != 1:
+    raise SystemExit(
+        "test seam must compile the same pinned source list as duckdb_lib")
 if "duckdb_test_seam_compile_args" not in seam:
     raise SystemExit("test seam target must receive its compile-time macro")
 if "install : false" not in seam or "build_by_default : false" not in seam:
@@ -76,7 +77,7 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "os: [ubuntu-latest, macos-latest]",
         "timeout-minutes: 45",
         "meson compile -C build-duckdb-seam",
-        "-j 1 test-duckdb-after-walstart",
+        "-j 3 test-duckdb-after-walstart",
         "test-duckdb-after-walstart",
         "meson test -C build-duckdb-seam --no-rebuild",
         "duckdb-after-walstart-no-wal",

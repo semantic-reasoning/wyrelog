@@ -248,7 +248,7 @@ void wyl_fact_artifact_win_temp_token_free (WylFactArtifactWinTempToken *);
 wyrelog_error_t wyl_fact_artifact_win_temp_token_open_io_session
   (WylFactArtifactWinTempToken *, WylFactArtifactWinIoSession **);
 
-/* Opaque, lease-bound DuckDB 1.5.5 spill authority.  It accepts no host path
+/* Opaque, lease-bound DuckDB 2.0.0 spill authority.  It accepts no host path
  * or CRT descriptor: the root is minted here and a child uses only the
  * source-pinned logical spelling. Child I/O is an opaque session. */
 wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_root

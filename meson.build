@@ -38,7 +38,7 @@ if enable_secure_duckdb_bridge_opt.enabled()
     error('enable_secure_duckdb_bridge requires enable_fact_store=enabled')
   endif
   if get_option('duckdb_source') != 'subproject'
-    error('enable_secure_duckdb_bridge requires duckdb_source=subproject (pinned DuckDB 1.5.5 source)')
+    error('enable_secure_duckdb_bridge requires duckdb_source=subproject (pinned DuckDB 2.0.0 source)')
   endif
   # This is a C++ API contract on every supported host.  In particular, do
   # not let the Windows C-only bridge target silently resolve a prebuilt DLL:
@@ -73,27 +73,26 @@ if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
           + host_machine.system())
     endif
   else
-    # From-source build of the upstream DuckDB amalgamated single-TU
-    # release. Slow (multi-minute single-TU C++ compile) but uses the
-    # same source layout the upstream project ships and exercises the
-    # full link path. Intended for main-branch CI to validate that
-    # wyrelog still links cleanly against a freshly built libduckdb.
+    # From-source build of the upstream DuckDB release tree, compiled in
+    # the translation units upstream's package_build.py produces.  Slow
+    # (several hundred large C++ units) but exercises the full link path
+    # and is the only provenance the secure bridge accepts.
     if enable_secure_duckdb_bridge_opt.enabled()
       # The secure bridge is coupled to the pinned DuckDB C++ API.  Bypass
       # generic dependency discovery so it can only use this exact source
-      # subproject (currently v1.5.5), never a system lookalike.
-      duckdb_subproject = subproject('duckdb-amalgamated', required : true)
+      # subproject (currently v2.0.0), never a system lookalike.
+      duckdb_subproject = subproject('duckdb-source', required : true)
       duckdb_dep = duckdb_subproject.get_variable('duckdb_dep')
       duckdb_test_seam_dep = duckdb_subproject.get_variable(
         'duckdb_test_seam_dep')
       # Meson 1.1 lacks SubprojectHolder.project_version(); the declared
       # subproject dependency carries that same project version.
-      if duckdb_dep.version() != '1.5.5'
-        error('enable_secure_duckdb_bridge requires DuckDB source subproject version 1.5.5')
+      if duckdb_dep.version() != '2.0.0'
+        error('enable_secure_duckdb_bridge requires DuckDB source subproject version 2.0.0')
       endif
     else
-      duckdb_dep = dependency('duckdb-amalgamated',
-        fallback : ['duckdb-amalgamated', 'duckdb_dep'])
+      duckdb_dep = dependency('duckdb-source',
+        fallback : ['duckdb-source', 'duckdb_dep'])
     endif
   endif
 else

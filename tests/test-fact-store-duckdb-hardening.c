@@ -4,6 +4,7 @@
 #include <glib/gstdio.h>
 #include <duckdb.h>
 #include <sqlite3.h>
+#include <string.h>
 
 #include "fact/store-duckdb-config-test-seams-private.h"
 #include "fact/store-private.h"
@@ -269,6 +270,11 @@ probe_foreign_sqlite (const gchar *path)
   return 0;
 }
 
+/* Upstream's refusal when the library carries no extension loader at all, as
+ * the source subproject builds it; the runtime driver expects exactly this
+ * status there and never on the prebuilt library. */
+#define RAW_SQLITE_NO_EXTENSION_LOADER 31
+
 static gint
 raw_sqlite_positive_control (const gchar *path)
 {
@@ -276,14 +282,19 @@ raw_sqlite_positive_control (const gchar *path)
   duckdb_config config = NULL;
   duckdb_connection conn = NULL;
   duckdb_result result = { 0 };
+  char *error = NULL;
   gint rc = 30;
   if (duckdb_create_config (&config) != DuckDBSuccess)
     goto out;
   if (duckdb_set_config (config, "autoinstall_known_extensions", "false")
       != DuckDBSuccess)
     goto out;
-  if (duckdb_open_ext (path, &db, config, NULL) != DuckDBSuccess)
+  if (duckdb_open_ext (path, &db, config, &error) != DuckDBSuccess) {
+    if (error != NULL && strstr (error,
+        "this build does not link the loadable_extensions library") != NULL)
+      rc = RAW_SQLITE_NO_EXTENSION_LOADER;
     goto out;
+  }
   if (duckdb_connect (db, &conn) != DuckDBSuccess)
     goto out;
   if (duckdb_query (conn, "SELECT COUNT(*) FROM foreign_table;", &result)
@@ -293,6 +304,7 @@ raw_sqlite_positive_control (const gchar *path)
     goto out;
   rc = 0;
 out:
+  duckdb_free (error);
   duckdb_destroy_result (&result);
   duckdb_disconnect (&conn);
   duckdb_close (&db);

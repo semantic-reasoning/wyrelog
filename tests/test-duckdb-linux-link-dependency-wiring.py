@@ -14,7 +14,7 @@ import sys
 from typing import Callable
 
 
-PACKAGE_MESON = "subprojects/packagefiles/duckdb-amalgamated/meson.build"
+PACKAGE_MESON = "subprojects/packagefiles/duckdb-source/meson.build"
 TESTS_MESON = "tests/meson.build"
 CONSUMER = "tests/test-duckdb-source-offbridge-c-consumer.c"
 WORKFLOWS = (
@@ -406,7 +406,7 @@ def validate_ci_job(job: str, path: str) -> None:
     compile_step = steps["Compile Clang/libstdc++ C consumer"]
     require_once(
         compile_step,
-        "          meson compile -C build-duckdb-linux-link -j 1 \\\n"
+        "          meson compile -C build-duckdb-linux-link -j 3 \\\n"
         "            test-duckdb-source-offbridge-c-consumer",
         "E_CI_STEP",
     )
@@ -837,8 +837,9 @@ def run_self_test(root: Path) -> None:
             PACKAGE_MESON,
             lambda text: replace_once(
                 text,
-                "  dependencies : duckdb_deps,\n  cpp_args : duckdb_compile_args,",
-                "  cpp_args : duckdb_compile_args,",
+                "  dependencies : duckdb_deps,\n"
+                "  cpp_args : duckdb_compile_args + duckdb_library_args,",
+                "  cpp_args : duckdb_compile_args + duckdb_library_args,",
             )
             + "\n# dependencies : duckdb_deps\n",
             "E_DEPENDENCY_EXPORT",
@@ -849,8 +850,8 @@ def run_self_test(root: Path) -> None:
             lambda text: replace_once(
                 text,
                 "    dependencies : duckdb_deps,\n"
-                "    cpp_args : duckdb_test_seam_compile_args,",
-                "    cpp_args : duckdb_test_seam_compile_args,",
+                "    cpp_args : duckdb_test_seam_compile_args + duckdb_library_args,",
+                "    cpp_args : duckdb_test_seam_compile_args + duckdb_library_args,",
             )
             + "\n# dependencies : duckdb_deps\n",
             "E_DEPENDENCY_EXPORT",
@@ -1241,7 +1242,7 @@ def run_self_test(root: Path) -> None:
 
     valid = (
         "cc -o tests/test-duckdb-source-offbridge-c-consumer consumer.o "
-        "subprojects/duckdb-amalgamated/libduckdb.a "
+        "subprojects/duckdb-2.0.0/libduckdb.a "
         "-Wl,--start-group -lpthread -ldl -lm -lstdc++ -Wl,--end-group"
     )
     validate_link_command(valid)
@@ -1254,7 +1255,7 @@ def run_self_test(root: Path) -> None:
         (valid.replace("cc -o", "c++ -o"), "E_LINK_DRIVER"),
         (valid.replace("-Wl,--end-group", ""), "E_LINK_GROUP"),
         (
-            valid.replace("subprojects/duckdb-amalgamated/libduckdb.a ", "")
+            valid.replace("subprojects/duckdb-2.0.0/libduckdb.a ", "")
             .replace("cc -o", "cc -lduckdb -o"),
             "E_LINK_ARCHIVE",
         ),
@@ -1273,7 +1274,7 @@ def run_self_test(root: Path) -> None:
     )
     generated_link = (
         f"cc -o tests/{TARGET} {object_path} "
-        "subprojects/duckdb-amalgamated-src/libduckdb.a "
+        "subprojects/duckdb-2.0.0/libduckdb.a "
         "-Wl,--start-group -lpthread -ldl -lm -lstdc++ -Wl,--end-group"
     )
     generated = compile_command + "\n" + generated_link

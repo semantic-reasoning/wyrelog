@@ -1,0 +1,95 @@
+diff --git a/src/common/file_system.cpp b/src/common/file_system.cpp
+index 62a7b2b8..f5e30169 100644
+--- a/src/common/file_system.cpp
++++ b/src/common/file_system.cpp
+@@ -343,15 +343,22 @@ string FileSystem::ExtractExtension(const string &path) {
+ 	return vec.back();
+ }
+ 
++bool TryGetConfiguredHomeDirectory(optional_ptr<FileOpener> opener, string &home_directory) {
++	if (!opener) {
++		return false;
++	}
++	Value result;
++	if (!opener->TryGetCurrentSetting("home_directory", result) || result.IsNull() || result.ToString().empty()) {
++		return false;
++	}
++	home_directory = result.ToString();
++	return true;
++}
++
+ string FileSystem::GetHomeDirectory(optional_ptr<FileOpener> opener) {
+-	// read the home_directory setting first, if it is set
+-	if (opener) {
+-		Value result;
+-		if (opener->TryGetCurrentSetting("home_directory", result)) {
+-			if (!result.IsNull() && !result.ToString().empty()) {
+-				return result.ToString();
+-			}
+-		}
++	string home_directory;
++	if (TryGetConfiguredHomeDirectory(opener, home_directory)) {
++		return home_directory;
+ 	}
+ 	// fallback to the default home directories for the specified system
+ #ifdef DUCKDB_WINDOWS
+diff --git a/src/include/duckdb/common/opener_file_system.hpp b/src/include/duckdb/common/opener_file_system.hpp
+index 309d3a06..e84f4db5 100644
+--- a/src/include/duckdb/common/opener_file_system.hpp
++++ b/src/include/duckdb/common/opener_file_system.hpp
+@@ -11,6 +11,9 @@
+ #include "duckdb/common/file_system.hpp"
+ 
+ namespace duckdb {
++
++//! The home_directory setting from the opener, when one is set; defined in file_system.cpp.
++DUCKDB_API bool TryGetConfiguredHomeDirectory(optional_ptr<FileOpener> opener, string &home_directory);
+ class MultiFileList;
+ 
+ // The OpenerFileSystem is wrapper for a file system that pushes an appropriate FileOpener into the various API calls
+@@ -165,7 +168,11 @@ public:
+ 	}
+ 
+ 	string GetHomeDirectory() override {
+-		return FileSystem::GetHomeDirectory(GetOpener());
++		string home_directory;
++		if (TryGetConfiguredHomeDirectory(GetOpener(), home_directory)) {
++			return home_directory;
++		}
++		return GetFileSystem().GetHomeDirectory();
+ 	}
+ 
+ 	string ExpandPath(const string &path) override {
+diff --git a/src/main/database.cpp b/src/main/database.cpp
+index 6817c5f2..2e775aab 100644
+--- a/src/main/database.cpp
++++ b/src/main/database.cpp
+@@ -468,10 +468,14 @@ FileSystem &DatabaseInstance::GetLocalFileSystem() {
+ }
+ 
+ static FileSystem &ResolveLocalFileSystem(DatabaseInstance &db, unique_ptr<FileSystem> &owned) {
+-	auto &vfs = static_cast<VirtualFileSystem &>(*db.config.file_system);
+-	auto &default_fs = vfs.GetDefaultFileSystem();
+-	if (default_fs.IsLocalFileSystem()) {
+-		return default_fs;
++	auto *vfs = dynamic_cast<VirtualFileSystem *>(db.config.file_system.get());
++	if (vfs) {
++		auto &default_fs = vfs->GetDefaultFileSystem();
++		if (default_fs.IsLocalFileSystem()) {
++			return default_fs;
++		}
++	} else if (db.config.file_system->IsLocalFileSystem()) {
++		return *db.config.file_system;
+ 	}
+ 	owned = make_uniq<LocalFileSystem>();
+ 	return *owned;
+@@ -482,7 +486,8 @@ LocalDatabaseFileSystem::LocalDatabaseFileSystem(DatabaseInstance &db_p)
+ }
+ 
+ FileSystem &LocalDatabaseFileSystem::GetFileSystem() const {
+-	if (db.config.file_system->SubSystemIsDisabled(local_fs.GetName())) {
++	auto *vfs = dynamic_cast<VirtualFileSystem *>(db.config.file_system.get());
++	if (vfs && vfs->SubSystemIsDisabled(local_fs.GetName())) {
+ 		throw PermissionException("File system %s has been disabled by configuration", local_fs.GetName());
+ 	}
+ 	return local_fs;

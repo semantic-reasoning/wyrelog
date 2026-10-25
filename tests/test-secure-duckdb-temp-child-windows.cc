@@ -106,7 +106,8 @@ test_secure_temp_child_lifecycle (void)
   ProvisionedPairFixture fixture;
   WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
   const auto temp_path = filesystem.TemporaryDirectory ()
-      + "/duckdb_temp_storage_S32K-0.tmp";
+      + "/duckdb_temp_" + std::to_string (GetCurrentProcessId ())
+      + "_0_storage_S32K-0.tmp";
   auto temporary = filesystem.OpenFile (temp_path,
           duckdb::FileOpenFlags (11, duckdb::FileLockType::NO_LOCK,
           duckdb::FileCompressionType::UNCOMPRESSED), nullptr);

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-artifact-windows-namespace-private.h"
+#include "fact/duckdb-temp-name-private.h"
 #include "fact/publication-lock-event-private.h"
 
 #ifdef G_OS_WIN32
@@ -2359,45 +2360,16 @@ struct WylFactArtifactWinTempChildBinding
   gboolean io_open;
 };
 
+/* A spill child this process's DuckDB may name: the pid in a DuckDB 2.0
+ * temporary name is the creating process, and this authority serves only
+ * the instance running here. */
 static gboolean
 temp_child_name (const gchar *name)
 {
-  const gchar *p;
-  if (name == NULL || strpbrk (name, "/\\\\") != NULL)
-    return FALSE;
-  if (g_str_has_prefix (name, "duckdb_temp_storage_")) {
-    p = name + strlen ("duckdb_temp_storage_");
-    if (g_str_has_prefix (p, "DEFAULT"))
-      p += strlen ("DEFAULT");
-    else {
-      static const gchar *const classes[] = { "S32K", "S64K", "S96K",
-                                              "S128K", "S160K", "S192K", "S224K"};
-      gboolean matched = FALSE;
-      for (guint i = 0; i < G_N_ELEMENTS (classes); i++)
-        if (g_str_has_prefix (p, classes[i])) {
-          p += strlen (classes[i]);
-          matched = TRUE;
-          break;
-        }
-      if (!matched)
-        return FALSE;
-    }
-    if (*p++ != '-')
-      return FALSE;
-    const gchar *digits = p;
-    while (g_ascii_isdigit (*p))
-      p++;
-    return p != digits && (digits[0] == '0' ? p == digits + 1
-        : (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
-  }
-  if (!g_str_has_prefix (name, "duckdb_temp_block-"))
-    return FALSE;
-  p = name + strlen ("duckdb_temp_block-");
-  const gchar *digits = p;
-  while (g_ascii_isdigit (*p))
-    p++;
-  return p != digits && (digits[0] == '0' ? p == digits + 1
-      : (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+  gint64 pid = 0;
+  return wyl_duckdb_temp_name_classify (name, &pid)
+         != WYL_DUCKDB_TEMP_NAME_INVALID
+         && pid == (gint64) GetCurrentProcessId ();
 }
 
 static WylFactArtifactWinTempRoot *temp_root_ref
