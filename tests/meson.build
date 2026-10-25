@@ -469,12 +469,15 @@ if get_option('enable_fact_store').allowed() and \
   # One -r prefix, not one -p per case: GLib (2.88 on the row) prints a
   # late TAP plan after every -p path, and meson's TAP parser reports a
   # second plan as an ERROR even when every case passed.
+  # Runs 40185256787 and 40189091510 took 179.36 s and 179.99 s for all
+  # 29 cases; 40194419110 hit 180.46 s after 27 cases. Give this Windows
+  # aggregate a bounded 360 s budget, about twice the completed runtime.
   if host_machine.system() == 'windows'
     test('fact-offline-restore-windows-reconstitution',
       test_offline_backup_source,
       args : ['--tap', '-r', '/fact-offline-backup-source/windows'],
       protocol : 'tap',
-      timeout : 180,
+      timeout : 360,
     )
   endif
   if host_machine.system() != 'windows'
