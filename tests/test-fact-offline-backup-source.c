@@ -71,6 +71,63 @@ static gchar *graph_file_path (BackupFixture *fixture,
 static WylFactArtifactInventoryIdentity windows_file_identity (
   const gchar *path);
 #endif
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+static void
+test_recover_unbound_callback_windows_identity (void)
+{
+  g_auto (WylFactOfflineBackupManifest) manifest = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_init
+        (&manifest, "tenant-a", 1), ==, WYRELOG_E_OK);
+  WylFactOfflineBackupArtifact artifact = {
+    .graph_id = "alpha", .store_uuid = "store-alpha",
+    .format_version = 1, .path_encoding_version = 1,
+    .schema_digest = "schema-alpha", .logical_bytes = 10,
+    .physical_bytes = 4096, .checksum = "sha256:alpha",
+  };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_add
+        (&manifest, &artifact), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) manifest_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_encode
+        (&manifest, &manifest_blob), ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) targets = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
+  WylFactOfflineRestoreTargetGraph *target = g_new0
+        (WylFactOfflineRestoreTargetGraph, 1);
+  target->graph_id = g_strdup ("alpha");
+  target->lifecycle_generation = 1;
+  target->reconciliation_generation = 1;
+  target->expected_main_absent = TRUE;
+  g_ptr_array_add (targets, target);
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal,
+      manifest_blob, "018f22d0-7b6d-7a5b-8c31-123456789abc",
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", 1, 1, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (journal.graphs, 0);
+  graph->staged_main_identity.object_width = 16;
+  /* An all-zero Windows identity passes the guard and reaches the missing
+   * lease. Nonzero FileId bytes must be refused by the guard itself. */
+  g_assert_cmpint (wyl_fact_offline_restore_recover_unbound_callback_for_test
+        (&journal, 0), ==, WYRELOG_E_INVALID);
+  for (guint i = 0; i < sizeof graph->staged_main_identity.object_bytes; i++) {
+    graph->staged_main_identity.object_bytes[i] = 1;
+    g_autoptr (GBytes) before = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+          (&journal, &before), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_recover_unbound_callback_for_test
+          (&journal, 0), ==, WYRELOG_E_POLICY);
+    g_autoptr (GBytes) after = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+          (&journal, &after), ==, WYRELOG_E_OK);
+    g_assert_true (g_bytes_equal (before, after));
+    graph->staged_main_identity.object_bytes[i] = 0;
+  }
+}
+#endif
+
 /* An in-memory engine for runtime sessions.  The Windows cases use it
  * too, so it lives outside the POSIX-only session block below. */
 static wyrelog_error_t
@@ -19249,6 +19306,11 @@ main (int argc, char **argv)
    * Windows. */
   g_test_add_func ("/fact-offline-backup-source/windows/restore-dry-run",
       test_restore_dry_run_windows);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_func
+    ("/fact-offline-backup-source/windows/rollback-unbound-callback-identity",
+      test_recover_unbound_callback_windows_identity);
+#endif
   g_test_add_data_func
     ("/fact-offline-backup-source/windows/rollback-crash-before-complete",
       "crash-before-complete", test_graph_rollback_windows);

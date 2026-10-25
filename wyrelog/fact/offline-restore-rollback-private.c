@@ -58,6 +58,15 @@ selected_graph (GraphRollback *rollback)
   return g_ptr_array_index (rollback->journal.graphs, rollback->selected_index);
 }
 
+static gboolean
+identity_zero (const WylFactArtifactInventoryIdentity *identity)
+{
+  return (identity->object_width == 0 || identity->object_width == 16)
+         && identity->domain == 0 && identity->object == 0
+         && memcmp (identity->object_bytes, (guint8[16]) { 0 },
+             sizeof identity->object_bytes) == 0;
+}
+
 static void
 rollback_graph_resources_clear (GraphRollback *rollback)
 {
@@ -383,8 +392,7 @@ recover_unbound_callback (gpointer user_data)
 {
   GraphRollback *rollback = user_data;
   const WylFactOfflineRestoreJournalGraph *graph = selected_graph (rollback);
-  if (graph->staged_main_identity.domain != 0
-      || graph->staged_main_identity.object != 0)
+  if (!identity_zero (&graph->staged_main_identity))
     return WYRELOG_E_POLICY;
   if (rollback->journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK)
     return graph->transition_state ==
@@ -394,6 +402,21 @@ recover_unbound_callback (gpointer user_data)
     return WYRELOG_E_POLICY;
   return cas_change (rollback, ROLLBACK_DECIDE);
 }
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t
+wyl_fact_offline_restore_recover_unbound_callback_for_test
+  (const WylFactOfflineRestoreJournal *journal, guint selected_index)
+{
+  /* Borrow the journal; without a lease the callback cannot change it. */
+  GraphRollback rollback = {
+    .journal = *journal, .selected_index = selected_index,
+    .resolver = WYL_FACT_GRAPH_RESOLVER_INIT,
+    .directory = WYL_FACT_GRAPH_DIRECTORY_INIT,
+  };
+  return recover_unbound_callback (&rollback);
+}
+#endif
 
 static wyrelog_error_t
 open_provider (GraphRollback *rollback)
@@ -689,8 +712,7 @@ rollback_one_run
   if (rc == WYRELOG_E_OK)
     rc = open_active_pair (&rollback);
   gboolean unbound = rc == WYRELOG_E_OK
-      && selected_graph (&rollback)->staged_main_identity.domain == 0
-      && selected_graph (&rollback)->staged_main_identity.object == 0;
+      && identity_zero (&selected_graph (&rollback)->staged_main_identity);
   if (rc == WYRELOG_E_OK && unbound) {
     gboolean admitted = FALSE;
     rc = recover_unbound (&rollback, &admitted);

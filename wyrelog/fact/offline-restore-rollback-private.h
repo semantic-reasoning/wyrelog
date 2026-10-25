@@ -57,6 +57,8 @@ void wyl_fact_offline_restore_graph_rollback_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint)
     (WylFactOfflineRestoreRollbackCheckpoint point, gpointer user_data),
     gpointer user_data);
+wyrelog_error_t wyl_fact_offline_restore_recover_unbound_callback_for_test
+  (const WylFactOfflineRestoreJournal *journal, guint selected_index);
 #endif
 
 G_END_DECLS

@@ -1026,6 +1026,43 @@ decision_barrier_and_recovery (void)
 }
 
 static void
+windows_zero_domain_stage_round_trip (void)
+{
+  g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity stage = {
+    .object_width = 16, .object_bytes = { [15] = 1 },
+  };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+        (&journal, "alpha", &stage), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&journal, &encoded), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) decoded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (encoded, &decoded), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (decoded.graphs, 0);
+  g_assert_cmpuint (graph->staged_main_identity.domain, ==, 0);
+  g_assert_cmpuint (graph->staged_main_identity.object, ==, 0);
+  g_assert_cmpuint (graph->staged_main_identity.object_width, ==, 16);
+  g_assert_cmpmem (graph->staged_main_identity.object_bytes,
+      sizeof graph->staged_main_identity.object_bytes,
+      stage.object_bytes, sizeof stage.object_bytes);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&decoded,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+  g_assert_cmpint (graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE);
+  g_assert_cmpint (graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+}
+
+static void
 rollback_converges (void)
 {
   g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
@@ -1377,6 +1414,8 @@ main (int argc, char **argv)
       not_applied_attempt_is_retryable);
   g_test_add_func ("/fact/offline-restore/rollback-converges",
       rollback_converges);
+  g_test_add_func ("/fact/offline-restore/windows-zero-domain-stage",
+      windows_zero_domain_stage_round_trip);
   g_test_add_func ("/fact/offline-restore/orphan-stage-admission",
       orphan_stage_admitted_for_rollback);
   g_test_add_func ("/fact/offline-restore/tamper-scope",
