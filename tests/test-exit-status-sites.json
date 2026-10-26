@@ -330,63 +330,77 @@
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3639,
+    "line": 3627,
     "api": "_exit",
     "expression": "90",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3652,
+    "line": 3640,
     "api": "_exit",
     "expression": "91",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3658,
+    "line": 3646,
     "api": "_exit",
     "expression": "92",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3663,
+    "line": 3651,
     "api": "_exit",
     "expression": "92",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3666,
+    "line": 3654,
     "api": "_exit",
     "expression": "92",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3667,
+    "line": 3655,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3678,
+    "line": 3666,
     "api": "_exit",
     "expression": "error_code",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3683,
+    "line": 3671,
     "api": "_exit",
     "expression": "error_code",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3686,
+    "line": 3674,
+    "api": "_exit",
+    "expression": "error_code",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
+    "path": "tests/test-secure-duckdb-recording-filesystem.cc",
+    "line": 3684,
+    "api": "_exit",
+    "expression": "error_code",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
+    "path": "tests/test-secure-duckdb-recording-filesystem.cc",
+    "line": 3691,
     "api": "_exit",
     "expression": "error_code",
     "platform": "posix-normalized-wrapper"
@@ -402,131 +416,117 @@
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
     "line": 3703,
     "api": "_exit",
-    "expression": "error_code",
-    "platform": "posix-normalized-wrapper"
-  },
-  {
-    "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3708,
-    "api": "_exit",
-    "expression": "error_code",
-    "platform": "posix-normalized-wrapper"
-  },
-  {
-    "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3715,
-    "api": "_exit",
     "expression": "100",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3735,
+    "line": 3723,
     "api": "_exit",
     "expression": "105",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3737,
+    "line": 3725,
     "api": "_exit",
     "expression": "101",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3741,
+    "line": 3729,
     "api": "_exit",
     "expression": "102",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3743,
+    "line": 3731,
     "api": "_exit",
     "expression": "104",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3750,
+    "line": 3738,
     "api": "_exit",
     "expression": "104",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3754,
+    "line": 3742,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3761,
+    "line": 3749,
     "api": "_exit",
     "expression": "106",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3769,
+    "line": 3757,
     "api": "_exit",
     "expression": "109",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3796,
+    "line": 3784,
     "api": "_exit",
     "expression": "107",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3798,
+    "line": 3786,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3819,
+    "line": 3807,
     "api": "_exit",
     "expression": "111",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 3820,
+    "line": 3808,
     "api": "_exit",
     "expression": "112",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 6279,
+    "line": 6267,
     "api": "_exit",
     "expression": "120",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 6291,
+    "line": 6279,
     "api": "_exit",
     "expression": "121",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 6300,
+    "line": 6288,
     "api": "_exit",
     "expression": "122",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 6304,
+    "line": 6292,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
