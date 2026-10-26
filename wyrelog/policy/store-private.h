@@ -33,7 +33,8 @@ wyrelog_error_t wyl_policy_store_user_register (wyl_policy_store_t *store, const
 /* Same-thread coordinator frame.  It excludes same-handle SQL transactions
  * across policy/filesystem work.  publish authenticates and durably replaces
  * an encrypted canonical policy image while both locks remain held; plaintext
- * SQLite is already durable at commit. */
+ * SQLite is already durable at commit. Generic commits inside this frame
+ * defer encrypted publication to publish; clear never publishes. */
 typedef struct
 {
   wyl_policy_store_t *store;
@@ -75,6 +76,20 @@ typedef void (*WylPolicyStoreTransactionContentionHook)
   (wyl_policy_store_t *store, gpointer data);
 void wyl_policy_store_set_transaction_contention_hook_for_test
   (wyl_policy_store_t *store, WylPolicyStoreTransactionContentionHook hook,
+    gpointer data);
+/* After a standalone outer SQL commit, before encrypted publication, while
+ * both authority and connection mutexes are held. Seams build only. */
+typedef void (*WylPolicyStoreEncryptedPublicationHook)
+  (wyl_policy_store_t *store, gpointer data);
+void wyl_policy_store_set_encrypted_publication_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreEncryptedPublicationHook hook,
+    gpointer data);
+/* After a native Windows replacement failure, before retry identity/reparse
+ * checks. Seams build only. */
+typedef void (*WylPolicyStoreEncryptedReplacementRetryHook)
+  (wyl_policy_store_t *store, guint attempt, guint32 native_error, gpointer data);
+void wyl_policy_store_set_encrypted_replacement_retry_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreEncryptedReplacementRetryHook hook,
     gpointer data);
 /* Make the next logical quota settlement on this store fail with E_IO, once.
  * Test use only; declared unconditionally, defined only in the seams build. */
@@ -1672,7 +1687,12 @@ sqlite3 *wyl_policy_store_get_db (wyl_policy_store_t * store);
  * store terminal and ends its frame either way, so a caller need not roll
  * back after a failed commit (and a rollback it does issue then finds
  * nothing to end); a publication transaction whose COMMIT is refused while
- * the transaction stays open keeps it for the caller's rollback. */
+ * the transaction stays open keeps it for the caller's rollback.
+ *
+ * Successful standalone outer commits durably publish encrypted policy
+ * images before returning. Nested savepoints and coordinator-fenced commits
+ * defer publication to their owning outer frame. Publication failure makes
+ * the store terminal and suppresses close-time republication. */
 wyrelog_error_t wyl_policy_store_begin_mutation (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_commit_mutation (wyl_policy_store_t * store);
 void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);

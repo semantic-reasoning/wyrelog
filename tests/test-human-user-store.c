@@ -4,7 +4,12 @@
 #include "test-exit-status.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include <glib/gstdio.h>
+#include <string.h>
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-log-private.h"
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
 
 /* Registration is explicit; a grant or login must never invent a human. */
 static void
@@ -374,9 +379,8 @@ check_grant_delete_interleavings (void)
   }
 }
 
-/* Offline assertion for the real daemon E2E, after its exclusive lease ends. */
-static void
-inspect_deleted_user (const gchar *path, const gchar *key, const gchar *subject)
+static wyl_policy_store_t *
+open_encrypted_user_store (const gchar *path, const gchar *key)
 {
   wyl_keyprovider_file_t *provider = wyl_keyprovider_file_new (key);
   g_assert_nonnull (provider);
@@ -386,8 +390,321 @@ inspect_deleted_user (const gchar *path, const gchar *key, const gchar *subject)
     .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
     .require_encrypted = TRUE
   };
-  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyl_policy_store_t *store = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&options, &store), ==, WYRELOG_E_OK);
+  return store;
+}
+
+static void
+seed_committed_user (wyl_policy_store_t *store)
+{
+  g_assert_cmpint (wyl_policy_store_user_register (store, "committed-user"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+      "committed-user", "wr.datalog.query", "__wr_default"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store,
+      "committed-user", "wr.datalog.query", "__wr_default", "armed"),
+      ==, WYRELOG_E_OK);
+  WylTotpEnrollment enrollment = {
+    .subject_id = g_strdup ("committed-user"),
+    .last_verified_step = G_MININT64,
+    .enrolled_at = 1,
+  };
+  memset (enrollment.secret, 0x42, sizeof enrollment.secret);
+  g_assert_cmpint (wyl_policy_store_totp_enrollment_insert (store,
+      &enrollment), ==, WYRELOG_E_OK);
+  wyl_totp_enrollment_clear (&enrollment);
+  g_assert_cmpint (wyl_policy_store_user_register (store, "fixture-admin"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
+      "fixture-admin", "wr.system_admin", "__wr_default"),
+      ==, WYRELOG_E_OK);
+  const gchar *subjects[] = { "disabled-user", "deleted-user" };
+  const gchar *operations[] = { "disable", "delete" };
+  for (guint i = 0; i < G_N_ELEMENTS (subjects); i++) {
+    g_assert_cmpint (wyl_policy_store_user_register (store, subjects[i]),
+        ==, WYRELOG_E_OK);
+    gchar request[WYL_REQUEST_ID_STRING_BUF];
+    g_assert_cmpint (wyl_request_id_new (request, sizeof request),
+        ==, WYRELOG_E_OK);
+    g_auto (WylUserOperation) operation = { 0 };
+    g_auto (WylUserDeletePreview) preview = { 0 };
+    g_autoptr (GPtrArray) children = NULL;
+    if (i == 1) {
+      g_assert_cmpint (wyl_policy_store_user_preview (store, subjects[i],
+          &preview), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (preview.tenants->len, ==, 0);
+      children = g_ptr_array_new_with_free_func (wyl_user_child_free);
+    }
+    g_assert_cmpint (wyl_policy_store_user_operation_commit (store,
+        subjects[i], "fixture-admin", operations[i], request,
+        preview.fingerprint, children, &operation), ==, WYRELOG_E_OK);
+  }
+}
+
+typedef struct
+{
+  wyl_policy_store_t *store;
+  GMutex mutex;
+  GCond condition;
+  gboolean attempted;
+} CommitFenceRace;
+
+static gpointer
+commit_after_fence (gpointer data)
+{
+  CommitFenceRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->attempted = TRUE;
+  g_cond_signal (&race->condition);
+  g_mutex_unlock (&race->mutex);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (race->store),
+      ==, WYRELOG_E_OK);
+  seed_committed_user (race->store);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (race->store),
+      ==, WYRELOG_E_OK);
+  return NULL;
+}
+
+static void
+close_without_republication (wyl_policy_store_t *store, const gchar *path)
+{
+  g_autofree gchar *before = NULL;
+  g_autofree gchar *after = NULL;
+  gsize before_size = 0;
+  gsize after_size = 0;
+  g_assert_true (g_file_get_contents (path, &before, &before_size, NULL));
+  wyl_policy_store_close (store);
+  g_assert_true (g_file_get_contents (path, &after, &after_size, NULL));
+  g_assert_true (after_size == before_size
+      && memcmp (after, before, before_size) == 0);
+}
+
+static _Noreturn void
+commit_child_exit (void)
+{
+  WYL_TEST__EXIT (0);
+}
+
+static _Noreturn void
+crash_policy_commit (const gchar *mode, const gchar *path, const gchar *key)
+{
+  wyl_policy_store_t *store = open_encrypted_user_store (path, key);
+  gboolean fenced = g_str_has_prefix (mode, "fence");
+  gboolean nested = g_str_equal (mode, "nested");
+  gboolean publication = g_str_has_prefix (mode, "publication") || fenced;
+  WylPolicyStoreCoordinatorFence fence =
+      WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  if (fenced)
+    g_assert_cmpint (wyl_policy_store_coordinator_fence_acquire (store,
+        &fence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (publication
+      ? wyl_policy_store_publication_transaction_begin (store)
+      : wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  if (nested)
+    g_assert_cmpint (wyl_policy_store_begin_mutation (store),
+        ==, WYRELOG_E_OK);
+  gboolean race_mode = g_str_equal (mode, "fence-race");
+  if (race_mode)
+    g_assert_cmpint (wyl_policy_store_user_register (store, "fence-owner"),
+        ==, WYRELOG_E_OK);
+  else
+    seed_committed_user (store);
+  gboolean replacement_failure = FALSE;
+#ifdef G_OS_WIN32
+  replacement_failure = g_str_equal (mode, "publication-replace-fail");
+  HANDLE reader = INVALID_HANDLE_VALUE;
+  if (replacement_failure) {
+    g_autofree gunichar2 *wide_path =
+        g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+    g_assert_nonnull (wide_path);
+    reader = CreateFileW ((const wchar_t *) wide_path, GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    g_assert_true (reader != INVALID_HANDLE_VALUE);
+  }
+#endif
+  gboolean ambiguous = g_str_has_suffix (mode, "-fail") && !fenced
+      && !replacement_failure;
+  if (ambiguous)
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_DIRECTORY_SYNC);
+  wyrelog_error_t rc = publication
+      ? wyl_policy_store_publication_transaction_commit (store)
+      : wyl_policy_store_commit_mutation (store);
+  if (ambiguous || replacement_failure) {
+#ifdef G_OS_WIN32
+    if (replacement_failure)
+      g_assert_true (CloseHandle (reader));
+#endif
+    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_terminal_result (store),
+        !=, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_user_require (store,
+        "committed-user", TRUE), !=, WYRELOG_E_OK);
+    close_without_republication (store, path);
+    commit_child_exit ();
+  }
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  if (nested) {
+    wyl_policy_store_rollback_mutation (store);
+    commit_child_exit ();
+  }
+  CommitFenceRace race = { .store = store };
+  GThread *writer = NULL;
+  if (race_mode) {
+    g_mutex_init (&race.mutex);
+    g_cond_init (&race.condition);
+    writer = g_thread_new ("commit-after-fence", commit_after_fence, &race);
+    g_mutex_lock (&race.mutex);
+    while (!race.attempted)
+      g_cond_wait (&race.condition, &race.mutex);
+    g_mutex_unlock (&race.mutex);
+  }
+  if (fenced) {
+    gboolean fail = g_str_equal (mode, "fence-fail");
+    if (fail)
+      wyl_policy_store_graph_authority_migration_fail_once (store,
+          WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COORDINATOR_PUBLICATION);
+    rc = wyl_policy_store_coordinator_fence_publish (&fence);
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    if (fail) {
+      g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_terminal_result (store),
+          !=, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_user_require (store,
+          "committed-user", TRUE), !=, WYRELOG_E_OK);
+      close_without_republication (store, path);
+      commit_child_exit ();
+    }
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  }
+  if (writer != NULL) {
+    g_thread_join (writer);
+    g_cond_clear (&race.condition);
+    g_mutex_clear (&race.mutex);
+  }
+  g_assert_cmpint (wyl_policy_store_user_require (store,
+      "committed-user", TRUE), ==, WYRELOG_E_OK);
+  commit_child_exit ();
+}
+
+static void
+check_encrypted_commit_crashes (const gchar *program)
+{
+  const gchar *modes[] = {
+    "publication", "mutation", "nested", "fence", "fence-fail",
+    "publication-fail", "mutation-fail", "fence-race",
+#ifdef G_OS_WIN32
+    "publication-replace-fail",
+#endif
+  };
+  g_autofree gchar *executable = g_canonicalize_filename (program, NULL);
+  for (guint i = 0; i < G_N_ELEMENTS (modes); i++) {
+    g_print ("encrypted commit crash: %s\n", modes[i]);
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *directory = g_dir_make_tmp
+          ("wyl-user-commit-XXXXXX", &error);
+    g_assert_no_error (error);
+    g_autofree gchar *path = g_build_filename (directory, "policy", NULL);
+    g_autofree gchar *key = g_build_filename (directory, "key", NULL);
+    guint8 key_bytes[32] = { 0x42 };
+    g_assert_true (g_file_set_contents (key, (const gchar *) key_bytes,
+        sizeof key_bytes, &error));
+    g_assert_no_error (error);
+    wyl_policy_store_t *store = open_encrypted_user_store (path, key);
+    g_assert_cmpint (wyl_policy_store_create_schema (store),
+        ==, WYRELOG_E_OK);
+    wyl_policy_store_close (store);
+    g_autofree gchar *before = NULL;
+    gsize before_size = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_size, &error));
+    g_assert_no_error (error);
+    gchar *child[] = { executable, "--crash-policy-commit",
+                       (gchar *) modes[i], path, key, NULL };
+    gint status = 0;
+    g_autofree gchar *child_error = NULL;
+    gboolean replacement_failure =
+        g_str_equal (modes[i], "publication-replace-fail");
+    g_auto (GStrv) child_env = NULL;
+    if (replacement_failure) {
+      child_env = g_environ_unsetenv (g_get_environ (), "WYL_LOG_FILE");
+      child_env = g_environ_setenv (child_env, "WYL_LOG", "warn", TRUE);
+    }
+    g_assert_true (g_spawn_sync (NULL, child, child_env, G_SPAWN_DEFAULT,
+        NULL, NULL, NULL, replacement_failure ? &child_error : NULL,
+        &status, &error));
+    g_assert_no_error (error);
+    g_assert_true (g_spawn_check_wait_status (status, &error));
+    g_assert_no_error (error);
+    if (replacement_failure && WYL_LOG_MAX_LEVEL >= WYL_LOG_LEVEL_ERROR) {
+      g_print ("%s", child_error);
+      g_assert_nonnull (strstr (child_error, "win32="));
+      g_assert_null (strstr (child_error, "win32=0)"));
+    }
+    gboolean absent = g_str_equal (modes[i], "nested")
+        || g_str_equal (modes[i], "fence-fail") || replacement_failure;
+    if (absent) {
+      g_autofree gchar *after = NULL;
+      gsize after_size = 0;
+      g_assert_true (g_file_get_contents (path, &after, &after_size, &error));
+      g_assert_no_error (error);
+      g_assert_true (after_size == before_size
+          && memcmp (after, before, before_size) == 0);
+    }
+    store = open_encrypted_user_store (path, key);
+    if (absent)
+      g_assert_cmpint (wyl_policy_store_user_require (store,
+          "committed-user", TRUE), !=, WYRELOG_E_OK);
+    else if (!g_str_has_suffix (modes[i], "-fail")) {
+      g_assert_cmpint (wyl_policy_store_user_require (store,
+          "committed-user", TRUE), ==, WYRELOG_E_OK);
+      g_assert_cmpint (count_rows (store,
+          "SELECT COUNT(*) FROM direct_permissions "
+          "WHERE subject_id='committed-user' "
+          "AND perm_id='wr.datalog.query' AND scope='__wr_default'"),
+          ==, 1);
+      g_assert_cmpint (count_rows (store,
+          "SELECT COUNT(*) FROM permission_states "
+          "WHERE subject_id='committed-user' AND state='armed' "
+          "AND perm_id='wr.datalog.query' AND scope='__wr_default'"),
+          ==, 1);
+      WylTotpEnrollment enrollment = { 0 };
+      gboolean found = FALSE;
+      g_assert_cmpint (wyl_policy_store_totp_enrollment_lookup (store,
+          "committed-user", &enrollment, &found), ==, WYRELOG_E_OK);
+      g_assert_true (found);
+      guint8 expected[WYL_TOTP_ENROLLMENT_SECRET_BYTES];
+      memset (expected, 0x42, sizeof expected);
+      g_assert_true (memcmp (enrollment.secret, expected, sizeof expected)
+          == 0);
+      wyl_totp_enrollment_clear (&enrollment);
+      g_assert_cmpint (wyl_policy_store_user_require (store,
+          "disabled-user", TRUE), !=, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_user_require (store,
+          "disabled-user", FALSE), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_user_require (store,
+          "deleted-user", FALSE), !=, WYRELOG_E_OK);
+      if (g_str_equal (modes[i], "fence-race"))
+        g_assert_cmpint (count_rows (store,
+            "SELECT COUNT(*) FROM human_users "
+            "WHERE subject_id='fence-owner'"), ==, 1);
+    }
+    wyl_policy_store_close (store);
+    g_autofree gchar *lock = g_strconcat (path, ".wyrelog-lock", NULL);
+    g_assert_cmpint (g_remove (lock), ==, 0);
+    g_assert_cmpint (g_remove (key), ==, 0);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    g_assert_cmpint (g_rmdir (directory), ==, 0);
+  }
+}
+
+/* Offline assertion for the real daemon E2E, after its exclusive lease ends. */
+static void
+inspect_deleted_user (const gchar *path, const gchar *key, const gchar *subject)
+{
+  g_autoptr (wyl_policy_store_t) store = open_encrypted_user_store (path, key);
   const gchar *tables[] = {"role_memberships", "direct_permissions", "permission_states",
                            "principal_states", "totp_enrollments", "human_user_sessions"};
   for (guint i = 0; i < G_N_ELEMENTS (tables); i++) {
@@ -408,15 +725,22 @@ inspect_deleted_user (const gchar *path, const gchar *key, const gchar *subject)
 int
 main (int argc, char **argv)
 {
+  if (argc == 5 && g_str_equal (argv[1], "--crash-policy-commit"))
+    crash_policy_commit (argv[2], argv[3], argv[4]);
   if (argc == 5 && g_str_equal (argv[1], "--inspect-deleted")) {
     inspect_deleted_user (argv[2], argv[3], argv[4]);
     return wyl_test_normalize_exit_status (0);
   }
-  g_assert_cmpint (argc, ==, 1);
-  check_predecessor_migration ();
-  check_human_registry_contract ();
-  check_last_admin_race ();
-  check_grant_delete_interleavings ();
-  check_delete_uses_current_ownership ();
+  gboolean commit_only = argc == 2
+      && g_str_equal (argv[1], "--encrypted-commit-only");
+  g_assert_true (argc == 1 || commit_only);
+  if (!commit_only) {
+    check_predecessor_migration ();
+    check_human_registry_contract ();
+    check_last_admin_race ();
+    check_grant_delete_interleavings ();
+    check_delete_uses_current_ownership ();
+  }
+  check_encrypted_commit_crashes (argv[0]);
   return wyl_test_normalize_exit_status (0);
 }
