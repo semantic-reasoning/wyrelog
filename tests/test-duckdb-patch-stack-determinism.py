@@ -481,9 +481,12 @@ def validate_attributes(snapshot: dict[str, bytes]) -> None:
     logical = [line for line in attributes.splitlines() if line.strip()]
     # The whole overlay is LF: GNU patch needs LF patches, and the overlay
     # test compares the generated files byte for byte.
-    expected = "subprojects/packagefiles/duckdb-source/** text eol=lf"
-    if logical != [expected]:
-        fail("E_ATTR_RULE", "the DuckDB source overlay needs the exact LF rule")
+    expected = [
+        "subprojects/packagefiles/duckdb-source/** text eol=lf",
+        "subprojects/packagefiles/wirelog/** text eol=lf",
+    ]
+    if logical != expected:
+        fail("E_ATTR_RULE", "the dependency overlays need the exact LF rules")
 
 
 def validate_patch_bytes(snapshot: dict[str, bytes]) -> None:
@@ -1315,6 +1318,15 @@ def run_self_tests(
                 snapshot,
                 ".gitattributes",
                 lambda data: replace_once(data, b"duckdb-source/**", b"duckdb-source/*.patch"),
+            ),
+        ),
+        (
+            "E_ATTR_RULE",
+            mutated(
+                snapshot,
+                ".gitattributes",
+                lambda data: replace_once(data, b"wirelog/** text eol=lf",
+                                         b"wirelog/** text eol=crlf"),
             ),
         ),
         (
