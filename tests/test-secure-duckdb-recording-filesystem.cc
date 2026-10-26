@@ -2582,8 +2582,6 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
  * The Windows contender likewise joins the main-file path before its
  * rejected metadata read-open. */
 enum class TracePathRole {
-  HOME,
-  HOME_METADATA,
   MAIN,
   WAL,
   CHECKPOINT,
@@ -2603,8 +2601,6 @@ static void
 assert_exact_trace (const gchar *scenario, const std::vector<Event> &events,
     const fs::path &database, const ExactTraceToken *tokens, size_t token_count)
 {
-  const std::string home = path_to_utf8 (database.parent_path ());
-  const std::string home_metadata = path_to_utf8 (database.parent_path () / ".duckdb");
   const std::string main = path_to_utf8 (database);
   const std::string wal = path_with_suffix (database, ".wal");
   const std::string checkpoint = path_with_suffix (path_from_utf8 (wal), ".checkpoint");
@@ -2613,9 +2609,7 @@ assert_exact_trace (const gchar *scenario, const std::vector<Event> &events,
   for (size_t i = 0; i < token_count; i++) {
     const auto &event = events[i];
     const auto &token = tokens[i];
-    const std::string &path = token.path == TracePathRole::HOME ? home :
-        token.path == TracePathRole::HOME_METADATA ? home_metadata :
-        token.path == TracePathRole::MAIN ? main :
+    const std::string &path = token.path == TracePathRole::MAIN ? main :
         token.path == TracePathRole::WAL ? wal :
         token.path == TracePathRole::CHECKPOINT ? checkpoint : recovery;
     g_assert_cmpstr (event.operation.c_str (), ==, token.operation);
@@ -2629,10 +2623,6 @@ assert_exact_trace (const gchar *scenario, const std::vector<Event> &events,
   (void) scenario;
 }
 
-#define H(operation) \
-  { operation, TracePathRole::HOME, 0, duckdb::FileLockType::NO_LOCK, -1, "" }
-#define D(operation) \
-  { operation, TracePathRole::HOME_METADATA, 0, duckdb::FileLockType::NO_LOCK, -1, "" }
 #define M(operation, flags, lock, outcome) \
   { operation, TracePathRole::MAIN, flags, duckdb::FileLockType::lock, outcome, "" }
 #define W(operation, flags, lock, outcome) \
@@ -3233,8 +3223,6 @@ assert_fixed_wal_reopen_event_exact_trace (
 }
 #endif
 
-#undef H
-#undef D
 #undef M
 #undef W
 #undef C
