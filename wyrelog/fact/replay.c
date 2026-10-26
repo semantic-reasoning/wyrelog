@@ -1234,7 +1234,19 @@ replay_store_with_snapshot (wyl_policy_store_t *policy,
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
               graph_info->graph_id);
+    gboolean has_ledger = FALSE;
     if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_store_table_exists (store, "fact_batches", &has_ledger);
+    if (rc == WYRELOG_E_OK && !has_ledger) {
+      /* Provisioning creates identity metadata before the first batch creates
+       * its ledger. Only NEVER may use declarations without durable rows. */
+      WylPolicyGraphMaterializationState state = policy_snapshot == NULL
+          ? graph_materialization_state_or_unknown (policy, graph_info)
+          : policy_snapshot->materialization_state;
+      if (state != WYL_POLICY_GRAPH_MATERIALIZATION_NEVER)
+        rc = WYRELOG_E_IO;
+    }
+    if (rc == WYRELOG_E_OK && has_ledger)
       rc = wyl_fact_replay_store_new_c_store (store, job_context,
               &replay_store);
     if (rc != WYRELOG_E_OK)

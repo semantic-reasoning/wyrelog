@@ -706,7 +706,6 @@ check_legacy_metadata_key_count (const gchar *fact_root,
 }
 #endif
 
-#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 static void
 identity_http_post (SoupSession *session, const gchar *base_url,
     const gchar *token, const gchar *path, const gchar *query,
@@ -716,10 +715,13 @@ identity_http_post (SoupSession *session, const gchar *base_url,
   g_autofree gchar *body = NULL;
   g_assert_cmpint (send_raw (session, "POST", base_url, path, query, token,
       payload, &status, &body), ==, 0);
+  if (status != expected_status)
+    g_printerr ("HTTP %s: status=%u body=%s\n", path, status, body);
   g_assert_cmpuint (status, ==, expected_status);
   g_assert_nonnull (strstr (body, expected_body));
 }
 
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 static void
 identity_http_post_committed (SoupSession *session, const gchar *base_url,
     const gchar *token, const gchar *path, const gchar *query,
@@ -5107,8 +5109,228 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   return 0;
 }
 
-int
-main (void)
+typedef struct
+{
+  GMutex mutex;
+  GCond cond;
+  gboolean entered;
+  gboolean release;
+  WylFactGraphSnapshot *snapshot;
+} EmptySnapshotCall;
+
+static wyrelog_error_t
+hold_empty_snapshot (WylEngine *engine, gpointer data)
+{
+  EmptySnapshotCall *call = data;
+  g_assert_nonnull (engine);
+  g_mutex_lock (&call->mutex);
+  call->entered = TRUE;
+  g_cond_signal (&call->cond);
+  while (!call->release)
+    g_cond_wait (&call->cond, &call->mutex);
+  g_mutex_unlock (&call->mutex);
+  return WYRELOG_E_OK;
+}
+
+static gpointer
+use_empty_snapshot (gpointer data)
+{
+  EmptySnapshotCall *call = data;
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (call->snapshot,
+      hold_empty_snapshot, call), ==, WYRELOG_E_OK);
+  return NULL;
+}
+
+static gint
+check_live_empty_schema (WylHandle *handle, const gchar *base_url)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "facts-reader");
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+      "facts-reader", "wr.datalog.query", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store,
+      "facts-reader", "wr.datalog.query", WYL_TENANT_DEFAULT, "armed"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+  g_autoptr (WylClient) admin = NULL;
+  g_autoptr (WylClient) reader = NULL;
+  g_assert_cmpint (wyl_client_new (base_url, &admin), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_new (base_url, &reader), ==, WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_assert_cmpint (wyl_client_login_skip_mfa (admin, "facts-admin"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_login_skip_mfa (reader, "facts-reader"),
+      ==, WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_autofree gchar *admin_token = wyl_client_dup_access_token (admin);
+  g_autofree gchar *reader_token = wyl_client_dup_access_token (reader);
+  g_autoptr (SoupSession) session = soup_session_new ();
+  const gchar *guard = "tenant=__wr_default&" FACT_GUARD;
+  const gchar *schema = "column_name\tcolumn_type\tnullable\tvisible\n"
+      "order_id\tsymbol\tfalse\ttrue\namount\tint64\tfalse\ttrue\n";
+  const gchar *schema_query = "tenant=__wr_default&graph=live-empty&"
+      "namespace=shop&relation=orders&schema_version=1&max_rows=10&" FACT_GUARD;
+  const gchar *query_path = "/datalog/__wr_default/live-empty/query";
+  const gchar *query = "{\"query\":\"orders(O,A)\",\"output\":\"json\","
+      "\"limit\":10}";
+  identity_http_post (session, base_url, admin_token, "/graphs/create",
+      "tenant=__wr_default&graph=live-hidden-first&" FACT_GUARD, NULL,
+      200, "\"created\":true");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
+      "relation=hidden&schema_version=1&relation_visible=false&" FACT_GUARD,
+      schema, 200, "\"ok\":true");
+  identity_http_post (session, base_url, reader_token,
+      "/datalog/__wr_default/live-hidden-first/query", guard,
+      "{\"query\":\"hidden(O,A)\",\"output\":\"json\"}", 403,
+      "datalog_relation_denied");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
+      "relation=orders&schema_version=1&max_rows=10&" FACT_GUARD,
+      schema, 200, "\"ok\":true");
+  identity_http_post (session, base_url, reader_token,
+      "/datalog/__wr_default/live-hidden-first/query", guard, query,
+      200, "\"row_count\":0");
+  identity_http_post (session, base_url, admin_token, "/graphs/create",
+      "tenant=__wr_default&graph=live-sibling&" FACT_GUARD, NULL,
+      200, "\"created\":true");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-sibling&namespace=shop&relation=orders&"
+      "schema_version=1&" FACT_GUARD, schema, 200, "\"ok\":true");
+  identity_http_post (session, base_url, admin_token,
+      "/facts/__wr_default/live-sibling/orders:append",
+      "tenant=__wr_default&namespace=shop&schema_version=1&batch_id=sibling&"
+      "idempotency_key=sibling&" FACT_GUARD, "order_id\tamount\nsibling\t17\n",
+      200, "\"committed\":true");
+  WylFactGraphRuntimeStatus sibling_before = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+      WYL_TENANT_DEFAULT, "live-sibling", &sibling_before), ==, WYRELOG_E_OK);
+  identity_http_post (session, base_url, admin_token, "/graphs/create",
+      "tenant=__wr_default&graph=live-empty&" FACT_GUARD, NULL,
+      200, "\"created\":true");
+  identity_http_post (session, base_url, reader_token, "/facts/schema/register",
+      schema_query, schema, 403, "schema_denied");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      schema_query, schema, 200, "\"ok\":true");
+  identity_http_post (session, base_url, reader_token, query_path, guard, query,
+      200, "\"row_count\":0");
+  identity_http_post (session, base_url, reader_token, query_path, guard,
+      "{\"query\":\"unknown(X)\",\"output\":\"json\"}", 403,
+      "datalog_relation_denied");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-empty&namespace=shop&relation=hidden&"
+      "schema_version=1&relation_visible=false&" FACT_GUARD, schema,
+      200, "\"ok\":true");
+  identity_http_post (session, base_url, reader_token, query_path, guard,
+      "{\"query\":\"hidden(O,A)\",\"output\":\"json\"}", 403,
+      "datalog_relation_denied");
+
+  g_autoptr (WylFactGraphRuntimeManager) manager =
+      wyl_handle_fact_graph_runtime_ref (handle);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, WYL_TENANT_DEFAULT,
+      "live-empty"), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &key, &snapshot), ==, WYRELOG_E_OK);
+  EmptySnapshotCall call = { .snapshot = snapshot };
+  g_mutex_init (&call.mutex);
+  g_cond_init (&call.cond);
+  GThread *thread = g_thread_new ("empty-snapshot", use_empty_snapshot, &call);
+  g_mutex_lock (&call.mutex);
+  while (!call.entered)
+    g_cond_wait (&call.cond, &call.mutex);
+  g_mutex_unlock (&call.mutex);
+  WylFactGraphQuiescenceToken *token = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  g_mutex_lock (&call.mutex);
+  call.release = TRUE;
+  g_cond_signal (&call.cond);
+  g_mutex_unlock (&call.mutex);
+  g_thread_join (thread);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &token), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot, hold_empty_snapshot,
+      &call), ==, WYRELOG_E_BUSY);
+  const gchar *late_schema = "tenant=__wr_default&graph=live-empty&"
+      "namespace=shop&relation=late&schema_version=1&" FACT_GUARD;
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      late_schema, schema, 503, "schema_registered_runtime_refresh_failed");
+  gboolean exists = FALSE;
+  g_assert_cmpint (wyl_policy_store_fact_relation_schema_exists (store,
+      WYL_TENANT_DEFAULT, "live-empty", "shop", "late", 1, &exists),
+      ==, WYRELOG_E_OK);
+  g_assert_true (exists);
+  wyl_fact_graph_quiescence_token_release (token);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager,
+      &key, &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_graph_info_t info = {
+    .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "live-empty",
+    .schema_version = 1,
+  };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &info, NULL),
+      ==, WYRELOG_E_OK);
+  identity_http_post (session, base_url, reader_token, query_path, guard, query,
+      200, "\"row_count\":0");
+  identity_http_post (session, base_url, reader_token, query_path, guard,
+      "{\"query\":\"late(O,A)\",\"output\":\"json\"}", 200, "\"row_count\":0");
+  WylFactGraphRuntimeStatus sibling_after = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+      WYL_TENANT_DEFAULT, "live-sibling", &sibling_after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (sibling_after.engine_generation, ==,
+      sibling_before.engine_generation);
+  wyl_fact_graph_runtime_status_clear (&sibling_before);
+  wyl_fact_graph_runtime_status_clear (&sibling_after);
+  identity_http_post (session, base_url, reader_token,
+      "/datalog/__wr_default/live-sibling/query", guard, query,
+      200, "{\"O\":\"sibling\",\"A\":17}");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-sibling&namespace=shop&relation=extra&"
+      "schema_version=1&" FACT_GUARD, schema, 200, "\"ok\":true");
+  identity_http_post (session, base_url, reader_token,
+      "/datalog/__wr_default/live-sibling/query", guard, query,
+      200, "{\"O\":\"sibling\",\"A\":17}");
+  identity_http_post (session, base_url, reader_token,
+      "/datalog/__wr_default/live-sibling/query", guard,
+      "{\"query\":\"extra(O,A)\",\"output\":\"json\"}",
+      200, "\"row_count\":0");
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_transition_fact_graph_materialization
+        (store, WYL_TENANT_DEFAULT, "live-empty",
+      WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING, &result),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_graph_materialization
+        (store, WYL_TENANT_DEFAULT, "live-empty",
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager,
+      &key, &evicted), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &info, NULL),
+      ==, WYRELOG_E_IO);
+  identity_http_post (session, base_url, reader_token, query_path, guard, query,
+      403, "datalog_relation_denied");
+  g_cond_clear (&call.cond);
+  g_mutex_clear (&call.mutex);
+  wyl_fact_graph_key_clear (&key);
+  return 0;
+}
+
+static gint
+run_fact_http_fixture (gboolean empty_schema_only)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *fact_root = wyl_test_make_secure_fact_root
@@ -5154,8 +5376,8 @@ main (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
-  gint rc = check_fact_http_contract (handle, http.server, fact_root,
-          base_url);
+  gint rc = empty_schema_only ? check_live_empty_schema (handle, base_url)
+      : check_fact_http_contract (handle, http.server, fact_root, base_url);
   if (rc != 0)
     g_printerr ("fact HTTP contract failed rc=%d\n", rc);
 
@@ -5166,5 +5388,15 @@ main (void)
   g_clear_pointer (&http.loop, g_main_loop_unref);
   g_clear_object (&handle);
   remove_tree (fact_root);
+  return wyl_test_normalize_exit_status (rc);
+}
+
+int
+main (int argc, char **argv)
+{
+  gint rc = run_fact_http_fixture (TRUE);
+  if (rc == 0 && !(argc == 2 && g_strcmp0 (argv[1],
+      "--empty-schema-only") == 0))
+    rc = run_fact_http_fixture (FALSE);
   return wyl_test_normalize_exit_status (rc);
 }
