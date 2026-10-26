@@ -3690,8 +3690,10 @@ test_restore_daemon_http_lifecycle (void)
   g_assert_true (g_file_set_contents (token_path, token, -1, &file_error));
   g_assert_no_error (file_error);
   g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
+  /* Allow restore work to finish under parallel suite load. Fault paths below
+   * close connections explicitly; none relies on the request timeout firing. */
   const gchar *cli_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "dry-run", "--scope", "tenant",
     "--tenant", "tenant-a", "--bundle", bundle_path,
     "--trusted-sha256", digest, "--format", "json",
@@ -3834,7 +3836,7 @@ test_restore_daemon_http_lifecycle (void)
    * continue to cover response-loss and stale-revision recovery semantics. */
   const gchar *refused_uuid = "01890c10-2e3f-7000-8000-000000000014";
   const gchar *missing_confirm_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "begin", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", refused_uuid,
     "--bundle", bundle_path, "--trusted-sha256", digest,
@@ -3858,7 +3860,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *wrong_digest_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "begin", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", refused_uuid,
     "--bundle", bundle_path, "--trusted-sha256", wrong_digest,
@@ -3890,7 +3892,7 @@ test_restore_daemon_http_lifecycle (void)
 
   const gchar *cli_uuid = "01890c10-2e3f-7000-8000-000000000013";
   const gchar *begin_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "begin", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--bundle", bundle_path, "--trusted-sha256", digest,
@@ -3920,7 +3922,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stderr);
   g_autofree gchar *cli_revision = NULL;
   const gchar *status_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "status", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--format", "json", "--access-token-file", token_path,
@@ -3944,7 +3946,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *text_status_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "status", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--format", "text", "--access-token-file", token_path,
@@ -3981,7 +3983,7 @@ test_restore_daemon_http_lifecycle (void)
         ("restore-http-drop-prepare-response",
           restore_http_fault_proxy_thread, &prepare_proxy);
   const gchar *prepare_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", prepare_proxy_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", prepare_proxy_url,
     "fact", "restore", "prepare", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--revision", cli_revision, "--bundle", bundle_path,
@@ -4030,7 +4032,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *stale_abort_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "abort", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--revision", stale_cli_revision, "--confirm", "--format", "json",
@@ -4096,7 +4098,7 @@ test_restore_daemon_http_lifecycle (void)
         ("restore-http-drop-abort-response",
           restore_http_fault_proxy_thread, &abort_proxy);
   const gchar *abort_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", abort_proxy_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", abort_proxy_url,
     "fact", "restore", "abort", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--revision", cli_revision, "--confirm", "--format", "json",
@@ -4140,7 +4142,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *retry_abort_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "abort", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", cli_uuid,
     "--revision", cli_revision, "--confirm", "--format", "json",
@@ -4174,7 +4176,7 @@ test_restore_daemon_http_lifecycle (void)
   GThread *proxy_thread = g_thread_new ("restore-http-drop-response",
           restore_http_fault_proxy_thread, &proxy);
   const gchar *unknown_begin_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", proxy_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", proxy_url,
     "fact", "restore", "begin", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", unknown_uuid,
     "--bundle", bundle_path, "--trusted-sha256", digest,
@@ -4211,7 +4213,7 @@ test_restore_daemon_http_lifecycle (void)
   g_assert_cmpuint (proxy.response_status, ==, 200);
   restore_http_fault_proxy_clear (&proxy);
   const gchar *unknown_status_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "status", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", unknown_uuid,
     "--format", "json", "--access-token-file", token_path,
@@ -4238,7 +4240,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *unknown_prepare_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "prepare", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", unknown_uuid,
     "--revision", cli_revision, "--bundle", bundle_path,
@@ -4263,7 +4265,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *unknown_abort_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "abort", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", unknown_uuid,
     "--revision", cli_revision, "--confirm", "--format", "json",
@@ -4297,7 +4299,7 @@ test_restore_daemon_http_lifecycle (void)
   GThread *refused_proxy_thread = g_thread_new ("restore-http-drop-request",
           restore_http_fault_proxy_thread, &refused_proxy);
   const gchar *refused_begin_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", refused_proxy_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", refused_proxy_url,
     "fact", "restore", "begin", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", retry_uuid,
     "--bundle", bundle_path, "--trusted-sha256", digest,
@@ -4325,7 +4327,7 @@ test_restore_daemon_http_lifecycle (void)
   g_thread_join (refused_proxy_thread);
   restore_http_fault_proxy_clear (&refused_proxy);
   const gchar *retry_status_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "status", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", retry_uuid,
     "--bundle", bundle_path, "--trusted-sha256", digest,
@@ -4356,7 +4358,7 @@ test_restore_daemon_http_lifecycle (void)
   g_free (cli_stdout);
   g_free (cli_stderr);
   const gchar *retry_begin_argv[] = {
-    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url", base_url,
     "fact", "restore", "begin", "--scope", "tenant",
     "--tenant", "tenant-a", "--uuid", retry_uuid,
     "--bundle", bundle_path, "--trusted-sha256", digest,
