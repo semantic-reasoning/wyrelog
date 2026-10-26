@@ -242,6 +242,7 @@ def write_fallback(fixture, kind):
         fallback / "meson_options.txt",
         """option('tests', type : 'boolean', value : false)
 option('documentation', type : 'boolean', value : false)
+option('benchmarks', type : 'boolean', value : true)
 """,
     )
     if kind == "forbidden":
@@ -262,6 +263,9 @@ error('compatible system selection configured the fallback fixture')
 wirelog_lib = static_library('wirelog', 'wirelog.c')
 wirelog_inc = include_directories('.')
 wirelog_src_inc = include_directories('wirelog')
+if get_option('benchmarks')
+  executable('dependency-benchmark', 'benchmark.c')
+endif
 """,
     )
     write(
@@ -269,6 +273,8 @@ wirelog_src_inc = include_directories('wirelog')
         provider_header(kind, "fallback"),
     )
     write(fallback / "wirelog.c", provider_source(kind, "fallback"))
+    write(fallback / "benchmark.c",
+          '#error Dependency benchmarks must not be built by the consumer\n')
 
 
 def consumer_source(expected):
@@ -316,7 +322,7 @@ force_fallback_for = get_option('force_fallback_for')
 wrap_mode = get_option('wrap_mode')
 subdir('meson/wirelog-dependency')
 consumer = executable('wirelog-consumer', 'consumer.c',
-  dependencies : wirelog_dep)
+  dependencies : wirelog_dep, install : true)
 test('wirelog-provider', consumer)
 """,
     )
@@ -380,6 +386,12 @@ def successful_scenario(base, name, system_kind, fallback_kind, expected,
     )
     output = setup.stdout + setup.stderr
     require_messages(name, output, messages)
+    require_success(
+        f"{name}: ordinary install rebuild",
+        [meson, "install", "-C", build, "--destdir",
+         scenario_dir / "installed"],
+        env=env,
+    )
     require_success(
         f"{name}: selection compile",
         [meson, "compile", "-C", build],

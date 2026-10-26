@@ -1,0 +1,22 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -600,3 +600,3 @@
+-if not mobile_cross
++if not mobile_cross and get_option('benchmarks')
+   subdir('bench')
+ endif
+diff --git a/meson_options.txt b/meson_options.txt
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,3 +1,10 @@
++option(
++  'benchmarks',
++  type: 'boolean',
++  value: true,
++  description: 'Build benchmarks'
++)
++
+ option(
+   'embedded',
+   type: 'boolean',

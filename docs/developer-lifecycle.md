@@ -1,5 +1,30 @@
 # Developer lifecycle constraints
 
+## Wirelog dependency builds
+
+Wyrelog disables Wirelog's dependency benchmarks by default; they are not
+needed to build or install Wyrelog. Standalone Wirelog builds retain their
+benchmark default, and a consumer can opt in with
+`-Dwirelog:benchmarks=true`.
+
+Meson applies the pinned wrap patch when downloading a fresh subproject.
+For a Wirelog checkout populated before this overlay was added, apply it
+once without resetting unrelated local changes:
+
+```powershell
+git -C subprojects\wirelog apply --check ..\packagefiles\wirelog\0001-optional-benchmarks.patch
+git -C subprojects\wirelog apply ..\packagefiles\wirelog\0001-optional-benchmarks.patch
+```
+
+Inspect overlapping local edits if the check fails; do not discard them.
+Meson's `subprojects packagefiles --apply` does not apply wrap `diff_files`.
+Existing build directories also retain cached options across reconfiguration.
+Disable dependency benchmarks explicitly before rebuilding such a directory:
+
+```powershell
+meson configure builddir -Dwirelog:benchmarks=false
+```
+
 ## Raw `fork()`
 
 Wyrelog deliberately installs no `pthread_atfork` handlers. After a process
