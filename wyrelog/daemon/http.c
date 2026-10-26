@@ -13873,8 +13873,18 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
       "invalid_schema_auth", "schema_denied", "schema_auth_failed", NULL))
     return;
 
+  g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
+  wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire
+        (ctx->handle, tenant, graph, NULL, &replay_admission);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        "fact_replay_admission_failed");
+    return;
+  }
   g_auto (WylDaemonPolicyWrite) write = { 0 };
-  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+  write.parent_cancellable =
+      wyl_handle_fact_replay_admission_get_cancellable (replay_admission);
+  rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_SCHEMA_REGISTER, &write);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "schema_register_failed");
@@ -13897,6 +13907,11 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 409, "graph_sealed");
     return;
   }
+  const wyl_policy_fact_graph_info_t replay_info = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .schema_version = lookup.info.schema_version,
+  };
   graph_lookup_clear (&lookup);
 
   g_autofree gchar *body = NULL;
@@ -13971,6 +13986,15 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "schema_register_failed");
     return;
+  }
+  if (relation_visible) {
+    rc = wyl_handle_refresh_fact_graph_admitted (ctx->handle,
+            replay_admission, &replay_info, NULL);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+          "schema_registered_runtime_refresh_failed");
+      return;
+    }
   }
   set_schema_ok_json (msg, tenant, graph, namespace_id, relation);
 }

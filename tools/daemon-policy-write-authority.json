@@ -1,5 +1,5 @@
 {
-  "aggregate": "277f736294f32b551cddc2a5514efe62fb40198b32fc88f38b7a93986894f014",
+  "aggregate": "f67e96164eea58259a9f4eeedb3fd8e02a792485fd30814e5ce5efb4c718783a",
   "directives": {
     "count": 567,
     "sha256": "2d3dd1da5fdffdada05d0e383ce121c9fd168130ab183bb8568dca5b2451c8ae"
@@ -29,7 +29,7 @@
     "policy_write_record_non_http_finalize_snapshot": "6fbafe96a8d4657ad901624aaeb121d7f64cee8d26211e91524bfebffc9cd427",
     "role_membership_mutation_handler": "b3de96a368c5ad8e300d0ef26605dd08babd14b1887587745960f1fe58d20f13",
     "rule_pack_register_handler": "fb6809f4ff94e9fb9a4f065ede843bed6099d8417120a8334b0a8901a26d4dbc",
-    "schema_register_handler": "e42a7743cc9b7c0f7cf2873f7113f857352cb4846925b96cc8216c5b6cd12856",
+    "schema_register_handler": "e187d9c2e71f57ada73e01b6a9aae2e0121e07e62e07205e331836fc042e6c16",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
     "service_credential_operation_recover_execute": "1395b3874bcb04c6c69203b4bf19e8b23ef43829e31b998a3763286dc32936ca",
     "service_management_authority_arm_handler": "4f415236f44639c452747b81bf6e6b837bcd35444b83f26c35c1266d6d977142",
