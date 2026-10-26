@@ -160,9 +160,14 @@ struct wyl_policy_store_t
    * reader can ask of a shared connection. */
   gpointer transaction_owner;
   guint transaction_depth;
+  guint coordinator_fence_depth;
 #if defined(WYL_TEST_HANDLE_SEAMS)
   WylPolicyStoreTransactionContentionHook transaction_contention_hook;
   gpointer transaction_contention_hook_data;
+  WylPolicyStoreEncryptedPublicationHook encrypted_publication_hook;
+  gpointer encrypted_publication_hook_data;
+  WylPolicyStoreEncryptedReplacementRetryHook encrypted_replacement_retry_hook;
+  gpointer encrypted_replacement_retry_hook_data;
   gboolean fact_logical_settle_fail_once;
 #endif
   gchar *canonical_path;
@@ -4017,11 +4022,56 @@ read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  guint retries_remaining;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  wyl_policy_store_t *store;
+  WylPolicyStoreEncryptedReplacementRetryHook hook;
+  gpointer data;
+#endif
+} WylWindowsCanonicalPublishRetry;
+
+static wyrelog_error_t
+verify_windows_retry_source (const wchar_t *path,
+    const BY_HANDLE_FILE_INFORMATION *expected)
+{
+  HANDLE source = CreateFileW (path, FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING,
+          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (source == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError ();
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store retry source probe failed (win32=%lu)", (gulong) error);
+    return WYRELOG_E_IO;
+  }
+  BY_HANDLE_FILE_INFORMATION actual;
+  BOOL queried = GetFileInformationByHandle (source, &actual);
+  BOOL closed = CloseHandle (source);
+  if (!queried || !closed) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store could not verify retry source identity");
+    return WYRELOG_E_IO;
+  }
+  if ((actual.dwFileAttributes
+      & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+      || actual.nNumberOfLinks != 1
+      || actual.dwVolumeSerialNumber != expected->dwVolumeSerialNumber
+      || actual.nFileIndexHigh != expected->nFileIndexHigh
+      || actual.nFileIndexLow != expected->nFileIndexLow) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store refused substituted retry source");
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
     gboolean *out_replaced, WylPolicyStoreFileIdentity *out_identity,
-    gboolean *out_durable)
+    gboolean *out_durable, WylWindowsCanonicalPublishRetry *retry)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
@@ -4127,15 +4177,53 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     return WYRELOG_E_IO;
   }
 
-  BOOL moved = MoveFileExW (wtmp, wdst,
-          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  BOOL moved = FALSE;
+  DWORD move_error = ERROR_SUCCESS;
+  wyrelog_error_t move_rc = WYRELOG_E_IO;
+  guint attempt = 0;
+  for (;;) {
+    if (attempt > 0) {
+      move_rc = verify_windows_retry_source (wtmp, &info);
+      if (move_rc != WYRELOG_E_OK)
+        break;
+    }
+    dst_attrs = GetFileAttributesW (wdst);
+    if (dst_attrs != INVALID_FILE_ATTRIBUTES
+        && (dst_attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store refused reparse point at canonical before rename");
+      move_rc = WYRELOG_E_POLICY;
+      break;
+    }
+    moved = MoveFileExW (wtmp, wdst,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (moved)
+      break;
+    move_error = GetLastError ();
+    move_rc = WYRELOG_E_IO;
+    if (retry == NULL || retry->retries_remaining == 0
+        || (move_error != ERROR_ACCESS_DENIED
+        && move_error != ERROR_SHARING_VIOLATION))
+      break;
+    retry->retries_remaining--;
+    attempt++;
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "policy store retrying canonical replacement "
+        "(attempt=%u, win32=%lu)", attempt, (gulong) move_error);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (retry->hook != NULL)
+      retry->hook (retry->store, attempt, move_error, retry->data);
+#endif
+    Sleep (50);
+  }
   g_free (wtmp);
   g_free (wdst);
   if (!moved) {
     (void) g_remove (tmp_path);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store MoveFileExW onto canonical failed");
-    return WYRELOG_E_IO;
+        "policy store MoveFileExW onto canonical failed (win32=%lu)",
+        (gulong) move_error);
+    return move_rc;
   }
 
   if (out_replaced != NULL)
@@ -4165,7 +4253,7 @@ static wyrelog_error_t
 write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 {
   return write_whole_file_atomic_private (path, bytes, len, NULL, NULL, NULL,
-             NULL);
+             NULL, NULL);
 }
 #endif /* G_OS_WIN32 */
 
@@ -4390,7 +4478,7 @@ rotation_intent_write_sidecar_locked (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK) {
 #ifdef G_OS_WIN32
     rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL,
-            NULL, NULL);
+            NULL, NULL, NULL);
 #else
     rc = write_through_dirfd (store->canonical_dirfd, basename, wire,
             wire_len, NULL, NULL, NULL, NULL);
@@ -8582,9 +8670,15 @@ publish_policy_store_encrypted (wyl_policy_store_t *store,
              store->canonical_basename, encrypted, encrypted_len, rotation_runtime,
              out_replaced, out_identity, out_durable);
 #else
+  WylWindowsCanonicalPublishRetry retry = { .retries_remaining = 10 };
+#ifdef WYL_TEST_HANDLE_SEAMS
+  retry.store = store;
+  retry.hook = store->encrypted_replacement_retry_hook;
+  retry.data = store->encrypted_replacement_retry_hook_data;
+#endif
   return write_whole_file_atomic_private (store->canonical_path, encrypted,
              encrypted_len, rotation_runtime, out_replaced, out_identity,
-             out_durable);
+             out_durable, &retry);
 #endif
 }
 
@@ -8667,6 +8761,28 @@ persist_policy_store_encrypted_checked (wyl_policy_store_t *store,
 static void graph_provisioning_poison_store
   (wyl_policy_store_t * store, wyrelog_error_t error);
 
+static wyrelog_error_t
+policy_store_publish_outer_commit (wyl_policy_store_t *store)
+{
+  if (!store->encrypted || !sqlite3_get_autocommit (store->db)
+      || store->coordinator_fence_depth > 0)
+    return WYRELOG_E_OK;
+
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (store->encrypted_publication_hook != NULL)
+    store->encrypted_publication_hook (store,
+        store->encrypted_publication_hook_data);
+#endif
+  gboolean pin_valid = TRUE;
+  wyrelog_error_t rc = persist_policy_store_encrypted_checked (store,
+          &pin_valid);
+  if (rc != WYRELOG_E_OK || !pin_valid) {
+    rc = rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
+    graph_provisioning_poison_store (store, rc);
+  }
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_coordinator_fence_acquire (wyl_policy_store_t *store,
     WylPolicyStoreCoordinatorFence *out_fence)
@@ -8696,6 +8812,7 @@ wyl_policy_store_coordinator_fence_acquire (wyl_policy_store_t *store,
   out_fence->connection_mutex = connection_mutex;
   out_fence->owner = g_thread_self ();
   out_fence->graph_locked = TRUE;
+  store->coordinator_fence_depth++;
   return WYRELOG_E_OK;
 }
 
@@ -8734,6 +8851,8 @@ wyl_policy_store_coordinator_fence_clear (
   if (fence == NULL || fence->store == NULL || !fence->graph_locked)
     return;
   g_assert (fence->owner == g_thread_self ());
+  g_assert (fence->store->coordinator_fence_depth > 0);
+  fence->store->coordinator_fence_depth--;
   sqlite3_mutex_leave ((sqlite3_mutex *) fence->connection_mutex);
   g_rec_mutex_unlock (&fence->store->graph_authority_mutex);
   *fence = (WylPolicyStoreCoordinatorFence)
@@ -8859,6 +8978,8 @@ wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
   if (store == NULL || store->db == NULL
       || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
+  sqlite3_mutex *connection_mutex = sqlite3_db_mutex (store->db);
+  sqlite3_mutex_enter (connection_mutex);
   wyrelog_error_t rc = exec_sql (store->db,
           "RELEASE SAVEPOINT wyrelog_policy_mutation;");
   if (rc != WYRELOG_E_OK) {
@@ -8873,10 +8994,12 @@ wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
           "ROLLBACK TO SAVEPOINT wyrelog_policy_mutation;"
           "RELEASE SAVEPOINT wyrelog_policy_mutation;");
     policy_store_make_terminal (store, rc);
-  }
+  } else
+    rc = policy_store_publish_outer_commit (store);
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
   if (rc == WYRELOG_E_OK)
     rc = lease_rc;
+  sqlite3_mutex_leave (connection_mutex);
   policy_store_transaction_leave (store);
   return rc;
 }
@@ -8937,15 +9060,20 @@ wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
   if (store == NULL || store->db == NULL
       || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
+  sqlite3_mutex *connection_mutex = sqlite3_db_mutex (store->db);
+  sqlite3_mutex_enter (connection_mutex);
   if (sqlite3_get_autocommit (store->db)) {
     /* SQLite already rolled the transaction back under a failed statement.
      * There is nothing to commit, but the writer lease and this frame are
      * still the caller's and end here, as rollback_checked ends them. */
     (void) policy_store_runtime_writer_end (store);
+    sqlite3_mutex_leave (connection_mutex);
     policy_store_transaction_leave (store);
     return WYRELOG_E_INVALID;
   }
   wyrelog_error_t rc = exec_sql (store->db, "COMMIT;");
+  if (rc == WYRELOG_E_OK)
+    rc = policy_store_publish_outer_commit (store);
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
   if (rc == WYRELOG_E_OK)
     rc = lease_rc;
@@ -8954,7 +9082,9 @@ wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
    * owner's rollback, which every publication caller performs -- the fences
    * abort, the handle wrappers roll back -- unlike the savepoint commit
    * above; one SQLite rolled back on its own has ended it. */
-  if (sqlite3_get_autocommit (store->db))
+  gboolean ended = sqlite3_get_autocommit (store->db);
+  sqlite3_mutex_leave (connection_mutex);
+  if (ended)
     policy_store_transaction_leave (store);
   return rc;
 }
@@ -10343,6 +10473,28 @@ wyl_policy_store_get_db (wyl_policy_store_t *store)
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
+void
+wyl_policy_store_set_encrypted_replacement_retry_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreEncryptedReplacementRetryHook hook,
+    gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->encrypted_replacement_retry_hook = hook;
+  store->encrypted_replacement_retry_hook_data = data;
+}
+
+void
+wyl_policy_store_set_encrypted_publication_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreEncryptedPublicationHook hook,
+    gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->encrypted_publication_hook = hook;
+  store->encrypted_publication_hook_data = data;
+}
+
 void
 wyl_policy_store_set_transaction_contention_hook_for_test
   (wyl_policy_store_t *store, WylPolicyStoreTransactionContentionHook hook,

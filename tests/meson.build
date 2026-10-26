@@ -36,7 +36,10 @@ meson_exe = find_program('meson')
 
 test_human_user_store = executable('test-human-user-store',
   'test-human-user-store.c',
-  c_args : ['-DWYL_HUMAN_PREDECESSOR_SCHEMA="' + meson.project_source_root() / 'tests' / 'fixtures' / 'human-users-predecessor.sql' + '"'],
+  c_args : [
+    '-DWYL_HUMAN_PREDECESSOR_SCHEMA="' + meson.project_source_root() / 'tests' / 'fixtures' / 'human-users-predecessor.sql' + '"',
+    '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
+  ],
   dependencies : [wyrelog_dep, sqlite_dep],
 )
 test('human-user-store', test_human_user_store)

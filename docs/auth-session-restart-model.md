@@ -20,6 +20,35 @@ This model intentionally does not persist refresh-token state. A restart
 cannot resurrect a logged-out session or revoked refresh token because no
 previous token state is reloaded.
 
+## Policy Commit Durability
+
+Human accounts, grants, permission states, and MFA enrollment are policy data,
+not restart-valid session credentials. A successful standalone outer policy
+commit publishes the encrypted policy image durably before acknowledging the
+operation, so fresh MFA login still works after abrupt process termination.
+Disabled or deleted accounts remain unavailable. Old credentials still expire
+on restart as described above.
+
+Nested savepoint commits defer publication until their outer transaction
+commits. Coordinator-fenced operations defer it until the coordinator's explicit
+publication step; releasing the fence does not publish. Failed or ambiguous
+encrypted publication makes the store terminal and prevents close from
+republishing its in-memory state. Reopen the store and recover through the
+existing recovery path rather than continuing to use that connection.
+
+Encrypted policy stores use an in-memory SQLite image. Each standalone outer
+commit serializes and encrypts the complete image, with O(policy-image-size)
+work and synchronous durable canonical-file replacement. The authority and
+SQLite connection mutexes remain held through publication, blocking other
+same-connection operations, including read snapshots, during that interval.
+On Windows, transient canonical-file replacement errors may add at most
+500 ms of backoff (ten 50 ms waits), plus I/O and scheduler time, while both
+mutexes remain held. Retries reuse the same flushed encrypted image and verify
+its temporary-file identity and the destination's reparse status; they never
+replay SQL commits. Persistent contention fails closed and makes the store
+terminal without close-time republication.
+Plaintext SQLite commits retain their existing durability behavior.
+
 ## Session Credentials and Internal Identity
 
 Human login returns an opaque `session_token`: `wst_` followed by 64 lowercase

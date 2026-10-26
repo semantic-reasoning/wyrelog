@@ -224,6 +224,13 @@
     "platform": "posix-normalized-wrapper"
   },
   {
+    "path": "tests/test-human-user-store.c",
+    "line": 487,
+    "api": "_Exit",
+    "expression": "0",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
     "path": "tests/test-lobac-partial-delta.c",
     "line": 55,
     "api": "WYL_TEST_SKIP",
@@ -232,35 +239,35 @@
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 2022,
+    "line": 2333,
     "api": "_Exit",
     "expression": "81",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 2033,
+    "line": 2344,
     "api": "_Exit",
     "expression": "outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :\n        (rc == WYRELOG_E_OK\n        && mutation == WYL_POLICY_AUTHORITY_MUTATION_APPLIED ? 0 : 82)",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3279,
+    "line": 3590,
     "api": "_Exit",
     "expression": "73",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3298,
+    "line": 3609,
     "api": "_Exit",
     "expression": "74",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3302,
+    "line": 3613,
     "api": "_Exit",
     "expression": "75",
     "platform": "posix-normalized-wrapper"

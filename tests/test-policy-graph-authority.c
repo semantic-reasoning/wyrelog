@@ -761,6 +761,317 @@ open_encrypted_policy_store (const gchar *store_path, const gchar *key_path,
              FALSE, out_store);
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  wyl_policy_store_t *store;
+  sqlite3 *db;
+  gboolean publication;
+  gboolean reached;
+  gboolean release_publication;
+  gboolean attempted;
+  gboolean begun;
+  gboolean release_transaction;
+  int mutex_result;
+  wyrelog_error_t result;
+} EncryptedCommitGate;
+
+static void
+encrypted_commit_gate (wyl_policy_store_t *store, gpointer data)
+{
+  EncryptedCommitGate *gate = data;
+  g_assert_true (store == gate->store);
+  g_mutex_lock (&gate->mutex);
+  gate->reached = TRUE;
+  g_cond_broadcast (&gate->condition);
+  while (!gate->release_publication)
+    g_cond_wait (&gate->condition, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static gpointer
+run_encrypted_commit (gpointer data)
+{
+  EncryptedCommitGate *gate = data;
+  g_assert_cmpint (gate->publication
+      ? wyl_policy_store_publication_transaction_begin (gate->store)
+      : wyl_policy_store_begin_mutation (gate->store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_user_register (gate->store,
+      "committed-user"), ==, WYRELOG_E_OK);
+  gate->result = gate->publication
+      ? wyl_policy_store_publication_transaction_commit (gate->store)
+      : wyl_policy_store_commit_mutation (gate->store);
+  return NULL;
+}
+
+static gpointer
+run_independent_sql_transaction (gpointer data)
+{
+  EncryptedCommitGate *gate = data;
+  sqlite3_mutex *mutex = sqlite3_db_mutex (gate->db);
+  int result = sqlite3_mutex_try (mutex);
+  if (result == SQLITE_OK)
+    sqlite3_mutex_leave (mutex);
+  g_mutex_lock (&gate->mutex);
+  gate->mutex_result = result;
+  gate->attempted = TRUE;
+  g_cond_broadcast (&gate->condition);
+  g_mutex_unlock (&gate->mutex);
+
+  exec_ok (gate->db,
+      "BEGIN IMMEDIATE;CREATE TABLE racing_uncommitted(value INTEGER);");
+  g_mutex_lock (&gate->mutex);
+  gate->begun = TRUE;
+  g_cond_broadcast (&gate->condition);
+  while (!gate->release_transaction)
+    g_cond_wait (&gate->condition, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+  exec_ok (gate->db, "ROLLBACK;");
+  return NULL;
+}
+
+static void
+wait_for_encrypted_commit_gate (EncryptedCommitGate *gate,
+    const gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 10 * G_TIME_SPAN_SECOND;
+  while (!*flag
+      && g_cond_wait_until (&gate->condition, &gate->mutex, deadline)) {
+  }
+  g_assert_true (*flag);
+}
+
+static void
+test_encrypted_commit_excludes_independent_sql (void)
+{
+  for (guint publication = 0; publication < 2; publication++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    g_autofree gchar *key = g_build_filename (root, "key", NULL);
+    g_autofree gchar *copy = g_build_filename (root, "published-copy.db",
+            NULL);
+    g_assert_true (write_policy_key (key));
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_encrypted_policy_store (path, key, &store),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store),
+        ==, WYRELOG_E_OK);
+    EncryptedCommitGate gate = {
+      .store = store,
+      .db = wyl_policy_store_get_db (store),
+      .publication = publication,
+    };
+    g_mutex_init (&gate.mutex);
+    g_cond_init (&gate.condition);
+    wyl_policy_store_set_encrypted_publication_hook_for_test (store,
+        encrypted_commit_gate, &gate);
+    GThread *publisher = g_thread_new ("encrypted-publisher",
+            run_encrypted_commit, &gate);
+    g_mutex_lock (&gate.mutex);
+    wait_for_encrypted_commit_gate (&gate, &gate.reached);
+    g_mutex_unlock (&gate.mutex);
+    GThread *other = g_thread_new ("independent-sql",
+            run_independent_sql_transaction, &gate);
+    g_mutex_lock (&gate.mutex);
+    wait_for_encrypted_commit_gate (&gate, &gate.attempted);
+    g_assert_cmpint (gate.mutex_result, ==, SQLITE_BUSY);
+    gate.release_publication = TRUE;
+    g_cond_broadcast (&gate.condition);
+    wait_for_encrypted_commit_gate (&gate, &gate.begun);
+    g_mutex_unlock (&gate.mutex);
+    g_thread_join (publisher);
+    g_assert_cmpint (gate.result, ==, WYRELOG_E_OK);
+
+    /* Verify durable bytes before close can mask a missing publication. */
+    g_autofree gchar *image = NULL;
+    gsize size = 0;
+    g_assert_true (g_file_get_contents (path, &image, &size, NULL));
+    g_assert_true (g_file_set_contents (copy, image, size, NULL));
+    wyl_policy_store_t *reopened = NULL;
+    g_assert_cmpint (open_encrypted_policy_store (copy, key, &reopened),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_user_require (reopened,
+        "committed-user", TRUE), ==, WYRELOG_E_OK);
+    g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (reopened),
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE name='racing_uncommitted'"), ==, 0);
+    wyl_policy_store_close (reopened);
+    g_mutex_lock (&gate.mutex);
+    gate.release_transaction = TRUE;
+    g_cond_broadcast (&gate.condition);
+    g_mutex_unlock (&gate.mutex);
+    g_thread_join (other);
+    wyl_policy_store_set_encrypted_publication_hook_for_test (store,
+        NULL, NULL);
+    wyl_policy_store_close (store);
+    g_cond_clear (&gate.condition);
+    g_mutex_clear (&gate.mutex);
+    g_autofree gchar *lock = g_strconcat (path, ".wyrelog-lock", NULL);
+    g_autofree gchar *copy_lock = g_strconcat (copy, ".wyrelog-lock", NULL);
+    g_assert_cmpint (g_remove (copy_lock), ==, 0);
+    g_assert_cmpint (g_remove (copy), ==, 0);
+    g_assert_cmpint (g_remove (key), ==, 0);
+    g_assert_cmpint (g_remove (lock), ==, 0);
+    cleanup_store_path (root, path);
+    g_assert_false (g_file_test (root, G_FILE_TEST_EXISTS));
+  }
+}
+
+#ifdef G_OS_WIN32
+typedef struct
+{
+  HANDLE reader;
+  const gchar *path;
+  const gchar *saved_source;
+  const gchar *saved_canonical;
+  const gchar *alias_target;
+  guint action;
+  guint calls;
+} EncryptedReplacementGate;
+
+static void
+release_encrypted_replacement_reader (wyl_policy_store_t *store,
+    guint attempt, guint32 native_error, gpointer data)
+{
+  (void) store;
+  EncryptedReplacementGate *gate = data;
+  g_assert_cmpuint (attempt, ==, 1);
+  g_assert_true (native_error == ERROR_ACCESS_DENIED
+      || native_error == ERROR_SHARING_VIOLATION);
+  gate->calls++;
+  g_assert_true (CloseHandle (gate->reader));
+  gate->reader = INVALID_HANDLE_VALUE;
+  if (gate->action == 1) {
+    g_autofree gchar *tmp = g_strconcat (gate->path, ".wyrelog-tmp", NULL);
+    g_assert_cmpint (g_rename (tmp, gate->saved_source), ==, 0);
+    g_assert_true (g_file_set_contents (tmp, "substituted", -1, NULL));
+  } else if (gate->action == 2) {
+    g_assert_cmpint (g_rename (gate->path, gate->saved_canonical), ==, 0);
+    g_assert_true (wyl_test_create_directory_alias (gate->path,
+        gate->alias_target, NULL));
+  }
+}
+
+static void
+test_encrypted_commit_retries_transient_reader (void)
+{
+  for (guint publication = 0; publication < 2; publication++) {
+    for (guint action = 0; action < 3; action++) {
+      for (guint delete_share = 0; delete_share < 2; delete_share++) {
+        g_autofree gchar *root = NULL;
+        g_autofree gchar *path = make_store_path (&root);
+        g_autofree gchar *key = g_build_filename (root, "key", NULL);
+        g_autofree gchar *copy = g_build_filename (root, "published-copy",
+                NULL);
+        g_autofree gchar *saved_source = g_strconcat (path, ".saved-tmp",
+                NULL);
+        g_autofree gchar *saved_canonical = g_strconcat (path, ".saved",
+                NULL);
+        g_autofree gchar *target = g_build_filename (root, "alias-target",
+                NULL);
+        g_assert_true (write_policy_key (key));
+        wyl_policy_store_t *store = NULL;
+        g_assert_cmpint (open_encrypted_policy_store (path, key, &store),
+            ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_create_schema (store),
+            ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_begin_mutation (store),
+            ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_user_register (store, "prior-user"),
+            ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_commit_mutation (store),
+            ==, WYRELOG_E_OK);
+        g_autofree gchar *before = NULL;
+        gsize before_size = 0;
+        g_assert_true (g_file_get_contents (path, &before, &before_size, NULL));
+        if (action == 2)
+          g_assert_cmpint (g_mkdir (target, 0700), ==, 0);
+        g_autofree gunichar2 *wide_path =
+            g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+        g_assert_nonnull (wide_path);
+        EncryptedReplacementGate gate = {
+          .reader = CreateFileW ((const wchar_t *) wide_path, GENERIC_READ,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE
+                  | (delete_share ? FILE_SHARE_DELETE : 0),
+                  NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL),
+          .path = path,
+          .saved_source = saved_source,
+          .saved_canonical = saved_canonical,
+          .alias_target = target,
+          .action = action,
+        };
+        g_assert_true (gate.reader != INVALID_HANDLE_VALUE);
+        wyl_policy_store_set_encrypted_replacement_retry_hook_for_test
+          (store, release_encrypted_replacement_reader, &gate);
+        g_assert_cmpint (publication
+            ? wyl_policy_store_publication_transaction_begin (store)
+            : wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_user_register (store,
+            "committed-user"), ==, WYRELOG_E_OK);
+        wyrelog_error_t rc = publication
+            ? wyl_policy_store_publication_transaction_commit (store)
+            : wyl_policy_store_commit_mutation (store);
+        if (gate.reader != INVALID_HANDLE_VALUE)
+          g_assert_true (CloseHandle (gate.reader));
+        g_assert_cmpint (rc, ==,
+            action == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY);
+        g_assert_cmpuint (gate.calls, ==, 1);
+        if (action == 2) {
+          g_assert_true (wyl_test_remove_directory_alias (path, NULL));
+          g_assert_cmpint (g_rename (saved_canonical, path), ==, 0);
+          g_assert_cmpint (g_rmdir (target), ==, 0);
+        }
+        g_autofree gchar *image = NULL;
+        gsize size = 0;
+        g_assert_true (g_file_get_contents (path, &image, &size, NULL));
+        if (action != 0) {
+          g_assert_cmpint (wyl_policy_store_terminal_result (store),
+              !=, WYRELOG_E_OK);
+          g_assert_true (size == before_size
+              && memcmp (image, before, size) == 0);
+        }
+        g_assert_true (g_file_set_contents (copy, image, size, NULL));
+        wyl_policy_store_t *reopened = NULL;
+        g_assert_cmpint (open_encrypted_policy_store (copy, key, &reopened),
+            ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_user_require (reopened,
+            "prior-user", TRUE), ==, WYRELOG_E_OK);
+        if (action == 0)
+          g_assert_cmpint (wyl_policy_store_user_require (reopened,
+              "committed-user", TRUE), ==, WYRELOG_E_OK);
+        else
+          g_assert_cmpint (wyl_policy_store_user_require (reopened,
+              "committed-user", TRUE), !=, WYRELOG_E_OK);
+        wyl_policy_store_close (reopened);
+        wyl_policy_store_set_encrypted_replacement_retry_hook_for_test
+          (store, NULL, NULL);
+        wyl_policy_store_close (store);
+        if (action != 0) {
+          g_autofree gchar *after_close = NULL;
+          gsize after_size = 0;
+          g_assert_true (g_file_get_contents (path, &after_close,
+              &after_size, NULL));
+          g_assert_true (after_size == size
+              && memcmp (after_close, image, size) == 0);
+        }
+        if (action == 1)
+          g_assert_cmpint (g_remove (saved_source), ==, 0);
+        g_autofree gchar *copy_lock = g_strconcat (copy, ".wyrelog-lock",
+                NULL);
+        g_autofree gchar *lock = g_strconcat (path, ".wyrelog-lock", NULL);
+        g_assert_cmpint (g_remove (copy_lock), ==, 0);
+        g_assert_cmpint (g_remove (copy), ==, 0);
+        g_assert_cmpint (g_remove (key), ==, 0);
+        g_assert_cmpint (g_remove (lock), ==, 0);
+        cleanup_store_path (root, path);
+        g_assert_false (g_file_test (root, G_FILE_TEST_EXISTS));
+      }
+    }
+  }
+}
+#endif
+
 /* Frozen historical fixtures are intentionally independent of production
  * schema constants so migration tests detect accidental common-mode edits. */
 static const gchar fixture_pre_windows_table_sql[] =
@@ -8025,6 +8336,14 @@ main (int argc, char **argv)
       test_darwin_evidence_encrypted_immediate_publication);
   g_test_add_func ("/policy/graph-authority/coordinator-fence-transaction",
       test_coordinator_fence_owns_connection_transaction);
+  g_test_add_func
+    ("/policy/graph-authority/encrypted-commit-excludes-independent-sql",
+      test_encrypted_commit_excludes_independent_sql);
+#ifdef G_OS_WIN32
+  g_test_add_func
+    ("/policy/graph-authority/encrypted-commit-retries-transient-reader",
+      test_encrypted_commit_retries_transient_reader);
+#endif
   g_test_add_func
     ("/policy/graph-authority/publication-transaction-waits-for-savepoint",
       test_publication_transaction_waits_for_foreign_savepoint);
