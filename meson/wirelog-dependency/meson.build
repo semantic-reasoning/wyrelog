@@ -99,7 +99,7 @@ if not wirelog_dep.found()
 
   wirelog_proj = subproject('wirelog',
     version : wirelog_version,
-    default_options : ['tests=false', 'documentation=false'],
+    default_options : ['tests=false', 'documentation=false', 'benchmarks=false'],
   )
   wirelog_consumer_args = []
   if host_machine.system() == 'windows'

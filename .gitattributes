@@ -1,1 +1,2 @@
 subprojects/packagefiles/duckdb-source/** text eol=lf
+subprojects/packagefiles/wirelog/** text eol=lf
