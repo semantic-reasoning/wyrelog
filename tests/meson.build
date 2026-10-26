@@ -2999,7 +2999,9 @@ test_service_decision_authority = executable('test-service-decision-authority',
 )
 
 test('service-decision-authority', test_service_decision_authority,
-  timeout : 60,
+  # Windows run 40195755811 finished all 13 cases and exited 0, but Meson
+  # recorded 60.49 s against 60 s. Keep a bounded 2x budget on Windows.
+  timeout : host_machine.system() == 'windows' ? 120 : 60,
 )
 
 test_template_tree = executable('test-template-tree',
@@ -3140,7 +3142,11 @@ test_service_auth_coordination = executable('test-service-auth-coordination',
 
 test('service-auth-coordination', test_service_auth_coordination,
   is_parallel : host_machine.system() != 'windows',
-  timeout : 30,
+  # Run 40195755811 hit 30 s during ASan repeats near all 54 cases; a local
+  # ASan+UBSan repeat completed all five processes in 33.22-34.78 s.
+  # Keep the ordinary deadline and give only address-instrumented builds
+  # room for the same cases and process cleanup, without reducing concurrency.
+  timeout : get_option('b_sanitize').contains('address') ? 60 : 30,
 )
 
 test_session_liveness_race = executable('test-session-liveness-race',
