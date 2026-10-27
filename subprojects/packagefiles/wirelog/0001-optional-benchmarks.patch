@@ -1,11 +1,15 @@
 diff --git a/meson.build b/meson.build
 --- a/meson.build
 +++ b/meson.build
-@@ -600,3 +600,3 @@
+@@ -597,7 +597,7 @@ endif
+ #Benchmarks
+ #== == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == == ==
+ 
 -if not mobile_cross
 +if not mobile_cross and get_option('benchmarks')
    subdir('bench')
  endif
+ 
 diff --git a/meson_options.txt b/meson_options.txt
 --- a/meson_options.txt
 +++ b/meson_options.txt
