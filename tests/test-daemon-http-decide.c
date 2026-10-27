@@ -18238,9 +18238,14 @@ check_service_principal_management_contract (void)
   /* The escrow handoff needs both opt-in roots configured; the publication
    * override then drives a mock backend instead of the real one at
    * publication_root. */
-  handoff_dir = g_dir_make_tmp ("wyl-daemon-http-handoff-XXXXXX", NULL);
-  if (handoff_dir == NULL)
+  g_autoptr (GError) handoff_error = NULL;
+  handoff_dir = wyl_test_make_secure_fact_root
+        ("wyl-daemon-http-handoff-XXXXXX", &handoff_error);
+  if (handoff_dir == NULL) {
+    g_test_message ("Could not create secure handoff root: %s",
+        handoff_error != NULL ? handoff_error->message : "no error details");
     return 1974;
+  }
   operation_root = service_credential_operation_root_for_test (handoff_dir,
           "http-handoff-operations");
   publication_root = g_build_filename (handoff_dir, "publication", NULL);
@@ -19330,22 +19335,14 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
       || wyl_id_format (&session_id_value, env->session_token,
       sizeof env->session_token) != WYRELOG_E_OK)
     return 2103;
-  g_autofree gchar *created_handoff_dir = g_dir_make_tmp
-        ("wyl-daemon-http-denial-XXXXXX", NULL);
-  if (created_handoff_dir == NULL)
-    return 2104;
-#ifdef G_OS_WIN32
-  env->handoff_dir = g_steal_pointer (&created_handoff_dir);
-#else
-  /* The POSIX graph resolver rejects symlink path components.  macOS commonly
-   * spells TMPDIR through /var -> /private/var, so retain the owned directory
-   * by its resolved path before deriving the fact root. */
-  env->handoff_dir = realpath (created_handoff_dir, NULL);
+  g_autoptr (GError) handoff_error = NULL;
+  env->handoff_dir = wyl_test_make_secure_fact_root
+        ("wyl-daemon-http-denial-XXXXXX", &handoff_error);
   if (env->handoff_dir == NULL) {
-    (void) g_rmdir (created_handoff_dir);
+    g_test_message ("Could not create secure denial root: %s",
+        handoff_error != NULL ? handoff_error->message : "no error details");
     return 2104;
   }
-#endif
   env->operation_root = service_credential_operation_root_for_test
         (env->handoff_dir, "denial-operations");
   env->fact_root = g_build_filename (env->handoff_dir, "facts", NULL);
