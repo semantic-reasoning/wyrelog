@@ -5187,7 +5187,7 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
   identity_http_post (session, base_url, admin_token, "/facts/schema/register",
       "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
       "relation=orders&schema_version=1&max_rows=10&" FACT_GUARD,
-      schema, 200, "\"ok\":true");
+      schema, 200, "\"mutation_class\":\"committed_ready\"");
   identity_http_post (session, base_url, reader_token,
       "/datalog/__wr_default/live-hidden-first/query", guard, query,
       200, "\"row_count\":0");
@@ -5211,7 +5211,7 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
   identity_http_post (session, base_url, reader_token, "/facts/schema/register",
       schema_query, schema, 403, "schema_denied");
   identity_http_post (session, base_url, admin_token, "/facts/schema/register",
-      schema_query, schema, 200, "\"ok\":true");
+      schema_query, schema, 200, "\"mutation_class\":\"committed_ready\"");
   identity_http_post (session, base_url, reader_token, query_path, guard, query,
       200, "\"row_count\":0");
   identity_http_post (session, base_url, reader_token, query_path, guard,
@@ -5256,8 +5256,13 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
       &call), ==, WYRELOG_E_BUSY);
   const gchar *late_schema = "tenant=__wr_default&graph=live-empty&"
       "namespace=shop&relation=late&schema_version=1&" FACT_GUARD;
+  /* The schema commits before the refresh, so a refused refresh is reported
+   * on the success response: a 5xx would invite a retry that can only meet
+   * schema_already_registered. */
   identity_http_post (session, base_url, admin_token, "/facts/schema/register",
-      late_schema, schema, 503, "schema_registered_runtime_refresh_failed");
+      late_schema, schema, 200, "\"mutation_class\":\"committed_degraded\"");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      late_schema, schema, 409, "schema_already_registered");
   gboolean exists = FALSE;
   g_assert_cmpint (wyl_policy_store_fact_relation_schema_exists (store,
       WYL_TENANT_DEFAULT, "live-empty", "shop", "late", 1, &exists),
