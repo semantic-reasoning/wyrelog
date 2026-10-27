@@ -19324,16 +19324,6 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
     return 2100;
   if (!service_credential_store_fixture_init (&env->credential_store))
     return 2101;
-  WylHandleOpenOptions handle_options = {
-    .template_dir = WYL_TEST_TEMPLATE_DIR,
-    .policy_store_path = env->credential_store.policy_path,
-    .policy_keyprovider_path = env->credential_store.key_spec,
-    .audit_store_path = env->credential_store.audit_path,
-    .production_mode = TRUE,
-  };
-  if (wyl_handle_open_with_options (&handle_options, &env->handle)
-      != WYRELOG_E_OK)
-    return 2102;
   wyl_id_t session_id_value = WYL_ID_NIL;
   if (wyl_id_new (&session_id_value) != WYRELOG_E_OK
       || wyl_id_format (&session_id_value, env->session_token,
@@ -19363,6 +19353,19 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   if (g_mkdir_with_parents (env->publication_root, 0700) != 0
       || g_mkdir_with_parents (env->fact_root, 0700) != 0)
     return 2105;
+  /* The daemon's runtime opens its handle on the same fact root it serves;
+   * a handle without one cannot refresh a graph engine after a mutation. */
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = env->credential_store.policy_path,
+    .policy_keyprovider_path = env->credential_store.key_spec,
+    .audit_store_path = env->credential_store.audit_path,
+    .fact_root = env->fact_root,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&handle_options, &env->handle)
+      != WYRELOG_E_OK)
+    return 2102;
 
   env->context = g_main_context_new ();
   g_main_context_push_thread_default (env->context);
@@ -19490,6 +19493,7 @@ service_denial_env_restart (ServiceDenialEnv *env)
     .policy_store_path = env->credential_store.policy_path,
     .policy_keyprovider_path = env->credential_store.key_spec,
     .audit_store_path = env->credential_store.audit_path,
+    .fact_root = env->fact_root,
     .production_mode = TRUE,
   };
   if (env->session == NULL
@@ -19781,6 +19785,27 @@ policy_write_owner_fault_send_expect_ok (ServiceDenialEnv *env,
              &response) == 0 && status == 200 ? 0 : 1;
 }
 
+/* A setup mutation must also leave the graph engine current.  A handle opened
+ * without the daemon's fact root still commits, but every refresh after it
+ * reports committed_degraded. */
+static gint
+policy_write_owner_fault_send_expect_ready (ServiceDenialEnv *env,
+    const gchar *path, const gchar *query, const gchar *body)
+{
+  guint status = 0;
+  g_autofree gchar *response = NULL;
+  if (send_raw_service_principal_bearer (env->session, "POST", env->base_url,
+      path, query, env->access_token, body, &status, &response) != 0
+      || status != 200 || response == NULL
+      || strstr (response, "\"mutation_class\":\"committed_ready\"")
+      == NULL) {
+    g_printerr ("WYRELOG_TEST_DIAG owner_fault setup %s status=%u body=%s\n",
+        path, status, response != NULL ? response : "(null)");
+    return 1;
+  }
+  return 0;
+}
+
 static gint
 policy_write_owner_fault_prepare_facts (ServiceDenialEnv *env,
     gboolean schema, gboolean append)
@@ -19799,7 +19824,7 @@ policy_write_owner_fault_prepare_facts (ServiceDenialEnv *env,
   const gchar *schema_body =
       "column_name\tcolumn_type\tnullable\tvisible\n"
       "row_id\tsymbol\tfalse\ttrue\n" "amount\tint64\tfalse\ttrue\n";
-  if (policy_write_owner_fault_send_expect_ok (env, "POST",
+  if (policy_write_owner_fault_send_expect_ready (env,
       "/facts/schema/register", schema_query, schema_body) != 0)
     return 2;
   if (!append)
@@ -19807,7 +19832,7 @@ policy_write_owner_fault_prepare_facts (ServiceDenialEnv *env,
   g_autofree gchar *append_query = g_strdup_printf
         ("tenant=%s&namespace=owner&schema_version=1&batch_id=owner-batch&"
           "idempotency_key=owner-key&%s", WYL_TENANT_DEFAULT, guard);
-  return policy_write_owner_fault_send_expect_ok (env, "POST",
+  return policy_write_owner_fault_send_expect_ready (env,
              "/facts/__wr_default/owner-fault/rows:append", append_query,
              "row_id\tamount\nrow-1\t42\n") == 0 ? 0 : 3;
 }
