@@ -1,5 +1,6 @@
 tests/fact-artifact-transition-driver-fixture.c
 tests/fact-artifact-transition-driver-fixture.h
+tests/fact-test-support.c
 tests/fact-test-support.h
 tests/human-user-test-support.h
 tests/test-access-decision.c
