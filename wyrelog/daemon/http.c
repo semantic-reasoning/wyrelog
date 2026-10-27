@@ -13812,9 +13812,15 @@ copy_schema_columns (const wyl_policy_fact_relation_schema_column_info_t *info,
   return columns;
 }
 
+/* |outcome| is NULL for a hidden relation, which never refreshes the engine.
+ * A visible one reports the post-commit refresh as the fact mutations do
+ * (issue #547): the schema is durable either way, so a failed refresh is
+ * committed-but-degraded at HTTP 200, never a reason for the client to retry
+ * into schema_already_registered. */
 static void
 set_schema_ok_json (SoupServerMessage *msg, const gchar *tenant,
-    const gchar *graph, const gchar *namespace_id, const gchar *relation)
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    const wyl_fact_mutation_outcome_t *outcome)
 {
   if (!wyl_daemon_policy_write_prepare_success_response (msg))
     return;
@@ -13826,6 +13832,26 @@ set_schema_ok_json (SoupServerMessage *msg, const gchar *tenant,
   append_json_string (body, namespace_id);
   g_string_append (body, ",\"relation_name\":");
   append_json_string (body, relation);
+  if (outcome != NULL) {
+    const gchar *class_name =
+        wyl_fact_mutation_class_name (outcome->mutation_class);
+    g_string_append (body, ",\"committed\":true,\"mutation_class\":");
+    append_json_string (body, class_name);
+    g_string_append (body, ",\"queryable\":");
+    g_string_append (body, outcome->engine_queryable ? "true" : "false");
+    g_string_append (body, ",\"reconcile\":");
+    g_string_append (body,
+        outcome->needs_runtime_reconcile ? "true" : "false");
+    if (outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED) {
+      g_string_append (body, ",\"degraded_class\":");
+      append_json_string (body,
+          wyl_fact_graph_replay_class_name (outcome->degraded_class));
+    }
+    g_string_append_printf (body, ",\"engine_generation\":%" G_GUINT64_FORMAT,
+        outcome->engine_generation);
+    soup_message_headers_replace (soup_server_message_get_response_headers
+          (msg), "X-Wyrelog-Mutation", class_name);
+  }
   g_string_append_c (body, '}');
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
@@ -13987,16 +14013,30 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 500, "schema_register_failed");
     return;
   }
-  if (relation_visible) {
-    rc = wyl_handle_refresh_fact_graph_admitted (ctx->handle,
-            replay_admission, &replay_info, NULL);
-    if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
-          "schema_registered_runtime_refresh_failed");
-      return;
-    }
+  if (!relation_visible) {
+    set_schema_ok_json (msg, tenant, graph, namespace_id, relation, NULL);
+    return;
   }
-  set_schema_ok_json (msg, tenant, graph, namespace_id, relation);
+  WylFactGraphRuntimeStatus status = { 0 };
+  rc = wyl_handle_refresh_fact_graph_admitted (ctx->handle, replay_admission,
+          &replay_info, &status);
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  outcome.engine_queryable = status.queryable;
+  outcome.engine_generation = status.engine_generation;
+  if (rc == WYRELOG_E_OK) {
+    outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+  } else if (status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+    outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_BARRIER;
+    outcome.needs_runtime_reconcile = TRUE;
+  } else {
+    outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+    outcome.degraded_class = status.last_replay_class;
+    outcome.needs_runtime_reconcile = TRUE;
+    outcome.needs_durable_reconcile = TRUE;
+  }
+  wyl_fact_graph_runtime_status_clear (&status);
+  set_schema_ok_json (msg, tenant, graph, namespace_id, relation, &outcome);
 }
 
 static void
