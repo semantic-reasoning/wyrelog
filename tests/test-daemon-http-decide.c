@@ -19313,6 +19313,23 @@ typedef struct
   gchar session_token[WYL_ID_STRING_BUF];
 } ServiceDenialEnv;
 
+/* The daemon's runtime opens its handle on the same fact root it serves;
+ * a handle without one cannot refresh a graph engine after a mutation.  A
+ * Windows handle leases its fact root, and the resolver refuses this plain
+ * temporary directory without the owner-only ACL fixture.  The cases that
+ * mutate facts through this fixture, the owner-fault matrix, run only on
+ * POSIX (#757), so the Windows handle opens without a fact root. */
+static const gchar *
+service_denial_env_handle_fact_root (const ServiceDenialEnv *env)
+{
+#ifdef G_OS_WIN32
+  (void) env;
+  return NULL;
+#else
+  return env->fact_root;
+#endif
+}
+
 static gint
 service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
     gboolean arm_principal, gboolean arm_credential)
@@ -19353,14 +19370,12 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   if (g_mkdir_with_parents (env->publication_root, 0700) != 0
       || g_mkdir_with_parents (env->fact_root, 0700) != 0)
     return 2105;
-  /* The daemon's runtime opens its handle on the same fact root it serves;
-   * a handle without one cannot refresh a graph engine after a mutation. */
   WylHandleOpenOptions handle_options = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .policy_store_path = env->credential_store.policy_path,
     .policy_keyprovider_path = env->credential_store.key_spec,
     .audit_store_path = env->credential_store.audit_path,
-    .fact_root = env->fact_root,
+    .fact_root = service_denial_env_handle_fact_root (env),
     .production_mode = TRUE,
   };
   if (wyl_handle_open_with_options (&handle_options, &env->handle)
@@ -19493,7 +19508,7 @@ service_denial_env_restart (ServiceDenialEnv *env)
     .policy_store_path = env->credential_store.policy_path,
     .policy_keyprovider_path = env->credential_store.key_spec,
     .audit_store_path = env->credential_store.audit_path,
-    .fact_root = env->fact_root,
+    .fact_root = service_denial_env_handle_fact_root (env),
     .production_mode = TRUE,
   };
   if (env->session == NULL
