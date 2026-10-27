@@ -693,7 +693,7 @@ if build_client
     # main() per variant; helpers irrelevant to the active variant remain
     # defined to keep the source readable.
     '-Wno-unused-function',
-  ]
+  ] + fact_test_support_c_args
   test_daemon_http_decide_deps = [
     wyrelog_dep,
     wyrelog_client_dep,
@@ -701,7 +701,7 @@ if build_client
     sqlite_dep,
     sodium_dep,
     service_session_private_dep,
-  ]
+  ] + fact_test_support_deps
   if get_option('enable_fact_store').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_FACT_STORE'
     test_daemon_http_decide_deps += duckdb_dep
@@ -759,6 +759,7 @@ if build_client
   endif
   test_daemon_http_decide = executable('test-daemon-http-decide',
     'test-daemon-http-decide.c',
+    'fact-test-support.c',
     '../wyrelog/daemon/auth-registry-private.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
@@ -775,6 +776,7 @@ if build_client
 
   test_daemon_http_decide_refresh = executable('test-daemon-http-decide-refresh',
     'test-daemon-http-decide.c',
+    'fact-test-support.c',
     '../wyrelog/daemon/auth-registry-private.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
@@ -793,6 +795,7 @@ if build_client
 
   test_daemon_http_decide_service = executable('test-daemon-http-decide-service',
     'test-daemon-http-decide.c',
+    'fact-test-support.c',
     '../wyrelog/daemon/auth-registry-private.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
@@ -828,6 +831,7 @@ if build_client
   if test_daemon_http_decide_audit_enabled
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
       'test-daemon-http-decide.c',
+      'fact-test-support.c',
       '../wyrelog/daemon/auth-registry-private.c',
       '../wyrelog/daemon/http.c',
       '../wyrelog/daemon/delta.c',
