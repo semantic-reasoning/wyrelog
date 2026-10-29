@@ -650,6 +650,96 @@ assert_wyctl_failed (gchar **argv, gint expected_status,
   g_assert_cmpstr (stderr_buf, ==, expected_stderr);
 }
 
+static wyrelog_error_t
+snapshot_role_membership (const gchar *subject, const gchar *role,
+    const gchar *scope, gpointer user_data)
+{
+  g_string_append_printf (user_data, "%s\t%s\t%s\n", subject, role, scope);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+snapshot_role_membership_event (const gchar *subject, const gchar *role,
+    const gchar *scope, const gchar *operation, gpointer user_data)
+{
+  g_string_append_printf (user_data, "%s\t%s\t%s\t%s\n", subject, role,
+      scope, operation);
+  return WYRELOG_E_OK;
+}
+
+static void
+check_auditor_grant_separation (WylHandle *handle, const gchar *base_url,
+    const gchar *token_path)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (grant_policy_role_authority (handle, "wyctl-policy-admin",
+      WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+
+  /* #1252: #1249 enforces this at mutation time. Exercise both grant orders
+   * through wyctl, including rollback of the logical membership/event rows.
+   * The successful grants on distinct subjects must be allowed to coexist. */
+  static const struct
+  {
+    const gchar *subject;
+    const gchar *first_role;
+    const gchar *first_scope;
+    const gchar *rejected_role;
+    const gchar *rejected_scope;
+  } cases[] = {
+    {"wyctl-admin-first", "wr.system_admin", "tenant-x",
+     "wr.auditor", WYL_TENANT_DEFAULT},
+    {"wyctl-auditor-first", "wr.auditor", WYL_TENANT_DEFAULT,
+     "wr.system_admin", "tenant-x"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    register_test_human (store, cases[i].subject);
+    gchar *argv[] = {
+      (gchar *) WYL_TEST_WYCTL_PATH,
+      "--daemon-url", (gchar *) base_url,
+      "policy", "role-grant",
+      "--subject", (gchar *) cases[i].subject,
+      "--role", (gchar *) cases[i].first_role,
+      "--scope", (gchar *) cases[i].first_scope,
+      "--access-token-file", (gchar *) token_path,
+      "--guard-timestamp", "123",
+      "--guard-loc-class", "public",
+      "--guard-risk", "29",
+      NULL,
+    };
+    assert_wyctl_ok (argv);
+
+    g_autoptr (GString) memberships_before = g_string_new (NULL);
+    g_autoptr (GString) events_before = g_string_new (NULL);
+    g_assert_cmpint (wyl_policy_store_foreach_role_membership (store,
+        snapshot_role_membership, memberships_before), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_foreach_role_membership_event (store,
+        snapshot_role_membership_event, events_before), ==, WYRELOG_E_OK);
+
+    argv[8] = (gchar *) cases[i].rejected_role;
+    argv[10] = (gchar *) cases[i].rejected_scope;
+    assert_wyctl_failed (argv, 4,
+        "wyctl: policy role-grant failed: policy_mutation_denied\n");
+
+    g_autoptr (GString) memberships_after = g_string_new (NULL);
+    g_autoptr (GString) events_after = g_string_new (NULL);
+    g_assert_cmpint (wyl_policy_store_foreach_role_membership (store,
+        snapshot_role_membership, memberships_after), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_foreach_role_membership_event (store,
+        snapshot_role_membership_event, events_after), ==, WYRELOG_E_OK);
+    g_assert_cmpstr (memberships_after->str, ==, memberships_before->str);
+    g_assert_cmpstr (events_after->str, ==, events_before->str);
+    gboolean exists = FALSE;
+    g_assert_cmpint (wyl_policy_store_role_membership_exists (store,
+        cases[i].subject, cases[i].first_role, cases[i].first_scope,
+        &exists), ==, WYRELOG_E_OK);
+    g_assert_true (exists);
+    g_assert_cmpint (wyl_policy_store_role_membership_exists (store,
+        cases[i].subject, cases[i].rejected_role, cases[i].rejected_scope,
+        &exists), ==, WYRELOG_E_OK);
+    g_assert_false (exists);
+  }
+}
+
 int
 main (void)
 {
@@ -754,6 +844,7 @@ main (void)
     return wyl_test_normalize_exit_status (11);
 
   g_autofree gchar *token_path = write_token_file (access_token);
+  check_auditor_grant_separation (handle, base_url, token_path);
 
   /* Each mutation drives wyctl as a child against the in-process daemon. The
    * scope parameter (tenant-x) matches the authority granted above; the
