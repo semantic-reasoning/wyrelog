@@ -13900,12 +13900,18 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     return;
 
   g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
-  wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire
-        (ctx->handle, tenant, graph, NULL, &replay_admission);
-  if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
-        "fact_replay_admission_failed");
-    return;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  /* Only a visible relation is published to the engine.  A hidden one has no
+   * post-commit refresh, so it takes no admission and is not refused while
+   * another replay holds the graph (#1461). */
+  if (relation_visible) {
+    rc = wyl_handle_fact_replay_admission_acquire (ctx->handle, tenant, graph,
+            NULL, &replay_admission);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+          "fact_replay_admission_failed");
+      return;
+    }
   }
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   write.parent_cancellable =

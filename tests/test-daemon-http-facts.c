@@ -5176,10 +5176,34 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
   identity_http_post (session, base_url, admin_token, "/graphs/create",
       "tenant=__wr_default&graph=live-hidden-first&" FACT_GUARD, NULL,
       200, "\"created\":true");
+  /* A hidden relation has no post-commit refresh, so its registration takes
+   * no replay admission and is not refused while another replay holds the
+   * graph (#1461).  The visible registration under the same hold is the
+   * control: the scheduler refuses it, which shows the hold is effective. */
+  WylFactReplayAdmission *held = NULL;
+  g_assert_cmpint (wyl_handle_fact_replay_admission_acquire (handle,
+      WYL_TENANT_DEFAULT, "live-hidden-first", NULL, &held),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull (held);
   identity_http_post (session, base_url, admin_token, "/facts/schema/register",
       "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
       "relation=hidden&schema_version=1&relation_visible=false&" FACT_GUARD,
       schema, 200, "\"ok\":true");
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
+      "relation=orders&schema_version=1&max_rows=10&" FACT_GUARD,
+      schema, 503, "fact_replay_admission_failed");
+  wyl_handle_fact_replay_admission_free (held);
+  gboolean hidden_exists = FALSE;
+  gboolean refused_exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_fact_relation_schema_exists (store,
+      WYL_TENANT_DEFAULT, "live-hidden-first", "shop", "hidden", 1,
+      &hidden_exists), ==, WYRELOG_E_OK);
+  g_assert_true (hidden_exists);
+  g_assert_cmpint (wyl_policy_store_fact_relation_schema_exists (store,
+      WYL_TENANT_DEFAULT, "live-hidden-first", "shop", "orders", 0,
+      &refused_exists), ==, WYRELOG_E_OK);
+  g_assert_false (refused_exists);
   identity_http_post (session, base_url, reader_token,
       "/datalog/__wr_default/live-hidden-first/query", guard,
       "{\"query\":\"hidden(O,A)\",\"output\":\"json\"}", 403,
