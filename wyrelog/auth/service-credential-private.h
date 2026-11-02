@@ -64,6 +64,27 @@ wyrelog_error_t wyl_service_credential_secret_parse_with_runtime (guint32
     const wyl_service_credential_runtime_t * runtime,
     wyl_service_credential_secret_t ** out_secret);
 
+/* Owner-issued data credentials (#1341) reuse the secret format, the salt and
+ * the verifier construction, with a "wdc_" id prefix and their own verifier
+ * domain.  The verifier binds the id, the tenant and the issuer's subject id.
+ * Without a runtime, generation mints a "wdc_" id; an injected runtime's
+ * new_id must return one. */
+wyrelog_error_t wyl_data_credential_id_new (gchar * out, gsize out_len);
+gboolean wyl_data_credential_id_is_canonical (const gchar * id, gsize id_len);
+wyrelog_error_t wyl_data_credential_generate_with_runtime (const guint8 * cvk,
+    gsize cvk_len, const gchar * tenant, gsize tenant_len,
+    const gchar * issuer, gsize issuer_len,
+    const wyl_service_credential_runtime_t * runtime,
+    wyl_service_credential_material_t * out_material,
+    wyl_service_credential_secret_t ** out_secret);
+wyrelog_error_t wyl_data_credential_verify_with_runtime (guint32
+    format_version, guint32 verifier_version, const guint8 * cvk, gsize cvk_len,
+    const gchar * id, gsize id_len, const gchar * tenant, gsize tenant_len,
+    const gchar * issuer, gsize issuer_len, const guint8 * salt,
+    gsize salt_len, const guint8 * expected, gsize expected_len,
+    const gchar * presented_secret, gsize presented_secret_len,
+    const wyl_service_credential_runtime_t * runtime, gboolean * out_match);
+
 void wyl_service_credential_material_clear (wyl_service_credential_material_t *
     material);
 
