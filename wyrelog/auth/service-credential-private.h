@@ -40,7 +40,7 @@ typedef struct wyl_service_credential_runtime_t
   void (*secure_wipe) (gpointer data, gpointer ptr, gsize size);
   int (*secure_unlock) (gpointer data, gpointer ptr, gsize size);
   void (*secure_free) (gpointer data, gpointer ptr);
-    wyrelog_error_t (*new_id) (gpointer data,
+  wyrelog_error_t (*new_id) (gpointer data,
       gchar out_id[WYL_SERVICE_CREDENTIAL_ID_BUF]);
   int (*fill_random) (gpointer data, guint8 * out, gsize len);
   gpointer data;
