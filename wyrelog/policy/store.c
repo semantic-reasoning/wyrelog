@@ -4032,26 +4032,70 @@ typedef struct
 #endif
 } WylWindowsCanonicalPublishRetry;
 
+/* FileDispositionInfoEx and its flags are declared only for
+ * _WIN32_WINNT >= Windows 10 RS1; the build targets 0x0602, so the class
+ * value and layout are spelled out locally. */
+#define WYL_FILE_DISPOSITION_INFO_EX_CLASS ((FILE_INFO_BY_HANDLE_CLASS) 21)
+#define WYL_FILE_DISPOSITION_FLAG_DELETE 0x00000001UL
+#define WYL_FILE_DISPOSITION_FLAG_POSIX_SEMANTICS 0x00000002UL
+#define WYL_FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE 0x00000010UL
+
+typedef struct
+{
+  ULONG flags;
+} WylFileDispositionInfoEx;
+
+/* Remove the temporary file the store created and still holds, through
+ * that handle. POSIX semantics remove the name at once even if another
+ * process has the file open for attributes; the classic disposition, used
+ * where the Ex class is unsupported, can leave the name delete-pending
+ * until that handle closes. If both fail, the file is left in place: it is
+ * never removed by path, because the name might by then belong to a file
+ * the store did not create. The caller still closes the handle. */
+static void
+delete_held_windows_temp (HANDLE handle)
+{
+  WylFileDispositionInfoEx disposition_ex = {
+    .flags = WYL_FILE_DISPOSITION_FLAG_DELETE
+        | WYL_FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+        | WYL_FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+  };
+  if (SetFileInformationByHandle (handle, WYL_FILE_DISPOSITION_INFO_EX_CLASS,
+      &disposition_ex, sizeof disposition_ex))
+    return;
+  DWORD error = GetLastError ();
+  if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED
+      || error == ERROR_INVALID_FUNCTION) {
+    FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE };
+    if (SetFileInformationByHandle (handle, FileDispositionInfo,
+        &disposition, sizeof disposition))
+      return;
+    error = GetLastError ();
+  }
+  WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+      "policy store left its temporary file in place (win32=%lu)",
+      (gulong) error);
+}
+
+static void
+discard_held_windows_temp (HANDLE handle)
+{
+  delete_held_windows_temp (handle);
+  (void) CloseHandle (handle);
+}
+
+/* Re-check the held temporary file before each rename attempt. The share
+ * mode stops substitution, but not a hard link added through an
+ * attribute-level open, so the link count is still checked here. */
 static wyrelog_error_t
-verify_windows_retry_source (const wchar_t *path,
+verify_windows_held_source (HANDLE source,
     const BY_HANDLE_FILE_INFORMATION *expected)
 {
-  HANDLE source = CreateFileW (path, FILE_READ_ATTRIBUTES,
-          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-          OPEN_EXISTING,
-          FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-  if (source == INVALID_HANDLE_VALUE) {
-    DWORD error = GetLastError ();
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store retry source probe failed (win32=%lu)", (gulong) error);
-    return WYRELOG_E_IO;
-  }
   BY_HANDLE_FILE_INFORMATION actual;
-  BOOL queried = GetFileInformationByHandle (source, &actual);
-  BOOL closed = CloseHandle (source);
-  if (!queried || !closed) {
+  if (!GetFileInformationByHandle (source, &actual)) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store could not verify retry source identity");
+        "policy store could not verify held source identity (win32=%lu)",
+        (gulong) GetLastError ());
     return WYRELOG_E_IO;
   }
   if ((actual.dwFileAttributes
@@ -4061,10 +4105,59 @@ verify_windows_retry_source (const wchar_t *path,
       || actual.nFileIndexHigh != expected->nFileIndexHigh
       || actual.nFileIndexLow != expected->nFileIndexLow) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store refused substituted retry source");
+        "policy store refused altered held source");
     return WYRELOG_E_POLICY;
   }
   return WYRELOG_E_OK;
+}
+
+/* Build a FILE_RENAME_INFO naming the absolute form of destination, with
+ * ReplaceIfExists set. */
+static wyrelog_error_t
+build_windows_rename_info (const wchar_t *destination,
+    FILE_RENAME_INFO **out_info, DWORD *out_size)
+{
+  *out_info = NULL;
+  *out_size = 0;
+  DWORD needed = GetFullPathNameW (destination, 0, NULL, NULL);
+  if (needed == 0)
+    return WYRELOG_E_IO;
+  wchar_t *absolute = g_new0 (wchar_t, (gsize) needed);
+  DWORD written = GetFullPathNameW (destination, needed, absolute, NULL);
+  if (written == 0 || written >= needed) {
+    g_free (absolute);
+    return WYRELOG_E_IO;
+  }
+  gsize name_bytes = (gsize) written * sizeof *absolute;
+  if (name_bytes > MAXDWORD
+      || name_bytes > G_MAXSIZE - offsetof (FILE_RENAME_INFO, FileName)
+      - sizeof *absolute) {
+    g_free (absolute);
+    return WYRELOG_E_INVALID;
+  }
+  gsize info_size = offsetof (FILE_RENAME_INFO, FileName) + name_bytes
+      + sizeof *absolute;
+  if (info_size > MAXDWORD) {
+    g_free (absolute);
+    return WYRELOG_E_INVALID;
+  }
+  FILE_RENAME_INFO *info = g_malloc0 (info_size);
+  info->ReplaceIfExists = TRUE;
+  info->RootDirectory = NULL;
+  info->FileNameLength = (DWORD) name_bytes;
+  memcpy (info->FileName, absolute, name_bytes);
+  g_free (absolute);
+  *out_info = info;
+  *out_size = (DWORD) info_size;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+windows_destination_is_reparse_point (const wchar_t *destination)
+{
+  DWORD attrs = GetFileAttributesW (destination);
+  return attrs != INVALID_FILE_ATTRIBUTES
+         && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 
 static wyrelog_error_t
@@ -4083,13 +4176,39 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     return WYRELOG_E_INVALID;
 
   /* Algorithm parallels the POSIX write_through_dirfd: write a sibling
-   * temp file via CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT and
-   * CREATE_NEW (refuses to clobber an existing reparse point left
-   * by a same-uid attacker), flush, then MoveFileExW onto the
-   * canonical name. MOVEFILE_WRITE_THROUGH stands in for the dirfd
-   * fsync on POSIX so the directory-entry rewrite is durable across
-   * crash. The destination is re-probed immediately before the move
-   * to refuse following a freshly-planted reparse point. */
+   * temp file, flush it, then rename it onto the canonical name.
+   *
+   * The temp file is created with CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT
+   * and share mode 0, and that one handle is held until the file has been
+   * renamed or removed. While it is held no other process can open the
+   * file for data or delete access, rename it, delete it or plant another
+   * file under its name, so the rename moves exactly the bytes written
+   * here and a failed publication removes exactly that file, by handle
+   * (delete_held_windows_temp). Attribute-level opens are not share-checked:
+   * a hard link can still be added, so the held identity, including the
+   * link count, is re-checked before every attempt
+   * (verify_windows_held_source). A link added after that check only gives
+   * the canonical file another name; the lease identity check rejects it on
+   * the maintenance path and at the next open.
+   *
+   * Residual window: the destination cannot be held the same way, because
+   * the replace fails while the store holds the canonical file open, so
+   * the reparse check at the canonical name is path-based and runs before
+   * each attempt. Something planted at the final component after that
+   * check is not followed: a file symlink is replaced as a link, and a
+   * directory or junction makes the rename fail. A junction or other
+   * reparse point is then caught by the next attempt's pre-check and
+   * refused as E_POLICY; a plain directory is not a reparse point, so it
+   * fails every attempt and ends as E_IO. Either way the temp file is
+   * removed by handle. Ancestor directories are outside this check and
+   * must stay operator-protected for the store's lifetime
+   * (docs/developer-lifecycle.md).
+   *
+   * The classic FileRenameInfo class has no write-through flag, so the
+   * renamed handle is flushed before it is closed, as a best-effort
+   * equivalent of MOVEFILE_WRITE_THROUGH; neither guarantees that the
+   * directory entry itself is persisted. Until that close, other processes
+   * cannot open the canonical file for reading. */
   g_autofree gchar *tmp_path = g_strdup_printf ("%s%s", path,
           WYL_POLICY_STORE_TMP_SUFFIX);
   wchar_t *wtmp = (wchar_t *) g_utf8_to_utf16 (tmp_path, -1, NULL, NULL, NULL);
@@ -4100,12 +4219,20 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     return WYRELOG_E_INVALID;
   }
 
+  /* Reclaim a temp file left by an interrupted earlier run, as the POSIX
+   * writer's pre-create unlink does. This is the only removal by path: it
+   * runs before this run creates anything, it touches only the name
+   * reserved for the store inside the operator-protected store directory,
+   * and DeleteFileW removes that directory entry without following a
+   * reparse point or destroying data reachable through another link.
+   * Anything planted at the name between here and CREATE_NEW makes the
+   * create fail. */
   (void) DeleteFileW (wtmp);
 
-  HANDLE h = CreateFileW (wtmp, GENERIC_WRITE, 0, NULL, CREATE_NEW,
-          FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  HANDLE h = CreateFileW (wtmp, GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+          0, NULL, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  g_free (wtmp);
   if (h == INVALID_HANDLE_VALUE) {
-    g_free (wtmp);
     g_free (wdst);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store CreateFileW for tmp write failed");
@@ -4115,9 +4242,7 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   BY_HANDLE_FILE_INFORMATION info;
   if (!GetFileInformationByHandle (h, &info)
       || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-    CloseHandle (h);
-    (void) DeleteFileW (wtmp);
-    g_free (wtmp);
+    discard_held_windows_temp (h);
     g_free (wdst);
     return WYRELOG_E_POLICY;
   }
@@ -4128,9 +4253,7 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     DWORD chunk = remain > 0x10000 ? 0x10000 : (DWORD) remain;
     DWORD put = 0;
     if (!WriteFile (h, bytes + total, chunk, &put, NULL) || put == 0) {
-      CloseHandle (h);
-      (void) DeleteFileW (wtmp);
-      g_free (wtmp);
+      discard_held_windows_temp (h);
       g_free (wdst);
       WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
           "policy store WriteFile to tmp failed");
@@ -4140,28 +4263,28 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   }
 
   if (!FlushFileBuffers (h)) {
-    CloseHandle (h);
-    (void) DeleteFileW (wtmp);
-    g_free (wtmp);
+    discard_held_windows_temp (h);
     g_free (wdst);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store FlushFileBuffers of tmp failed");
     return WYRELOG_E_IO;
   }
-  if (!CloseHandle (h)) {
-    (void) DeleteFileW (wtmp);
-    g_free (wtmp);
+
+  FILE_RENAME_INFO *rename_info = NULL;
+  DWORD rename_info_size = 0;
+  wyrelog_error_t move_rc = build_windows_rename_info (wdst, &rename_info,
+          &rename_info_size);
+  if (move_rc != WYRELOG_E_OK) {
+    discard_held_windows_temp (h);
     g_free (wdst);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store CloseHandle of tmp failed");
-    return WYRELOG_E_IO;
+        "policy store could not resolve canonical rename target");
+    return move_rc;
   }
 
-  DWORD dst_attrs = GetFileAttributesW (wdst);
-  if (dst_attrs != INVALID_FILE_ATTRIBUTES
-      && (dst_attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
-    (void) DeleteFileW (wtmp);
-    g_free (wtmp);
+  if (windows_destination_is_reparse_point (wdst)) {
+    discard_held_windows_temp (h);
+    g_free (rename_info);
     g_free (wdst);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store refused reparse point at canonical before rename");
@@ -4171,32 +4294,28 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
       && rotation_runtime->checkpoint (rotation_runtime->data,
       WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME) != 0) {
-    (void) DeleteFileW (wtmp);
-    g_free (wtmp);
+    discard_held_windows_temp (h);
+    g_free (rename_info);
     g_free (wdst);
     return WYRELOG_E_IO;
   }
 
   BOOL moved = FALSE;
   DWORD move_error = ERROR_SUCCESS;
-  wyrelog_error_t move_rc = WYRELOG_E_IO;
+  move_rc = WYRELOG_E_IO;
   guint attempt = 0;
   for (;;) {
-    if (attempt > 0) {
-      move_rc = verify_windows_retry_source (wtmp, &info);
-      if (move_rc != WYRELOG_E_OK)
-        break;
-    }
-    dst_attrs = GetFileAttributesW (wdst);
-    if (dst_attrs != INVALID_FILE_ATTRIBUTES
-        && (dst_attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    move_rc = verify_windows_held_source (h, &info);
+    if (move_rc != WYRELOG_E_OK)
+      break;
+    if (windows_destination_is_reparse_point (wdst)) {
       WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
           "policy store refused reparse point at canonical before rename");
       move_rc = WYRELOG_E_POLICY;
       break;
     }
-    moved = MoveFileExW (wtmp, wdst,
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    moved = SetFileInformationByHandle (h, FileRenameInfo, rename_info,
+            rename_info_size);
     if (moved)
       break;
     move_error = GetLastError ();
@@ -4216,16 +4335,21 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 #endif
     Sleep (50);
   }
-  g_free (wtmp);
+  g_free (rename_info);
   g_free (wdst);
   if (!moved) {
-    (void) g_remove (tmp_path);
+    discard_held_windows_temp (h);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store MoveFileExW onto canonical failed (win32=%lu)",
+        "policy store handle rename onto canonical failed (win32=%lu)",
         (gulong) move_error);
     return move_rc;
   }
 
+  /* The rename has happened: from here on failures are durability
+   * warnings, never errors, so callers do not treat the replaced canonical
+   * file as unpublished. */
+  gboolean flushed = FlushFileBuffers (h);
+  gboolean closed = CloseHandle (h);
   if (out_replaced != NULL)
     *out_replaced = TRUE;
   if (out_identity != NULL) {
@@ -4235,11 +4359,11 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
         ((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow;
     out_identity->nlink = info.nNumberOfLinks;
   }
-  gboolean durability_warning =
+  gboolean checkpoint_failed =
       rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
       && rotation_runtime->checkpoint (rotation_runtime->data,
           WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME) != 0;
-  if (durability_warning)
+  if (!flushed || !closed || checkpoint_failed)
     WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
         "policy store canonical replacement completed with a durability warning");
   else if (out_durable != NULL)
