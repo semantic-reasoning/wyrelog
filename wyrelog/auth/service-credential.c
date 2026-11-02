@@ -9,7 +9,7 @@
 #define VERIFIER_DOMAIN_LEN 35u
 #define VERIFIER_TLV_HEADER_LEN 5u
 #define ENTROPY_BYTES (WYL_SERVICE_CREDENTIAL_SALT_BYTES \
-    + WYL_SERVICE_CREDENTIAL_SECRET_BYTES)
+  + WYL_SERVICE_CREDENTIAL_SECRET_BYTES)
 
 G_STATIC_ASSERT (CHRONOID_KSUID_STRING_LEN == 27);
 G_STATIC_ASSERT (sizeof (VERIFIER_DOMAIN) - 1 == VERIFIER_DOMAIN_LEN);
@@ -17,7 +17,7 @@ G_STATIC_ASSERT (WYL_SERVICE_CREDENTIAL_KSUID_LEN == 27);
 G_STATIC_ASSERT (WYL_SERVICE_CREDENTIAL_ID_LEN
     == WYL_SERVICE_CREDENTIAL_ID_PREFIX_LEN + CHRONOID_KSUID_STRING_LEN);
 G_STATIC_ASSERT (sodium_base64_ENCODED_LEN (WYL_SERVICE_CREDENTIAL_SECRET_BYTES,
-        sodium_base64_VARIANT_URLSAFE_NO_PADDING)
+    sodium_base64_VARIANT_URLSAFE_NO_PADDING)
     == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_BUF);
 
 struct wyl_service_credential_secret_t
@@ -88,10 +88,11 @@ runtime_snapshot (const wyl_service_credential_runtime_t *runtime,
 
   if (runtime == NULL) {
     *out = (wyl_service_credential_runtime_t) {
-    .secure_alloc = default_alloc,.secure_lock = default_lock,.secure_wipe =
+      .secure_alloc = default_alloc,.secure_lock = default_lock,.secure_wipe =
           default_wipe,.secure_unlock = default_unlock,.secure_free =
           default_free,.new_id = default_new_id,.fill_random =
-          default_fill_random,};
+          default_fill_random,
+    };
   } else {
     *out = *runtime;
   }
@@ -134,9 +135,9 @@ static gboolean
 binding_is_valid (const gchar *value, gsize len)
 {
   return value != NULL && len > 0
-      && len <= WYL_SERVICE_CREDENTIAL_BINDING_MAX_BYTES
-      && memchr (value, '\0', len) == NULL
-      && g_utf8_validate (value, len, NULL);
+         && len <= WYL_SERVICE_CREDENTIAL_BINDING_MAX_BYTES
+         && memchr (value, '\0', len) == NULL
+         && g_utf8_validate (value, len, NULL);
 }
 
 static gboolean
@@ -146,11 +147,11 @@ verifier_inputs_are_valid (guint32 verifier_version, const guint8 *cvk,
     const guint8 *salt, gsize salt_len)
 {
   return verifier_version == WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION
-      && cvk != NULL && cvk_len == WYL_SERVICE_CREDENTIAL_CVK_BYTES
-      && wyl_service_credential_id_is_canonical (id, id_len)
-      && binding_is_valid (tenant, tenant_len)
-      && binding_is_valid (subject, subject_len) && subject_len >= 5
-      && salt != NULL && salt_len == WYL_SERVICE_CREDENTIAL_SALT_BYTES;
+         && cvk != NULL && cvk_len == WYL_SERVICE_CREDENTIAL_CVK_BYTES
+         && wyl_service_credential_id_is_canonical (id, id_len)
+         && binding_is_valid (tenant, tenant_len)
+         && binding_is_valid (subject, subject_len) && subject_len >= 5
+         && salt != NULL && salt_len == WYL_SERVICE_CREDENTIAL_SALT_BYTES;
 }
 
 wyrelog_error_t
@@ -180,7 +181,7 @@ wyl_service_credential_id_is_canonical (const gchar *id, gsize id_len)
 {
   if (id == NULL || id_len != WYL_SERVICE_CREDENTIAL_ID_LEN
       || memcmp (id, WYL_SERVICE_CREDENTIAL_ID_PREFIX,
-          WYL_SERVICE_CREDENTIAL_ID_PREFIX_LEN) != 0
+      WYL_SERVICE_CREDENTIAL_ID_PREFIX_LEN) != 0
       || memchr (id, '\0', id_len) != NULL)
     return FALSE;
 
@@ -233,13 +234,13 @@ secret_from_raw (const wyl_service_credential_runtime_t *runtime,
     wyl_service_credential_secret_t **out)
 {
   wyl_service_credential_secret_t *secret = locked_alloc (runtime,
-      sizeof *secret);
+          sizeof *secret);
   if (secret == NULL)
     return WYRELOG_E_NOMEM;
   secret->runtime = *runtime;
   memcpy (secret->raw, raw, sizeof secret->raw);
   if (sodium_bin2base64 (secret->encoded, sizeof secret->encoded, secret->raw,
-          sizeof secret->raw, sodium_base64_VARIANT_URLSAFE_NO_PADDING)
+      sizeof secret->raw, sodium_base64_VARIANT_URLSAFE_NO_PADDING)
       == NULL) {
     wyl_service_credential_secret_clear (&secret);
     return WYRELOG_E_CRYPTO;
@@ -253,9 +254,9 @@ secret_text_is_well_formed (guint32 format_version, const gchar *text,
     gsize text_len, wyl_service_credential_secret_t **out_secret)
 {
   return format_version == WYL_SERVICE_CREDENTIAL_FORMAT_VERSION
-      && text != NULL && text_len == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
-      && memchr (text, '\0', text_len) == NULL && out_secret != NULL
-      && *out_secret == NULL;
+         && text != NULL && text_len == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
+         && memchr (text, '\0', text_len) == NULL && out_secret != NULL
+         && *out_secret == NULL;
 }
 
 static wyrelog_error_t
@@ -264,7 +265,7 @@ secret_parse_snapshot (const gchar *text, gsize text_len,
     wyl_service_credential_secret_t **out_secret)
 {
   wyl_service_credential_secret_t *secret = locked_alloc (runtime,
-      sizeof *secret);
+          sizeof *secret);
   if (secret == NULL)
     return WYRELOG_E_NOMEM;
   secret->runtime = *runtime;
@@ -272,12 +273,12 @@ secret_parse_snapshot (const gchar *text, gsize text_len,
   size_t decoded_len = 0;
   const char *end = NULL;
   if (sodium_base642bin (secret->raw, sizeof secret->raw, text, text_len,
-          NULL, &decoded_len, &end,
-          sodium_base64_VARIANT_URLSAFE_NO_PADDING) != 0
+      NULL, &decoded_len, &end,
+      sodium_base64_VARIANT_URLSAFE_NO_PADDING) != 0
       || decoded_len != sizeof secret->raw || end != text + text_len
       || sodium_bin2base64 (secret->encoded, sizeof secret->encoded,
-          secret->raw, sizeof secret->raw,
-          sodium_base64_VARIANT_URLSAFE_NO_PADDING) == NULL
+      secret->raw, sizeof secret->raw,
+      sodium_base64_VARIANT_URLSAFE_NO_PADDING) == NULL
       || memcmp (secret->encoded, text, text_len) != 0) {
     wyl_service_credential_secret_clear (&secret);
     return WYRELOG_E_INVALID;
@@ -308,7 +309,7 @@ wyl_service_credential_secret_parse (guint32 format_version,
     wyl_service_credential_secret_t **out_secret)
 {
   return wyl_service_credential_secret_parse_with_runtime (format_version,
-      text, text_len, NULL, out_secret);
+             text, text_len, NULL, out_secret);
 }
 
 void
@@ -337,7 +338,7 @@ hash_tlv (crypto_generichash_state *state, guint8 framing[5], guint8 tag,
   framing[0] = tag;
   put_u32_be (framing + 1, (guint32) len);
   if (crypto_generichash_update (state, framing,
-          VERIFIER_TLV_HEADER_LEN) != 0
+      VERIFIER_TLV_HEADER_LEN) != 0
       || crypto_generichash_update (state, value, len) != 0)
     return -1;
   return 0;
@@ -352,7 +353,7 @@ verifier_compute_runtime (const wyl_service_credential_runtime_t *runtime,
     guint8 out[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES])
 {
   if (!verifier_inputs_are_valid (verifier_version, cvk, cvk_len, id,
-          id_len, tenant, tenant_len, subject, subject_len, salt, salt_len)
+      id_len, tenant, tenant_len, subject, subject_len, salt, salt_len)
       || secret == NULL)
     return WYRELOG_E_INVALID;
 
@@ -370,7 +371,7 @@ verifier_compute_runtime (const wyl_service_credential_runtime_t *runtime,
   framing[VERIFIER_DOMAIN_LEN + 1] = 0x01;
 
   int failed = crypto_generichash_init (state, cvk, cvk_len,
-      WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
+          WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
   failed |= crypto_generichash_update (state, framing, VERIFIER_DOMAIN_LEN + 2);
   failed |= hash_tlv (state, framing, 0x01, id, id_len);
   failed |= hash_tlv (state, framing, 0x02, tenant, tenant_len);
@@ -378,7 +379,7 @@ verifier_compute_runtime (const wyl_service_credential_runtime_t *runtime,
   failed |= hash_tlv (state, framing, 0x04, salt, salt_len);
   failed |= hash_tlv (state, framing, 0x05, secret->raw, sizeof secret->raw);
   failed |= crypto_generichash_final (state, digest,
-      WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
+          WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
   if (failed == 0)
     memcpy (out, digest, WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
   locked_free (runtime, scratch, scratch_len);
@@ -394,16 +395,16 @@ wyl_service_credential_verifier_compute (guint32 verifier_version,
 {
   if (out == NULL || out_len != WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES
       || secret == NULL || !verifier_inputs_are_valid (verifier_version,
-          cvk, cvk_len, id, id_len, tenant, tenant_len, subject, subject_len,
-          salt, salt_len))
+      cvk, cvk_len, id, id_len, tenant, tenant_len, subject, subject_len,
+      salt, salt_len))
     return WYRELOG_E_INVALID;
   wyl_service_credential_runtime_t runtime;
   wyrelog_error_t rc = runtime_snapshot (NULL, &runtime);
   if (rc != WYRELOG_E_OK)
     return rc;
   return verifier_compute_runtime (&runtime, verifier_version, cvk, cvk_len,
-      id, id_len, tenant, tenant_len, subject, subject_len, salt, salt_len,
-      secret, out);
+             id, id_len, tenant, tenant_len, subject, subject_len, salt, salt_len,
+             secret, out);
 }
 
 wyrelog_error_t
@@ -435,7 +436,7 @@ wyl_service_credential_generate_with_runtime (const guint8 *cvk,
     goto cleanup;
   if (material.credential_id[WYL_SERVICE_CREDENTIAL_ID_LEN] != '\0'
       || !wyl_service_credential_id_is_canonical (material.credential_id,
-          WYL_SERVICE_CREDENTIAL_ID_LEN)) {
+      WYL_SERVICE_CREDENTIAL_ID_LEN)) {
     rc = WYRELOG_E_INVALID;
     goto cleanup;
   }
@@ -458,9 +459,9 @@ wyl_service_credential_generate_with_runtime (const guint8 *cvk,
     goto cleanup;
 
   rc = verifier_compute_runtime (&runtime, material.verifier_version, cvk,
-      cvk_len, material.credential_id, WYL_SERVICE_CREDENTIAL_ID_LEN, tenant,
-      tenant_len, subject, subject_len, material.salt, sizeof material.salt,
-      secret, material.verifier);
+          cvk_len, material.credential_id, WYL_SERVICE_CREDENTIAL_ID_LEN, tenant,
+          tenant_len, subject, subject_len, material.salt, sizeof material.salt,
+          secret, material.verifier);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   *out_material = material;
@@ -481,7 +482,7 @@ wyl_service_credential_generate (const guint8 *cvk, gsize cvk_len,
     wyl_service_credential_secret_t **out_secret)
 {
   return wyl_service_credential_generate_with_runtime (cvk, cvk_len, tenant,
-      tenant_len, subject, subject_len, NULL, out_material, out_secret);
+             tenant_len, subject, subject_len, NULL, out_material, out_secret);
 }
 
 wyrelog_error_t
@@ -495,7 +496,7 @@ wyl_service_credential_verify_with_runtime (guint32 format_version,
 {
   if (format_version != WYL_SERVICE_CREDENTIAL_FORMAT_VERSION
       || !verifier_inputs_are_valid (verifier_version, cvk, cvk_len, id,
-          id_len, tenant, tenant_len, subject, subject_len, salt, salt_len)
+      id_len, tenant, tenant_len, subject, subject_len, salt, salt_len)
       || expected == NULL
       || expected_len != WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES
       || presented_secret == NULL
@@ -509,24 +510,24 @@ wyl_service_credential_verify_with_runtime (guint32 format_version,
     return rc;
   wyl_service_credential_secret_t *presented = NULL;
   rc = secret_parse_snapshot (presented_secret, presented_secret_len,
-      &runtime, &presented);
+          &runtime, &presented);
   if (rc != WYRELOG_E_OK)
     return rc;
   guint8 *actual = locked_alloc (&runtime,
-      WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
+          WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
   if (actual == NULL) {
     wyl_service_credential_secret_clear (&presented);
     return WYRELOG_E_NOMEM;
   }
   rc = verifier_compute_runtime (&runtime, verifier_version, cvk, cvk_len, id,
-      id_len, tenant, tenant_len, subject, subject_len, salt, salt_len,
-      presented, actual);
+          id_len, tenant, tenant_len, subject, subject_len, salt, salt_len,
+          presented, actual);
   if (rc == WYRELOG_E_OK) {
     /* This is deliberately the sole production verifier comparison site.
      * The operands are fixed-size and every well-formed wrong secret reaches
      * the same constant-time primitive exactly once. */
     gboolean match = sodium_memcmp (actual, expected,
-        WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES) == 0;
+            WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES) == 0;
     *out_match = match;
   }
   locked_free (&runtime, actual, WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES);
@@ -544,7 +545,7 @@ wyl_service_credential_verify (guint32 format_version,
     gboolean *out_match)
 {
   return wyl_service_credential_verify_with_runtime (format_version,
-      verifier_version, cvk, cvk_len, id, id_len, tenant, tenant_len, subject,
-      subject_len, salt, salt_len, expected, expected_len, presented_secret,
-      presented_secret_len, NULL, out_match);
+             verifier_version, cvk, cvk_len, id, id_len, tenant, tenant_len, subject,
+             subject_len, salt, salt_len, expected, expected_len, presented_secret,
+             presented_secret_len, NULL, out_match);
 }
