@@ -934,6 +934,9 @@ static const gchar *const required_tables[] = {
   "service_credential_handoff_retirement_receipts",
   "service_permission_remediation_receipts",
   "service_retirement_receipts",
+  "data_credentials",
+  "data_credential_graphs",
+  "data_credential_settings",
 };
 
 static const gchar offline_restore_journals_sql[] =
@@ -15573,6 +15576,177 @@ migrate_human_user_schema (sqlite3 *db)
   return rc == WYRELOG_E_OK ? end : rc;
 }
 
+/* Owner-issued data credentials (#1341, #1473).  The tables have no delete
+ * guard of their own, like service_credentials, so tenant deletion purges
+ * them; the triggers keep a credential's binding, scope and expiry fixed,
+ * make revocation terminal and make a rotation keep its predecessor's scope.
+ * Each object is created and verified against this exact text, and the
+ * mutation paths re-verify it, so a drifted definition fails closed. */
+typedef struct
+{
+  const gchar *name;
+  const gchar *sql;
+} DataCredentialSchemaObject;
+
+static const DataCredentialSchemaObject data_credential_schema[] = {
+  {"data_credentials",
+   "CREATE TABLE IF NOT EXISTS data_credentials("
+   "credential_id TEXT NOT NULL PRIMARY KEY CHECK(typeof(credential_id)='text' AND length(credential_id)=31 AND substr(credential_id,1,4)='wdc_'),"
+   "credential_format_version INTEGER NOT NULL CHECK(typeof(credential_format_version)='integer' AND credential_format_version=1),"
+   "tenant_id TEXT NOT NULL CHECK(typeof(tenant_id)='text' AND tenant_id<>'" WYL_TENANT_DEFAULT "'),"
+   "issuer_subject_id TEXT NOT NULL CHECK(typeof(issuer_subject_id)='text' AND length(issuer_subject_id) BETWEEN 1 AND 128),"
+   "operations INTEGER NOT NULL CHECK(typeof(operations)='integer' AND operations BETWEEN 1 AND 31),"
+   "graph_count INTEGER NOT NULL CHECK(typeof(graph_count)='integer' AND graph_count BETWEEN 0 AND 64),"
+   "generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=1),"
+   "state TEXT NOT NULL CHECK(state IN ('active','revoked')),"
+   "verifier_version INTEGER NOT NULL CHECK(typeof(verifier_version)='integer' AND verifier_version=1),"
+   "salt BLOB NOT NULL CHECK(typeof(salt)='blob' AND length(salt)=16),"
+   "verifier BLOB NOT NULL CHECK(typeof(verifier)='blob' AND length(verifier)=32),"
+   "request_id TEXT NOT NULL UNIQUE CHECK(typeof(request_id)='text' AND length(request_id) BETWEEN 1 AND 128),"
+   "expires_in_us INTEGER NOT NULL CHECK(typeof(expires_in_us)='integer' AND expires_in_us>0),"
+   "created_at_us INTEGER NOT NULL CHECK(typeof(created_at_us)='integer' AND created_at_us>0),"
+   "updated_at_us INTEGER NOT NULL CHECK(typeof(updated_at_us)='integer' AND updated_at_us>=created_at_us),"
+   "expires_at_us INTEGER NOT NULL CHECK(typeof(expires_at_us)='integer' AND expires_at_us>created_at_us),"
+   "last_used_at_us INTEGER CHECK(last_used_at_us IS NULL OR (typeof(last_used_at_us)='integer' AND last_used_at_us>=created_at_us)),"
+   "revoked_by TEXT CHECK(revoked_by IS NULL OR (typeof(revoked_by)='text' AND length(revoked_by) BETWEEN 1 AND 128)),"
+   "revoked_at_us INTEGER CHECK(revoked_at_us IS NULL OR typeof(revoked_at_us)='integer'),"
+   "revoked_reason TEXT CHECK(revoked_reason IS NULL OR revoked_reason IN ('revoked','rotated','ownership_transfer','issuer_disabled','issuer_deleted','tenant_deleted')),"
+   "rotated_from_id TEXT UNIQUE,"
+   "UNIQUE(credential_id,tenant_id),"
+   "CHECK(rotated_from_id IS NULL OR rotated_from_id<>credential_id),"
+   "CHECK((state='active' AND revoked_by IS NULL AND revoked_at_us IS NULL AND revoked_reason IS NULL) OR "
+   "(state='revoked' AND revoked_by IS NOT NULL AND revoked_at_us IS NOT NULL AND revoked_reason IS NOT NULL AND revoked_at_us>=created_at_us)),"
+   "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id) ON UPDATE RESTRICT ON DELETE RESTRICT,"
+   "FOREIGN KEY(issuer_subject_id) REFERENCES human_users(subject_id) ON UPDATE RESTRICT ON DELETE RESTRICT,"
+   "FOREIGN KEY(rotated_from_id,tenant_id) REFERENCES data_credentials(credential_id,tenant_id) ON UPDATE RESTRICT ON DELETE RESTRICT)"},
+  /* A scope names graphs by id; existence is checked at issue.  No foreign
+   * key to fact_graphs, so a future single-graph removal is not blocked by
+   * revoked credentials; it must revoke the credentials naming the graph. */
+  {"data_credential_graphs",
+   "CREATE TABLE IF NOT EXISTS data_credential_graphs("
+   "credential_id TEXT NOT NULL,"
+   "tenant_id TEXT NOT NULL,"
+   "graph_id TEXT NOT NULL CHECK(typeof(graph_id)='text' AND length(graph_id) BETWEEN 1 AND 255),"
+   "PRIMARY KEY(credential_id,graph_id),"
+   "FOREIGN KEY(credential_id,tenant_id) REFERENCES data_credentials(credential_id,tenant_id) ON UPDATE RESTRICT ON DELETE RESTRICT)"},
+  {"data_credential_settings",
+   "CREATE TABLE IF NOT EXISTS data_credential_settings("
+   "slot INTEGER PRIMARY KEY CHECK(slot=1),"
+   "max_expiry_us INTEGER NOT NULL CHECK(typeof(max_expiry_us)='integer' AND max_expiry_us BETWEEN 3600000000 AND 315360000000000),"
+   "live_cap INTEGER NOT NULL CHECK(typeof(live_cap)='integer' AND live_cap BETWEEN 1 AND 1024),"
+   "write_cap INTEGER NOT NULL CHECK(typeof(write_cap)='integer' AND write_cap BETWEEN 0 AND 1024),"
+   "updated_by TEXT NOT NULL CHECK(typeof(updated_by)='text' AND length(updated_by) BETWEEN 1 AND 128),"
+   "updated_at_us INTEGER NOT NULL CHECK(typeof(updated_at_us)='integer' AND updated_at_us>0),"
+   "CHECK(write_cap<=live_cap))"},
+  {"idx_data_credentials_tenant_state_expiry",
+   "CREATE INDEX IF NOT EXISTS idx_data_credentials_tenant_state_expiry ON data_credentials(tenant_id,state,expires_at_us)"},
+  {"idx_data_credentials_issuer_state",
+   "CREATE INDEX IF NOT EXISTS idx_data_credentials_issuer_state ON data_credentials(issuer_subject_id,state)"},
+  {"trg_data_credentials_immutable",
+   "CREATE TRIGGER IF NOT EXISTS trg_data_credentials_immutable BEFORE UPDATE ON data_credentials "
+   "WHEN NEW.credential_id IS NOT OLD.credential_id OR NEW.credential_format_version IS NOT OLD.credential_format_version "
+   "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.issuer_subject_id IS NOT OLD.issuer_subject_id "
+   "OR NEW.operations IS NOT OLD.operations OR NEW.graph_count IS NOT OLD.graph_count "
+   "OR NEW.generation IS NOT OLD.generation OR NEW.verifier_version IS NOT OLD.verifier_version "
+   "OR NEW.salt IS NOT OLD.salt OR NEW.verifier IS NOT OLD.verifier OR NEW.request_id IS NOT OLD.request_id "
+   "OR NEW.expires_in_us IS NOT OLD.expires_in_us OR NEW.created_at_us IS NOT OLD.created_at_us "
+   "OR NEW.expires_at_us IS NOT OLD.expires_at_us OR NEW.rotated_from_id IS NOT OLD.rotated_from_id "
+   "OR (OLD.state='revoked' AND (NEW.state IS NOT OLD.state OR NEW.revoked_by IS NOT OLD.revoked_by "
+   "OR NEW.revoked_at_us IS NOT OLD.revoked_at_us OR NEW.revoked_reason IS NOT OLD.revoked_reason)) "
+   "OR (OLD.last_used_at_us IS NOT NULL AND (NEW.last_used_at_us IS NULL OR NEW.last_used_at_us<OLD.last_used_at_us)) "
+   "BEGIN SELECT RAISE(ABORT,'data credential is immutable'); END"},
+  {"trg_data_credentials_rotation",
+   "CREATE TRIGGER IF NOT EXISTS trg_data_credentials_rotation BEFORE INSERT ON data_credentials "
+   "WHEN NEW.rotated_from_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM data_credentials p "
+   "WHERE p.credential_id=NEW.rotated_from_id AND p.tenant_id=NEW.tenant_id AND p.issuer_subject_id=NEW.issuer_subject_id "
+   "AND p.operations=NEW.operations AND p.graph_count=NEW.graph_count AND p.expires_in_us=NEW.expires_in_us "
+   "AND p.expires_at_us=NEW.expires_at_us AND NEW.generation=p.generation+1 "
+   "AND p.state='revoked' AND p.revoked_reason='rotated') "
+   "BEGIN SELECT RAISE(ABORT,'data credential rotation must keep its scope'); END"},
+  {"trg_data_credential_graphs_no_update",
+   "CREATE TRIGGER IF NOT EXISTS trg_data_credential_graphs_no_update BEFORE UPDATE ON data_credential_graphs "
+   "BEGIN SELECT RAISE(ABORT,'data credential scope is immutable'); END"},
+  {"trg_data_credential_graphs_bounded",
+   "CREATE TRIGGER IF NOT EXISTS trg_data_credential_graphs_bounded BEFORE INSERT ON data_credential_graphs "
+   "WHEN NOT EXISTS(SELECT 1 FROM data_credentials c WHERE c.credential_id=NEW.credential_id AND c.tenant_id=NEW.tenant_id "
+   "AND c.graph_count>(SELECT count(*) FROM data_credential_graphs g WHERE g.credential_id=NEW.credential_id)) "
+   "BEGIN SELECT RAISE(ABORT,'data credential scope is immutable'); END"},
+  {"trg_data_credential_graphs_rotation",
+   "CREATE TRIGGER IF NOT EXISTS trg_data_credential_graphs_rotation BEFORE INSERT ON data_credential_graphs "
+   "WHEN EXISTS(SELECT 1 FROM data_credentials c WHERE c.credential_id=NEW.credential_id AND c.rotated_from_id IS NOT NULL "
+   "AND NOT EXISTS(SELECT 1 FROM data_credential_graphs p WHERE p.credential_id=c.rotated_from_id AND p.graph_id=NEW.graph_id)) "
+   "BEGIN SELECT RAISE(ABORT,'data credential rotation must keep its scope'); END"},
+};
+
+/* Matches an existing object against its definition without creating it. */
+static wyrelog_error_t
+data_credential_schema_object_matches (sqlite3 *db, const gchar *name,
+    const gchar *sql)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT sql FROM sqlite_schema WHERE name=?", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, name);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_ROW)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    g_autofree gchar *actual = graph_authority_normalize_sql ((const gchar *)
+            sqlite3_column_text (stmt, 0));
+    g_autofree gchar *expected = graph_authority_canonical_sql (sql);
+    if (g_strcmp0 (actual, expected) != 0)
+      rc = WYRELOG_E_POLICY;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+/* No index or trigger beyond the listed ones may hang off these tables. */
+static wyrelog_error_t
+data_credential_schema_is_closed (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT (SELECT count(*) FROM sqlite_schema WHERE sql IS NOT NULL "
+          "AND tbl_name IN ('data_credentials','data_credential_graphs',"
+          "'data_credential_settings'))+(SELECT count(*) FROM "
+          "sqlite_temp_schema WHERE tbl_name IN ('data_credentials',"
+          "'data_credential_graphs','data_credential_settings'))", &stmt);
+  if (rc == WYRELOG_E_OK && (sqlite3_step (stmt) != SQLITE_ROW
+      || sqlite3_column_int64 (stmt, 0)
+      != (sqlite3_int64) G_N_ELEMENTS (data_credential_schema)))
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+data_credential_validate_schema (sqlite3 *db)
+{
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (gsize i = 0; rc == WYRELOG_E_OK
+      && i < G_N_ELEMENTS (data_credential_schema); i++)
+    rc = data_credential_schema_object_matches (db,
+            data_credential_schema[i].name, data_credential_schema[i].sql);
+  return rc == WYRELOG_E_OK ? data_credential_schema_is_closed (db) : rc;
+}
+
+static wyrelog_error_t
+migrate_data_credential_schema (sqlite3 *db)
+{
+  wyrelog_error_t rc = exec_sql (db, "SAVEPOINT data_credential_schema");
+  for (gsize i = 0; rc == WYRELOG_E_OK
+      && i < G_N_ELEMENTS (data_credential_schema); i++)
+    rc = tenant_delete_schema_object (db, data_credential_schema[i].name,
+            data_credential_schema[i].sql);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_schema_is_closed (db);
+  if (rc != WYRELOG_E_OK)
+    (void) exec_sql (db, "ROLLBACK TO data_credential_schema");
+  wyrelog_error_t end = exec_sql (db, "RELEASE data_credential_schema");
+  return rc == WYRELOG_E_OK ? end : rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_create_schema (wyl_policy_store_t *store)
 {
@@ -16602,7 +16776,8 @@ graph_authority_schema_ready:
     wyrelog_error_t release_rc =
         exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
     if (release_rc == WYRELOG_E_OK) release_rc = migrate_tenant_delete_schema (store->db);
-    return release_rc == WYRELOG_E_OK ? migrate_human_user_schema (store->db) : release_rc;
+    if (release_rc == WYRELOG_E_OK) release_rc = migrate_human_user_schema (store->db);
+    return release_rc == WYRELOG_E_OK ? migrate_data_credential_schema (store->db) : release_rc;
   }
   (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_service_schema;");
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
@@ -31680,7 +31855,8 @@ prepare_keyprovider_rotation_work (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_NOT_FOUND) {
     gboolean credentials = FALSE;
     rc = query_has_rows (store->db,
-            "SELECT 1 FROM service_credentials LIMIT 1;", &credentials);
+            "SELECT 1 FROM service_credentials UNION ALL "
+            "SELECT 1 FROM data_credentials LIMIT 1;", &credentials);
     if (rc == WYRELOG_E_OK && credentials)
       rc = WYRELOG_E_POLICY;
     else if (rc == WYRELOG_E_OK)
@@ -31821,7 +31997,8 @@ service_cvk_materialize (wyl_policy_store_t *store, gboolean allow_create,
   if (rc == WYRELOG_E_NOT_FOUND) {
     gboolean credentials = FALSE;
     rc = query_has_rows (store->db,
-            "SELECT 1 FROM service_credentials LIMIT 1;", &credentials);
+            "SELECT 1 FROM service_credentials UNION ALL "
+            "SELECT 1 FROM data_credentials LIMIT 1;", &credentials);
     if (rc == WYRELOG_E_OK && credentials)
       rc = WYRELOG_E_POLICY;
     else if (rc == WYRELOG_E_OK && allow_create)
@@ -47245,6 +47422,7 @@ static const TenantDeleteTable tenant_delete_tables[] = {
   {"service_credential_handoff_remediation_actions", "original_request_id IN (" TD_OPERATIONS ")"},
   {"service_credential_handoff_retirement_receipts", "original_request_id IN (" TD_OPERATIONS ")"},
   {"service_credential_operation_fences", "request_id IN (" TD_OPERATIONS ")"},
+  TD_TENANT ("data_credential_graphs"), TD_TENANT ("data_credentials"),
 };
 #undef TD_TENANT
 #undef TD_SCOPE
@@ -47868,3 +48046,962 @@ wyl_policy_store_user_require_admin (wyl_policy_store_t *store, const gchar *sub
   sqlite3_finalize (s);
   return rc;
 }
+
+/* BEGIN data credential store */
+
+#define DATA_CREDENTIAL_COLUMNS \
+  "credential_id,credential_format_version,tenant_id,issuer_subject_id," \
+  "operations,graph_count,generation,state,request_id,expires_in_us," \
+  "created_at_us,updated_at_us,expires_at_us,last_used_at_us,revoked_by," \
+  "revoked_at_us,revoked_reason,rotated_from_id"
+
+static const gchar *const data_credential_lifecycle_reasons[] = {
+  [WYL_DATA_CREDENTIAL_REVOKE_OWNERSHIP_TRANSFER] = "ownership_transfer",
+  [WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DISABLED] = "issuer_disabled",
+  [WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DELETED] = "issuer_deleted",
+  [WYL_DATA_CREDENTIAL_REVOKE_TENANT_DELETED] = "tenant_deleted",
+};
+
+void
+wyl_data_credential_info_clear (WylDataCredentialInfo *info)
+{
+  if (info == NULL)
+    return;
+  g_free (info->credential_id);
+  g_free (info->tenant_id);
+  g_free (info->issuer_subject_id);
+  g_clear_pointer (&info->graph_ids, g_ptr_array_unref);
+  g_free (info->state);
+  g_free (info->request_id);
+  g_free (info->revoked_by);
+  g_free (info->revoked_reason);
+  g_free (info->rotated_from_id);
+  memset (info, 0, sizeof *info);
+}
+
+void
+wyl_data_credential_info_free (gpointer info)
+{
+  wyl_data_credential_info_clear (info);
+  g_free (info);
+}
+
+static gchar *
+data_credential_column_dup (sqlite3_stmt *stmt, int column)
+{
+  const guchar *text = sqlite3_column_text (stmt, column);
+  return text != NULL ? g_strdup ((const gchar *) text) : NULL;
+}
+
+/* Fills @info from a DATA_CREDENTIAL_COLUMNS row and loads its scope, whose
+ * row count must equal the stored graph_count so a damaged scope never reads
+ * as "every graph". */
+static wyrelog_error_t
+data_credential_info_from_row (sqlite3 *db, sqlite3_stmt *stmt,
+    WylDataCredentialInfo *info)
+{
+  wyl_data_credential_info_clear (info);
+  info->credential_id = data_credential_column_dup (stmt, 0);
+  info->credential_format_version = (guint32) sqlite3_column_int (stmt, 1);
+  info->tenant_id = data_credential_column_dup (stmt, 2);
+  info->issuer_subject_id = data_credential_column_dup (stmt, 3);
+  info->operations = (guint32) sqlite3_column_int (stmt, 4);
+  sqlite3_int64 graph_count = sqlite3_column_int64 (stmt, 5);
+  info->generation = (guint64) sqlite3_column_int64 (stmt, 6);
+  info->state = data_credential_column_dup (stmt, 7);
+  info->request_id = data_credential_column_dup (stmt, 8);
+  info->expires_in_us = sqlite3_column_int64 (stmt, 9);
+  info->created_at_us = sqlite3_column_int64 (stmt, 10);
+  info->updated_at_us = sqlite3_column_int64 (stmt, 11);
+  info->expires_at_us = sqlite3_column_int64 (stmt, 12);
+  info->last_used_at_us = sqlite3_column_int64 (stmt, 13);
+  info->revoked_by = data_credential_column_dup (stmt, 14);
+  info->revoked_at_us = sqlite3_column_int64 (stmt, 15);
+  info->revoked_reason = data_credential_column_dup (stmt, 16);
+  info->rotated_from_id = data_credential_column_dup (stmt, 17);
+  info->graph_ids = g_ptr_array_new_with_free_func (g_free);
+
+  sqlite3_stmt *graphs = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT graph_id FROM data_credential_graphs WHERE credential_id=? "
+          "ORDER BY graph_id", &graphs);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (graphs, 1, info->credential_id);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (graphs)) == SQLITE_ROW)
+    g_ptr_array_add (info->graph_ids, data_credential_column_dup (graphs, 0));
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (graphs);
+  if (rc == WYRELOG_E_OK && (sqlite3_int64) info->graph_ids->len != graph_count)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    wyl_data_credential_info_clear (info);
+  return rc;
+}
+
+/* Reads one credential selected by @where, which binds ?1 to @key. */
+static wyrelog_error_t
+data_credential_read (sqlite3 *db, const gchar *where, const gchar *key,
+    WylDataCredentialInfo *out)
+{
+  g_autofree gchar *sql = g_strdup_printf ("SELECT " DATA_CREDENTIAL_COLUMNS
+          " FROM data_credentials WHERE %s", where);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, key);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step == SQLITE_ROW)
+      rc = data_credential_info_from_row (db, stmt, out);
+    else
+      rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static gboolean
+data_credential_in_caller_transaction (wyl_policy_store_t *store)
+{
+  return wyl_policy_store_transaction_owned_by_caller (store)
+         && !sqlite3_get_autocommit (store->db);
+}
+
+/* The verification key is shared with service credentials.  It is read from
+ * the store's cache and never materialized here, because materializing opens
+ * its own transaction and the caller already holds one. */
+static wyrelog_error_t
+data_credential_cvk (wyl_policy_store_t *store, const guint8 **out_cvk)
+{
+  *out_cvk = NULL;
+  if (!store->keyprovider.owned)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&store->service_cvk_mutex);
+  const guint8 *envelope = store->service_cvk_envelope;
+  g_mutex_unlock (&store->service_cvk_mutex);
+  if (envelope == NULL)
+    return WYRELOG_E_BUSY;
+  *out_cvk = envelope + WYL_SERVICE_CVK_CVK_OFFSET;
+  return WYRELOG_E_OK;
+}
+
+/* @subject must be the tenant's current owner, an active human, and the
+ * tenant must be a non-built-in tenant that is not sealed or changing seal
+ * state. */
+static wyrelog_error_t
+data_credential_require_owner (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *subject)
+{
+  if (g_str_equal (tenant_id, WYL_TENANT_DEFAULT))
+    return WYRELOG_E_POLICY;
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_tenant_authority (store,
+          tenant_id, &record);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_strcmp0 (record->owner_subject_id, subject) != 0)
+    rc = WYRELOG_E_AUTH;
+  else if (record->sealed_compatibility
+      || record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+      || record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED
+      || record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING)
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_tenant_authority_record_free (record);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_user_require (store, subject, TRUE);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_settings_get (wyl_policy_store_t *store,
+    WylDataCredentialSettings *out)
+{
+  if (out != NULL)
+    *out = (WylDataCredentialSettings) {
+      WYL_DATA_CREDENTIAL_DEFAULT_MAX_EXPIRY_US,
+      WYL_DATA_CREDENTIAL_DEFAULT_LIVE_CAP,
+      WYL_DATA_CREDENTIAL_DEFAULT_WRITE_CAP, TRUE,
+    };
+  if (store == NULL || store->db == NULL || out == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT max_expiry_us,live_cap,write_cap FROM "
+          "data_credential_settings WHERE slot=1", &stmt);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step == SQLITE_ROW) {
+      out->max_expiry_us = sqlite3_column_int64 (stmt, 0);
+      out->live_cap = (guint32) sqlite3_column_int64 (stmt, 1);
+      out->write_cap = (guint32) sqlite3_column_int64 (stmt, 2);
+      out->is_default = FALSE;
+    } else if (step != SQLITE_DONE) {
+      rc = WYRELOG_E_IO;
+    }
+  }
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_settings_set (wyl_policy_store_t *store,
+    gint64 max_expiry_us, guint32 live_cap, guint32 write_cap,
+    const gchar *actor_subject_id, gint64 now_us)
+{
+  if (store == NULL || store->db == NULL
+      || max_expiry_us < WYL_DATA_CREDENTIAL_MIN_MAX_EXPIRY_US
+      || max_expiry_us > WYL_DATA_CREDENTIAL_MAX_MAX_EXPIRY_US
+      || live_cap < 1 || live_cap > WYL_DATA_CREDENTIAL_CAP_LIMIT
+      || write_cap > live_cap || actor_subject_id == NULL
+      || actor_subject_id[0] == '\0' || strlen (actor_subject_id) > 128
+      || now_us <= 0 || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = data_credential_validate_schema (store->db);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "INSERT INTO data_credential_settings(slot,max_expiry_us,live_cap,"
+            "write_cap,updated_by,updated_at_us) VALUES(1,?1,?2,?3,?4,?5) "
+            "ON CONFLICT(slot) DO UPDATE SET "
+            "max_expiry_us=excluded.max_expiry_us,"
+            "live_cap=excluded.live_cap,write_cap=excluded.write_cap,"
+            "updated_by=excluded.updated_by,"
+            "updated_at_us=excluded.updated_at_us",
+            &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_int64 (stmt, 1, max_expiry_us) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 2, live_cap) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 3, write_cap) != SQLITE_OK
+      || bind_text (stmt, 4, actor_subject_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, now_us) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+static gboolean
+data_credential_graph_id_is_valid (const gchar *graph_id)
+{
+  gsize len = graph_id != NULL ? strlen (graph_id) : 0;
+  return len >= 1 && len <= 255 && g_utf8_validate (graph_id, -1, NULL);
+}
+
+static gint
+data_credential_compare_strings (gconstpointer a, gconstpointer b)
+{
+  return g_strcmp0 (*(const gchar * const *) a, *(const gchar * const *) b);
+}
+
+/* A sorted, duplicate-free copy of @graph_ids, or NULL when one is invalid
+ * or repeated. */
+static GPtrArray *
+data_credential_sorted_scope (const gchar *const *graph_ids, gsize n)
+{
+  if (n > WYL_DATA_CREDENTIAL_MAX_GRAPHS || (n > 0 && graph_ids == NULL))
+    return NULL;
+  GPtrArray *sorted = g_ptr_array_new_with_free_func (g_free);
+  for (gsize i = 0; i < n; i++) {
+    if (!data_credential_graph_id_is_valid (graph_ids[i])) {
+      g_ptr_array_unref (sorted);
+      return NULL;
+    }
+    g_ptr_array_add (sorted, g_strdup (graph_ids[i]));
+  }
+  g_ptr_array_sort (sorted, data_credential_compare_strings);
+  for (guint i = 1; i < sorted->len; i++) {
+    if (g_str_equal (g_ptr_array_index (sorted, i - 1),
+        g_ptr_array_index (sorted, i))) {
+      g_ptr_array_unref (sorted);
+      return NULL;
+    }
+  }
+  return sorted;
+}
+
+static gboolean
+data_credential_same_scope (const GPtrArray *a, const GPtrArray *b)
+{
+  if (a->len != b->len)
+    return FALSE;
+  for (guint i = 0; i < a->len; i++)
+    if (!g_str_equal (g_ptr_array_index (a, i), g_ptr_array_index (b, i)))
+      return FALSE;
+  return TRUE;
+}
+
+static wyrelog_error_t
+data_credential_graph_exists (sqlite3 *db, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT 1 FROM fact_graphs WHERE tenant_id=? AND graph_id=?", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    rc = step == SQLITE_ROW ? WYRELOG_E_OK
+        : step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+/* Live credentials count against the caps; revoked and expired ones do not.
+ * A write-capable credential holds insert, delete or update. */
+static wyrelog_error_t
+data_credential_check_caps (wyl_policy_store_t *store, const gchar *tenant_id,
+    guint32 operations, gint64 now_us)
+{
+  WylDataCredentialSettings settings;
+  wyrelog_error_t rc = wyl_policy_store_data_credential_settings_get (store,
+          &settings);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "SELECT count(*),coalesce(sum((operations&?3)<>0),0) FROM "
+            "data_credentials WHERE tenant_id=?1 AND state='active' AND "
+            "expires_at_us>?2", &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 2, now_us) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 3, WYL_DATA_CREDENTIAL_OPS_WRITE)
+      != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_ROW)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_int64 live = sqlite3_column_int64 (stmt, 0);
+    sqlite3_int64 write = sqlite3_column_int64 (stmt, 1);
+    if (live + 1 > settings.live_cap
+        || ((operations & WYL_DATA_CREDENTIAL_OPS_WRITE) != 0
+        && write + 1 > settings.write_cap))
+      rc = WYRELOG_E_RESOURCE_LIMIT;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *issuer_subject_id;
+  const gchar *request_id;
+  guint32 operations;
+  gsize graph_count;
+  guint64 generation;
+  gint64 expires_in_us;
+  gint64 created_at_us;
+  gint64 expires_at_us;
+  const gchar *rotated_from_id;
+} DataCredentialRow;
+
+/* Generates a secret for @row and inserts the credential.  On success the
+ * caller owns *out_secret and *out_id. */
+static wyrelog_error_t
+data_credential_insert (wyl_policy_store_t *store, const guint8 *cvk,
+    const DataCredentialRow *row, gchar **out_id,
+    wyl_service_credential_secret_t **out_secret)
+{
+  wyrelog_error_t rc = WYRELOG_E_INTERNAL;
+  /* A fresh KSUID collides only by accident; retry a bounded number of
+   * times rather than fail the request. */
+  for (guint attempt = 0; attempt < 3; attempt++) {
+    wyl_service_credential_material_t material;
+    wyl_service_credential_secret_t *secret = NULL;
+    rc = wyl_data_credential_generate_with_runtime (cvk,
+            WYL_SERVICE_CREDENTIAL_CVK_BYTES, row->tenant_id,
+            strlen (row->tenant_id), row->issuer_subject_id,
+            strlen (row->issuer_subject_id), NULL, &material, &secret);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "INSERT INTO data_credentials(credential_id,"
+            "credential_format_version,tenant_id,issuer_subject_id,operations,"
+            "graph_count,generation,state,"
+            "verifier_version,salt,verifier,request_id,expires_in_us,"
+            "created_at_us,updated_at_us,expires_at_us,rotated_from_id) VALUES("
+            "?1,?2,?3,?4,?5,?6,?7,'active',?8,?9,?10,?11,?12,?13,?13,?14,?15)",
+            &stmt);
+    if (rc == WYRELOG_E_OK
+        && (bind_text (stmt, 1, material.credential_id) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 2, material.credential_format_version)
+        != SQLITE_OK
+        || bind_text (stmt, 3, row->tenant_id) != WYRELOG_E_OK
+        || bind_text (stmt, 4, row->issuer_subject_id) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 5, row->operations) != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64) row->graph_count)
+        != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 7, (sqlite3_int64) row->generation)
+        != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 8, material.verifier_version)
+        != SQLITE_OK
+        || sqlite3_bind_blob (stmt, 9, material.salt, sizeof material.salt,
+        SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_blob (stmt, 10, material.verifier,
+        sizeof material.verifier, SQLITE_TRANSIENT) != SQLITE_OK
+        || bind_text (stmt, 11, row->request_id) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 12, row->expires_in_us) != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 13, row->created_at_us) != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 14, row->expires_at_us) != SQLITE_OK
+        || bind_nullable_text (stmt, 15, row->rotated_from_id)
+        != WYRELOG_E_OK))
+      rc = WYRELOG_E_IO;
+    gboolean collided = FALSE;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE) {
+      collided = sqlite3_extended_errcode (store->db)
+          == SQLITE_CONSTRAINT_PRIMARYKEY;
+      rc = WYRELOG_E_IO;
+    }
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK) {
+      *out_id = g_strdup (material.credential_id);
+      *out_secret = secret;
+      wyl_service_credential_material_clear (&material);
+      return WYRELOG_E_OK;
+    }
+    wyl_service_credential_secret_clear (&secret);
+    wyl_service_credential_material_clear (&material);
+    if (!collided)
+      return rc;
+  }
+  return rc;
+}
+
+static wyrelog_error_t
+data_credential_insert_scope (sqlite3 *db, const gchar *credential_id,
+    const gchar *tenant_id, const GPtrArray *graph_ids)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "INSERT INTO data_credential_graphs(credential_id,tenant_id,"
+          "graph_id) VALUES(?1,?2,?3)", &stmt);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < graph_ids->len; i++) {
+    sqlite3_reset (stmt);
+    if (bind_text (stmt, 1, credential_id) != WYRELOG_E_OK
+        || bind_text (stmt, 2, tenant_id) != WYRELOG_E_OK
+        || bind_text (stmt, 3, g_ptr_array_index (graph_ids, i))
+        != WYRELOG_E_OK || sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_issue (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *issuer_subject_id,
+    const gchar *request_id, guint32 operations,
+    const gchar *const *graph_ids, gsize n_graph_ids, gint64 expires_in_us,
+    gint64 now_us, WylDataCredentialInfo *out,
+    wyl_service_credential_secret_t **out_secret, gboolean *out_replayed)
+{
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (store == NULL || store->db == NULL || out == NULL
+      || out_secret == NULL || *out_secret != NULL || out_replayed == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !wyl_policy_human_subject_is_valid (issuer_subject_id)
+      || request_id == NULL || !wyl_request_id_is_canonical (request_id)
+      || operations == 0 || (operations & ~WYL_DATA_CREDENTIAL_OPS_ALL) != 0
+      || expires_in_us <= 0 || now_us <= 0
+      || expires_in_us > G_MAXINT64 - now_us
+      || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GPtrArray) scope = data_credential_sorted_scope (graph_ids,
+          n_graph_ids);
+  if (scope == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  const guint8 *cvk = NULL;
+  g_autofree gchar *credential_id = NULL;
+  wyl_service_credential_secret_t *secret = NULL;
+  wyrelog_error_t rc = data_credential_validate_schema (store->db);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_cvk (store, &cvk);
+
+  /* A repeated request replays the credential it created, without the
+   * secret.  The fingerprint is the requested lifetime, not the expiry, so a
+   * retry at a later time still matches. */
+  if (rc == WYRELOG_E_OK) {
+    WylDataCredentialInfo existing = { 0 };
+    wyrelog_error_t found = data_credential_read (store->db,
+            "request_id=?1", request_id, &existing);
+    if (found == WYRELOG_E_OK) {
+      gboolean same = existing.rotated_from_id == NULL
+          && g_str_equal (existing.tenant_id, tenant_id)
+          && g_str_equal (existing.issuer_subject_id, issuer_subject_id)
+          && existing.operations == operations
+          && existing.expires_in_us == expires_in_us
+          && data_credential_same_scope (existing.graph_ids, scope);
+      if (same) {
+        wyl_data_credential_info_clear (out);
+        *out = existing;
+        *out_replayed = TRUE;
+        g_rec_mutex_unlock (&store->graph_authority_mutex);
+        return WYRELOG_E_OK;
+      }
+      wyl_data_credential_info_clear (&existing);
+      rc = WYRELOG_E_CONFLICT;
+    } else if (found != WYRELOG_E_NOT_FOUND) {
+      rc = found;
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_require_owner (store, tenant_id, issuer_subject_id);
+  if (rc == WYRELOG_E_OK) {
+    WylDataCredentialSettings settings;
+    rc = wyl_policy_store_data_credential_settings_get (store, &settings);
+    if (rc == WYRELOG_E_OK && expires_in_us > settings.max_expiry_us)
+      rc = WYRELOG_E_INVALID;
+  }
+  for (guint i = 0; rc == WYRELOG_E_OK && i < scope->len; i++)
+    rc = data_credential_graph_exists (store->db, tenant_id,
+            g_ptr_array_index (scope, i));
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_check_caps (store, tenant_id, operations, now_us);
+  if (rc == WYRELOG_E_OK) {
+    DataCredentialRow row = {
+      .tenant_id = tenant_id,.issuer_subject_id = issuer_subject_id,
+      .request_id = request_id,.operations = operations,
+      .graph_count = scope->len,.generation = 1,
+      .expires_in_us = expires_in_us,.created_at_us = now_us,
+      .expires_at_us = now_us + expires_in_us,
+    };
+    rc = data_credential_insert (store, cvk, &row, &credential_id, &secret);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_insert_scope (store->db, credential_id, tenant_id,
+            scope);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_read (store->db, "credential_id=?1", credential_id,
+            out);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_credential_secret_clear (&secret);
+    return rc;
+  }
+  *out_secret = secret;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_rotate (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *old_credential_id,
+    const gchar *actor_subject_id, const gchar *request_id, gint64 now_us,
+    WylDataCredentialInfo *out, wyl_service_credential_secret_t **out_secret,
+    gboolean *out_replayed)
+{
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (store == NULL || store->db == NULL || out == NULL
+      || out_secret == NULL || *out_secret != NULL || out_replayed == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || old_credential_id == NULL
+      || !wyl_policy_human_subject_is_valid (actor_subject_id)
+      || request_id == NULL || !wyl_request_id_is_canonical (request_id)
+      || now_us <= 0 || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  const guint8 *cvk = NULL;
+  WylDataCredentialInfo old = { 0 };
+  g_autofree gchar *credential_id = NULL;
+  wyl_service_credential_secret_t *secret = NULL;
+  wyrelog_error_t rc = data_credential_validate_schema (store->db);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_cvk (store, &cvk);
+  if (rc == WYRELOG_E_OK) {
+    WylDataCredentialInfo existing = { 0 };
+    wyrelog_error_t found = data_credential_read (store->db,
+            "request_id=?1", request_id, &existing);
+    if (found == WYRELOG_E_OK) {
+      if (g_strcmp0 (existing.rotated_from_id, old_credential_id) == 0
+          && g_str_equal (existing.tenant_id, tenant_id)) {
+        wyl_data_credential_info_clear (out);
+        *out = existing;
+        *out_replayed = TRUE;
+        g_rec_mutex_unlock (&store->graph_authority_mutex);
+        return WYRELOG_E_OK;
+      }
+      wyl_data_credential_info_clear (&existing);
+      rc = WYRELOG_E_CONFLICT;
+    } else if (found != WYRELOG_E_NOT_FOUND) {
+      rc = found;
+    }
+  }
+  if (rc == WYRELOG_E_OK) {
+    rc = data_credential_read (store->db, "credential_id=?1",
+            old_credential_id, &old);
+    if (rc == WYRELOG_E_OK && !g_str_equal (old.tenant_id, tenant_id))
+      rc = WYRELOG_E_NOT_FOUND;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_require_owner (store, tenant_id, actor_subject_id);
+  if (rc == WYRELOG_E_OK
+      && !g_str_equal (old.issuer_subject_id, actor_subject_id))
+    rc = WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK && (!g_str_equal (old.state, "active")
+      || old.expires_at_us <= now_us))
+    rc = WYRELOG_E_CONFLICT;
+
+  /* The predecessor is revoked first, so rotation never needs cap room. */
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "UPDATE data_credentials SET state='revoked',revoked_by=?2,"
+            "revoked_at_us=?3,revoked_reason='rotated',"
+            "updated_at_us=max(updated_at_us,?3) "
+            "WHERE credential_id=?1 AND state='active'", &stmt);
+    if (rc == WYRELOG_E_OK
+        && (bind_text (stmt, 1, old_credential_id) != WYRELOG_E_OK
+        || bind_text (stmt, 2, actor_subject_id) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 3, now_us) != SQLITE_OK
+        || sqlite3_step (stmt) != SQLITE_DONE
+        || sqlite3_changes (store->db) != 1))
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK) {
+    DataCredentialRow row = {
+      .tenant_id = tenant_id,.issuer_subject_id = old.issuer_subject_id,
+      .request_id = request_id,.operations = old.operations,
+      .graph_count = old.graph_ids->len,.generation = old.generation + 1,
+      .expires_in_us = old.expires_in_us,.created_at_us = now_us,
+      .expires_at_us = old.expires_at_us,
+      .rotated_from_id = old_credential_id,
+    };
+    rc = data_credential_insert (store, cvk, &row, &credential_id, &secret);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_insert_scope (store->db, credential_id, tenant_id,
+            old.graph_ids);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_read (store->db, "credential_id=?1", credential_id,
+            out);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  wyl_data_credential_info_clear (&old);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_credential_secret_clear (&secret);
+    return rc;
+  }
+  *out_secret = secret;
+  return WYRELOG_E_OK;
+}
+
+/* Revokes one active credential; a revoked one is left as it is. */
+static wyrelog_error_t
+data_credential_revoke_one (sqlite3 *db, const gchar *credential_id,
+    const gchar *actor_subject_id, const gchar *reason, gint64 now_us,
+    gboolean *out_changed)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "UPDATE data_credentials SET state='revoked',revoked_by=?2,"
+          "revoked_at_us=?3,revoked_reason=?4,updated_at_us=max(updated_at_us,"
+          "?3) WHERE credential_id=?1 AND state='active'", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, credential_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, actor_subject_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 3, now_us) != SQLITE_OK
+      || bind_text (stmt, 4, reason) != WYRELOG_E_OK
+      || sqlite3_step (stmt) != SQLITE_DONE))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    *out_changed = sqlite3_changes (db) == 1;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static gboolean
+data_credential_actor_is_valid (const gchar *actor)
+{
+  gsize len = actor != NULL ? strlen (actor) : 0;
+  return len >= 1 && len <= 128;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_revoke (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *credential_id,
+    const gchar *actor_subject_id, gint64 now_us, WylDataCredentialInfo *out,
+    gboolean *out_changed)
+{
+  if (out_changed != NULL)
+    *out_changed = FALSE;
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || credential_id == NULL
+      || !data_credential_actor_is_valid (actor_subject_id) || now_us <= 0
+      || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  WylDataCredentialInfo current = { 0 };
+  gboolean changed = FALSE;
+  wyrelog_error_t rc = data_credential_validate_schema (store->db);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_read (store->db, "credential_id=?1", credential_id,
+            &current);
+  if (rc == WYRELOG_E_OK && !g_str_equal (current.tenant_id, tenant_id))
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_revoke_one (store->db, credential_id,
+            actor_subject_id, "revoked", now_us, &changed);
+  if (rc == WYRELOG_E_OK && out != NULL)
+    rc = data_credential_read (store->db, "credential_id=?1", credential_id,
+            out);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  wyl_data_credential_info_clear (&current);
+  if (rc == WYRELOG_E_OK && out_changed != NULL)
+    *out_changed = changed;
+  return rc;
+}
+
+/* Revokes every active credential matching @where (binding ?1 and,
+ * optionally, ?2) and returns them, ordered by id. */
+static wyrelog_error_t
+data_credential_revoke_matching (wyl_policy_store_t *store,
+    const gchar *where, const gchar *first, const gchar *second,
+    const gchar *actor_subject_id, WylDataCredentialLifecycleReason reason,
+    gint64 now_us, GPtrArray **out_revoked)
+{
+  g_autofree gchar *sql = g_strdup_printf ("SELECT credential_id FROM "
+          "data_credentials WHERE state='active' AND %s ORDER BY credential_id",
+          where);
+  g_autoptr (GPtrArray) ids = g_ptr_array_new_with_free_func (g_free);
+  GPtrArray *revoked =
+      g_ptr_array_new_with_free_func (wyl_data_credential_info_free);
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = data_credential_validate_schema (store->db);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK && bind_text (stmt, 1, first) != WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && second != NULL
+      && bind_text (stmt, 2, second) != WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW)
+    g_ptr_array_add (ids, data_credential_column_dup (stmt, 0));
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < ids->len; i++) {
+    gboolean changed = FALSE;
+    rc = data_credential_revoke_one (store->db, g_ptr_array_index (ids, i),
+            actor_subject_id, data_credential_lifecycle_reasons[reason], now_us,
+            &changed);
+    if (rc == WYRELOG_E_OK && !changed)
+      rc = WYRELOG_E_INTERNAL;
+    WylDataCredentialInfo *info = g_new0 (WylDataCredentialInfo, 1);
+    if (rc == WYRELOG_E_OK)
+      rc = data_credential_read (store->db, "credential_id=?1",
+              g_ptr_array_index (ids, i), info);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (revoked, info);
+    else
+      wyl_data_credential_info_free (info);
+  }
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (revoked);
+    return rc;
+  }
+  *out_revoked = revoked;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+data_credential_lifecycle_reason_is_valid (WylDataCredentialLifecycleReason r)
+{
+  return r >= WYL_DATA_CREDENTIAL_REVOKE_OWNERSHIP_TRANSFER
+         && r <= WYL_DATA_CREDENTIAL_REVOKE_TENANT_DELETED;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_revoke_tenant (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *actor_subject_id,
+    WylDataCredentialLifecycleReason reason, gint64 now_us,
+    GPtrArray **out_revoked)
+{
+  if (out_revoked != NULL)
+    *out_revoked = NULL;
+  if (store == NULL || store->db == NULL || out_revoked == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !data_credential_actor_is_valid (actor_subject_id)
+      || !data_credential_lifecycle_reason_is_valid (reason) || now_us <= 0
+      || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+  return data_credential_revoke_matching (store, "tenant_id=?1", tenant_id,
+             NULL, actor_subject_id, reason, now_us, out_revoked);
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_revoke_issuer (wyl_policy_store_t *store,
+    const gchar *issuer_subject_id, const gchar *tenant_id,
+    const gchar *actor_subject_id, WylDataCredentialLifecycleReason reason,
+    gint64 now_us, GPtrArray **out_revoked)
+{
+  if (out_revoked != NULL)
+    *out_revoked = NULL;
+  if (store == NULL || store->db == NULL || out_revoked == NULL
+      || !data_credential_actor_is_valid (issuer_subject_id)
+      || (tenant_id != NULL && !wyl_policy_store_tenant_id_is_valid (tenant_id))
+      || !data_credential_actor_is_valid (actor_subject_id)
+      || !data_credential_lifecycle_reason_is_valid (reason) || now_us <= 0
+      || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+  return data_credential_revoke_matching (store, tenant_id != NULL
+      ? "issuer_subject_id=?1 AND tenant_id=?2" : "issuer_subject_id=?1",
+             issuer_subject_id, tenant_id, actor_subject_id, reason, now_us,
+             out_revoked);
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_verify (wyl_policy_store_t *store,
+    const gchar *credential_id, const gchar *presented_secret,
+    gsize presented_secret_len, gint64 now_us, WylDataCredentialInfo *out)
+{
+  if (store == NULL || store->db == NULL || out == NULL
+      || credential_id == NULL || presented_secret == NULL
+      || presented_secret_len != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
+      || memchr (presented_secret, '\0', presented_secret_len) != NULL
+      || now_us <= 0 || !data_credential_in_caller_transaction (store))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  const guint8 *cvk = NULL;
+  WylDataCredentialInfo info = { 0 };
+  guint8 salt[WYL_SERVICE_CREDENTIAL_SALT_BYTES];
+  guint8 verifier[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
+  guint32 format_version = 0;
+  guint32 verifier_version = 0;
+  wyrelog_error_t rc = data_credential_validate_schema (store->db);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_cvk (store, &cvk);
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_read (store->db, "credential_id=?1", credential_id,
+            &info);
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "SELECT credential_format_version,verifier_version,salt,verifier "
+            "FROM data_credentials WHERE credential_id=?", &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, credential_id);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) == SQLITE_ROW
+        && sqlite3_column_bytes (stmt, 2) == (int) sizeof salt
+        && sqlite3_column_bytes (stmt, 3) == (int) sizeof verifier) {
+      format_version = (guint32) sqlite3_column_int (stmt, 0);
+      verifier_version = (guint32) sqlite3_column_int (stmt, 1);
+      memcpy (salt, sqlite3_column_blob (stmt, 2), sizeof salt);
+      memcpy (verifier, sqlite3_column_blob (stmt, 3), sizeof verifier);
+    } else if (rc == WYRELOG_E_OK) {
+      rc = WYRELOG_E_IO;
+    }
+    sqlite3_finalize (stmt);
+  }
+  /* Unknown, revoked, expired and mismatching credentials are one refusal. */
+  gboolean match = FALSE;
+  if (rc == WYRELOG_E_OK && g_str_equal (info.state, "active")
+      && info.expires_at_us > now_us) {
+    wyrelog_error_t verify_rc =
+        wyl_data_credential_verify_with_runtime (format_version,
+            verifier_version, cvk, WYL_SERVICE_CREDENTIAL_CVK_BYTES,
+            credential_id, strlen (credential_id), info.tenant_id,
+            strlen (info.tenant_id), info.issuer_subject_id,
+            strlen (info.issuer_subject_id), salt, sizeof salt, verifier,
+            sizeof verifier, presented_secret, presented_secret_len, NULL,
+            &match);
+    if (verify_rc != WYRELOG_E_OK && verify_rc != WYRELOG_E_INVALID)
+      rc = verify_rc;
+  }
+  if (rc == WYRELOG_E_NOT_FOUND || (rc == WYRELOG_E_OK && !match))
+    rc = WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "UPDATE data_credentials SET last_used_at_us=?2 WHERE "
+            "credential_id=?1 AND state='active' AND "
+            "(last_used_at_us IS NULL OR last_used_at_us<?2)", &stmt);
+    if (rc == WYRELOG_E_OK
+        && (bind_text (stmt, 1, credential_id) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 2, now_us) != SQLITE_OK
+        || sqlite3_step (stmt) != SQLITE_DONE))
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_read (store->db, "credential_id=?1", credential_id,
+            out);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  sodium_memzero (salt, sizeof salt);
+  sodium_memzero (verifier, sizeof verifier);
+  wyl_data_credential_info_clear (&info);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_lookup (wyl_policy_store_t *store,
+    const gchar *credential_id, WylDataCredentialInfo *out)
+{
+  if (store == NULL || store->db == NULL || credential_id == NULL
+      || out == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = data_credential_read (store->db, "credential_id=?1",
+          credential_id, out);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_list (wyl_policy_store_t *store,
+    const gchar *tenant_id, GPtrArray **out)
+{
+  if (out != NULL)
+    *out = NULL;
+  if (store == NULL || store->db == NULL || out == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  GPtrArray *list =
+      g_ptr_array_new_with_free_func (wyl_data_credential_info_free);
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, "SELECT "
+          DATA_CREDENTIAL_COLUMNS " FROM data_credentials WHERE tenant_id=? "
+          "ORDER BY created_at_us,credential_id", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylDataCredentialInfo *info = g_new0 (WylDataCredentialInfo, 1);
+    rc = data_credential_info_from_row (store->db, stmt, info);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (list, info);
+    else
+      wyl_data_credential_info_free (info);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (list);
+    return rc;
+  }
+  *out = list;
+  return WYRELOG_E_OK;
+}
+
+/* END data credential store */
