@@ -224,6 +224,7 @@ typedef struct
   guint fail_lock_at;
   gboolean fail_id;
   gboolean invalid_id;
+  const gchar *id;
   gboolean fail_rng;
   gchar events[128];
   guint n_events;
@@ -300,7 +301,8 @@ test_new_id (gpointer data, gchar out[WYL_SERVICE_CREDENTIAL_ID_BUF])
     out[WYL_SERVICE_CREDENTIAL_ID_LEN] = '\0';
     return WYRELOG_E_OK;
   }
-  memcpy (out, FIXTURE_ID, sizeof FIXTURE_ID);
+  const gchar *id = t->id != NULL ? t->id : FIXTURE_ID;
+  memcpy (out, id, WYL_SERVICE_CREDENTIAL_ID_LEN + 1);
   return WYRELOG_E_OK;
 }
 
@@ -567,6 +569,152 @@ test_version_bounds_and_unchanged_outputs (void)
   wyl_service_credential_secret_clear (&secret);
 }
 
+#define DATA_FIXTURE_ID "wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
+
+/* Recomputes a verifier straight from libsodium, so the KAT does not depend on
+ * the code under test: keyed BLAKE2b over the domain, a 0x00 0x01 separator
+ * and five tag/length/value fields. */
+static void
+reference_digest (const gchar *domain, const guint8 *cvk, const gchar *id,
+    const gchar *tenant, const gchar *subject, const guint8 *salt,
+    const guint8 *raw, guint8 out[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES])
+{
+  crypto_generichash_state state;
+  g_assert_cmpint (crypto_generichash_init (&state, cvk,
+      WYL_SERVICE_CREDENTIAL_CVK_BYTES, WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES),
+      ==, 0);
+  const guint8 separator[2] = { 0x00, 0x01 };
+  crypto_generichash_update (&state, (const guint8 *) domain, strlen (domain));
+  crypto_generichash_update (&state, separator, sizeof separator);
+  const void *values[5] = { id, tenant, subject, salt, raw };
+  gsize lens[5] = { strlen (id), strlen (tenant), strlen (subject), 0, 0 };
+  lens[3] = WYL_SERVICE_CREDENTIAL_SALT_BYTES;
+  lens[4] = WYL_SERVICE_CREDENTIAL_SECRET_BYTES;
+  for (guint i = 0; i < 5; i++) {
+    guint8 header[5];
+    header[0] = (guint8) (i + 1);
+    header[1] = (guint8) (lens[i] >> 24);
+    header[2] = (guint8) (lens[i] >> 16);
+    header[3] = (guint8) (lens[i] >> 8);
+    header[4] = (guint8) lens[i];
+    crypto_generichash_update (&state, header, sizeof header);
+    crypto_generichash_update (&state, values[i], lens[i]);
+  }
+  g_assert_cmpint (crypto_generichash_final (&state, out,
+      WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES), ==, 0);
+}
+
+static void
+test_data_kat_and_verify (void)
+{
+  guint8 cvk[WYL_SERVICE_CREDENTIAL_CVK_BYTES];
+  guint8 salt[WYL_SERVICE_CREDENTIAL_SALT_BYTES];
+  fill_fixture (cvk, salt);
+  wyl_service_credential_secret_t *secret = parse_fixture_secret ();
+  gsize raw_len = 0;
+  const guint8 *raw = wyl_service_credential_secret_peek_raw (secret,
+          &raw_len);
+
+  guint8 expected[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
+  reference_digest ("wyrelog.data-credential.verifier", cvk, DATA_FIXTURE_ID,
+      "tenant-a", "alice", salt, raw, expected);
+
+  TestRuntime state = { 0 };
+  state.id = DATA_FIXTURE_ID;
+  wyl_service_credential_runtime_t runtime = make_runtime (&state);
+  wyl_service_credential_material_t material;
+  memset (&material, 0xa5, sizeof material);
+  wyl_service_credential_secret_t *generated = NULL;
+  g_assert_cmpint (wyl_data_credential_generate_with_runtime (cvk, sizeof cvk,
+      "tenant-a", 8, "alice", 5, &runtime, &material, &generated), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (material.credential_id, ==, DATA_FIXTURE_ID);
+  g_assert_cmpmem (material.salt, sizeof material.salt, salt, sizeof salt);
+  g_assert_cmpmem (material.verifier, sizeof material.verifier, expected,
+      sizeof expected);
+  g_assert_cmpstr (wyl_service_credential_secret_peek_encoded (generated,
+      NULL), ==, FIXTURE_SECRET);
+
+  gboolean match = FALSE;
+  g_assert_cmpint (wyl_data_credential_verify_with_runtime
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
+      WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk,
+      DATA_FIXTURE_ID, strlen (DATA_FIXTURE_ID), "tenant-a", 8, "alice", 5,
+      salt, sizeof salt, expected, sizeof expected, FIXTURE_SECRET,
+      strlen (FIXTURE_SECRET), NULL, &match), ==, WYRELOG_E_OK);
+  g_assert_true (match);
+
+  match = TRUE;
+  const gchar *wrong_secret = "ASEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
+  g_assert_cmpint (wyl_data_credential_verify_with_runtime
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
+      WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk,
+      DATA_FIXTURE_ID, strlen (DATA_FIXTURE_ID), "tenant-a", 8, "alice", 5,
+      salt, sizeof salt, expected, sizeof expected, wrong_secret,
+      strlen (wrong_secret), NULL, &match), ==, WYRELOG_E_OK);
+  g_assert_false (match);
+
+  /* The same transcript under the service domain gives another digest, so a
+   * verifier of one kind never verifies as the other. */
+  guint8 service_domain[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
+  reference_digest ("wyrelog.service-credential.verifier", cvk,
+      DATA_FIXTURE_ID, "tenant-a", "alice", salt, raw, service_domain);
+  g_assert_cmpint (sodium_memcmp (service_domain, expected,
+      sizeof expected), !=, 0);
+
+  wyl_service_credential_secret_clear (&generated);
+  wyl_service_credential_secret_clear (&secret);
+  wyl_service_credential_material_clear (&material);
+}
+
+static void
+test_data_id_and_binding_contract (void)
+{
+  g_assert_true (wyl_data_credential_id_is_canonical (DATA_FIXTURE_ID,
+      strlen (DATA_FIXTURE_ID)));
+  g_assert_false (wyl_data_credential_id_is_canonical (FIXTURE_ID,
+      strlen (FIXTURE_ID)));
+  g_assert_false (wyl_service_credential_id_is_canonical (DATA_FIXTURE_ID,
+      strlen (DATA_FIXTURE_ID)));
+  g_assert_false (wyl_data_credential_id_is_canonical
+        ("wdc_0ujtsYcgvSTl8PAuAdqWYSMnLO!", WYL_SERVICE_CREDENTIAL_ID_LEN));
+
+  gchar id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  g_assert_cmpint (wyl_data_credential_id_new (id, sizeof id), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_str_has_prefix (id, "wdc_"));
+  g_assert_true (wyl_data_credential_id_is_canonical (id, strlen (id)));
+
+  guint8 cvk[WYL_SERVICE_CREDENTIAL_CVK_BYTES];
+  guint8 salt[WYL_SERVICE_CREDENTIAL_SALT_BYTES];
+  fill_fixture (cvk, salt);
+  wyl_service_credential_material_t material;
+  wyl_service_credential_secret_t *secret = NULL;
+
+  /* The default runtime mints a data id; a one-byte issuer is a valid
+   * binding for this kind. */
+  g_assert_cmpint (wyl_data_credential_generate_with_runtime (cvk, sizeof cvk,
+      "tenant-a", 8, "u", 1, NULL, &material, &secret), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_data_credential_id_is_canonical (material.credential_id,
+      strlen (material.credential_id)));
+  wyl_service_credential_secret_clear (&secret);
+  wyl_service_credential_material_clear (&material);
+
+  /* An injected id of the other kind is refused, not stored. */
+  TestRuntime state = { 0 };
+  wyl_service_credential_runtime_t runtime = make_runtime (&state);
+  g_assert_cmpint (wyl_data_credential_generate_with_runtime (cvk, sizeof cvk,
+      "tenant-a", 8, "alice", 5, &runtime, &material, &secret), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (secret);
+
+  /* The service kind keeps its five-byte subject floor. */
+  g_assert_cmpint (wyl_service_credential_generate_with_runtime (cvk,
+      sizeof cvk, "tenant-a", 8, "u", 1, NULL, &material, &secret), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (secret);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -584,5 +732,9 @@ main (int argc, char **argv)
       test_failure_cleanup_and_transactionality);
   g_test_add_func ("/service-credential/version-bounds",
       test_version_bounds_and_unchanged_outputs);
+  g_test_add_func ("/service-credential/data-kat-and-verify",
+      test_data_kat_and_verify);
+  g_test_add_func ("/service-credential/data-id-and-binding",
+      test_data_id_and_binding_contract);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
