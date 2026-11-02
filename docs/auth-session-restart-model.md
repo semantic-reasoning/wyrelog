@@ -43,11 +43,30 @@ SQLite connection mutexes remain held through publication, blocking other
 same-connection operations, including read snapshots, during that interval.
 On Windows, transient canonical-file replacement errors may add at most
 500 ms of backoff (ten 50 ms waits), plus I/O and scheduler time, while both
-mutexes remain held. Retries reuse the same flushed encrypted image and verify
-its temporary-file identity and the destination's reparse status; they never
+mutexes remain held. Retries reuse the same flushed encrypted image; they never
 replay SQL commits. Persistent contention fails closed and makes the store
 terminal without close-time republication.
 Plaintext SQLite commits retain their existing durability behavior.
+
+The temporary file is held open by handle, with no sharing, from creation until
+it is renamed or removed, and the rename goes through that handle
+(`SetFileInformationByHandle` with `FileRenameInfo`). Another process therefore
+cannot rename, delete or substitute the temporary file while a publication is in
+progress. Before each attempt the store re-checks the held file's identity and
+link count, because a hard link can still be added through an attribute-level
+open. A failed or refused publication removes only that held file, through its
+handle, and never deletes by path. The one exception is that, before creating
+its temporary file, the store reclaims a leftover file from an interrupted
+earlier run at the reserved temporary name, as the POSIX writer does before it
+creates its temporary file.
+
+The canonical name cannot be held the same way, so the check for a reparse
+point there is path-based and leaves a residual window before each rename. A
+reparse point planted at the final component in that window is not followed: a
+file symbolic link is replaced as a link, a junction or other reparse point is
+refused on the next attempt, and a plain directory makes every attempt fail
+until the publication fails closed. Ancestor directories are outside this check
+and must remain operator-protected for the store's lifetime.
 
 ## Session Credentials and Internal Identity
 

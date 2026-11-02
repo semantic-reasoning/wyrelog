@@ -391,7 +391,8 @@ wyl_policy_store_lease_verify_store_identity (const wyl_policy_store_lease_t
   return ok ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
-/* MoveFileExW cannot rename the fresh image onto the canonical name while this
+/* The Windows replace (a FileRenameInfo rename with ReplaceIfExists, like
+ * MoveFileExW) cannot rename the fresh image onto the canonical name while this
  * pin keeps that name occupied: FILE_SHARE_DELETE only defers the deletion, so
  * the name stays claimed until the last handle closes. Drop the pin here, after
  * the caller has re-verified the store identity, so the atomic replace lands. */

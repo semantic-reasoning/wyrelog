@@ -919,13 +919,27 @@ test_encrypted_commit_excludes_independent_sql (void)
 }
 
 #ifdef G_OS_WIN32
+/* Retry-gate actions. The store holds its temporary file open with no
+ * sharing from creation until the rename or its own handle-based removal,
+ * so a same-user process cannot substitute it (SUBSTITUTE), and every
+ * refused or exhausted publication must remove only that held file. */
+enum
+{
+  REPLACEMENT_RELEASE = 0,
+  REPLACEMENT_SUBSTITUTE,
+  REPLACEMENT_CANONICAL_ALIAS,
+  REPLACEMENT_EXHAUST,
+  REPLACEMENT_HARD_LINK,
+  REPLACEMENT_ACTION_COUNT,
+};
+
 typedef struct
 {
   HANDLE reader;
   const gchar *path;
-  const gchar *saved_source;
   const gchar *saved_canonical;
   const gchar *alias_target;
+  const gchar *other;
   guint action;
   guint calls;
 } EncryptedReplacementGate;
@@ -936,36 +950,74 @@ release_encrypted_replacement_reader (wyl_policy_store_t *store,
 {
   (void) store;
   EncryptedReplacementGate *gate = data;
-  g_assert_cmpuint (attempt, ==, 1);
+  g_assert_cmpuint (attempt, ==, gate->calls + 1);
   g_assert_true (native_error == ERROR_ACCESS_DENIED
       || native_error == ERROR_SHARING_VIOLATION);
   gate->calls++;
+  if (gate->action == REPLACEMENT_EXHAUST)
+    return;
   g_assert_true (CloseHandle (gate->reader));
   gate->reader = INVALID_HANDLE_VALUE;
-  if (gate->action == 1) {
-    g_autofree gchar *tmp = g_strconcat (gate->path, ".wyrelog-tmp", NULL);
-    g_assert_cmpint (g_rename (tmp, gate->saved_source), ==, 0);
-    g_assert_true (g_file_set_contents (tmp, "substituted", -1, NULL));
-  } else if (gate->action == 2) {
+  g_autofree gchar *tmp = g_strconcat (gate->path, ".wyrelog-tmp", NULL);
+  if (gate->action == REPLACEMENT_SUBSTITUTE) {
+    g_autofree gunichar2 *wide_tmp =
+        g_utf8_to_utf16 (tmp, -1, NULL, NULL, NULL);
+    g_assert_nonnull (wide_tmp);
+    g_assert_cmpint (g_rename (tmp, gate->other), ==, -1);
+    g_assert_false (g_file_test (gate->other, G_FILE_TEST_EXISTS));
+    HANDLE probe = CreateFileW ((const wchar_t *) wide_tmp,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    DWORD probe_error = probe == INVALID_HANDLE_VALUE ? GetLastError () : 0;
+    if (probe != INVALID_HANDLE_VALUE)
+      CloseHandle (probe);
+    g_assert_true (probe == INVALID_HANDLE_VALUE);
+    g_assert_cmpuint (probe_error, ==, ERROR_SHARING_VIOLATION);
+    g_assert_false (DeleteFileW ((const wchar_t *) wide_tmp));
+    g_assert_true (g_file_test (tmp, G_FILE_TEST_EXISTS));
+  } else if (gate->action == REPLACEMENT_CANONICAL_ALIAS) {
     g_assert_cmpint (g_rename (gate->path, gate->saved_canonical), ==, 0);
     g_assert_true (wyl_test_create_directory_alias (gate->path,
         gate->alias_target, NULL));
+  } else if (gate->action == REPLACEMENT_HARD_LINK) {
+    g_autofree gunichar2 *wide_tmp =
+        g_utf8_to_utf16 (tmp, -1, NULL, NULL, NULL);
+    g_autofree gunichar2 *wide_other =
+        g_utf8_to_utf16 (gate->other, -1, NULL, NULL, NULL);
+    g_assert_nonnull (wide_tmp);
+    g_assert_nonnull (wide_other);
+    g_assert_true (CreateHardLinkW ((const wchar_t *) wide_other,
+        (const wchar_t *) wide_tmp, NULL));
   }
+}
+
+static gboolean
+directory_is_empty (const gchar *path)
+{
+  GDir *dir = g_dir_open (path, 0, NULL);
+  if (dir == NULL)
+    return FALSE;
+  gboolean empty = g_dir_read_name (dir) == NULL;
+  g_dir_close (dir);
+  return empty;
 }
 
 static void
 test_encrypted_commit_retries_transient_reader (void)
 {
   for (guint publication = 0; publication < 2; publication++) {
-    for (guint action = 0; action < 3; action++) {
+    for (guint action = 0; action < REPLACEMENT_ACTION_COUNT; action++) {
       for (guint delete_share = 0; delete_share < 2; delete_share++) {
+        gboolean published = action == REPLACEMENT_RELEASE
+            || action == REPLACEMENT_SUBSTITUTE;
         g_autofree gchar *root = NULL;
         g_autofree gchar *path = make_store_path (&root);
         g_autofree gchar *key = g_build_filename (root, "key", NULL);
         g_autofree gchar *copy = g_build_filename (root, "published-copy",
                 NULL);
-        g_autofree gchar *saved_source = g_strconcat (path, ".saved-tmp",
-                NULL);
+        g_autofree gchar *tmp = g_strconcat (path, ".wyrelog-tmp", NULL);
+        g_autofree gchar *other = g_strconcat (path, ".other", NULL);
         g_autofree gchar *saved_canonical = g_strconcat (path, ".saved",
                 NULL);
         g_autofree gchar *target = g_build_filename (root, "alias-target",
@@ -985,7 +1037,7 @@ test_encrypted_commit_retries_transient_reader (void)
         g_autofree gchar *before = NULL;
         gsize before_size = 0;
         g_assert_true (g_file_get_contents (path, &before, &before_size, NULL));
-        if (action == 2)
+        if (action == REPLACEMENT_CANONICAL_ALIAS)
           g_assert_cmpint (g_mkdir (target, 0700), ==, 0);
         g_autofree gunichar2 *wide_path =
             g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
@@ -996,9 +1048,9 @@ test_encrypted_commit_retries_transient_reader (void)
                   | (delete_share ? FILE_SHARE_DELETE : 0),
                   NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL),
           .path = path,
-          .saved_source = saved_source,
           .saved_canonical = saved_canonical,
           .alias_target = target,
+          .other = other,
           .action = action,
         };
         g_assert_true (gate.reader != INVALID_HANDLE_VALUE);
@@ -1014,18 +1066,33 @@ test_encrypted_commit_retries_transient_reader (void)
             : wyl_policy_store_commit_mutation (store);
         if (gate.reader != INVALID_HANDLE_VALUE)
           g_assert_true (CloseHandle (gate.reader));
-        g_assert_cmpint (rc, ==,
-            action == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY);
-        g_assert_cmpuint (gate.calls, ==, 1);
-        if (action == 2) {
+        g_assert_cmpint (rc, ==, published ? WYRELOG_E_OK
+            : action == REPLACEMENT_EXHAUST ? WYRELOG_E_IO : WYRELOG_E_POLICY);
+        g_assert_cmpuint (gate.calls, ==,
+            action == REPLACEMENT_EXHAUST ? 10 : 1);
+        /* Whether published or refused, the store's own temporary file is
+         * gone, and nothing else in the directory was removed. */
+        g_assert_false (g_file_test (tmp, G_FILE_TEST_EXISTS));
+        if (action == REPLACEMENT_CANONICAL_ALIAS) {
+          g_autofree gchar *saved = NULL;
+          gsize saved_size = 0;
+          g_assert_true (g_file_get_contents (saved_canonical, &saved,
+              &saved_size, NULL));
+          g_assert_true (saved_size == before_size
+              && memcmp (saved, before, saved_size) == 0);
+          g_assert_true (directory_is_empty (target));
           g_assert_true (wyl_test_remove_directory_alias (path, NULL));
           g_assert_cmpint (g_rename (saved_canonical, path), ==, 0);
           g_assert_cmpint (g_rmdir (target), ==, 0);
         }
+        if (action == REPLACEMENT_HARD_LINK)
+          g_assert_true (g_file_test (other, G_FILE_TEST_IS_REGULAR));
+        else
+          g_assert_false (g_file_test (other, G_FILE_TEST_EXISTS));
         g_autofree gchar *image = NULL;
         gsize size = 0;
         g_assert_true (g_file_get_contents (path, &image, &size, NULL));
-        if (action != 0) {
+        if (!published) {
           g_assert_cmpint (wyl_policy_store_terminal_result (store),
               !=, WYRELOG_E_OK);
           g_assert_true (size == before_size
@@ -1037,7 +1104,7 @@ test_encrypted_commit_retries_transient_reader (void)
             ==, WYRELOG_E_OK);
         g_assert_cmpint (wyl_policy_store_user_require (reopened,
             "prior-user", TRUE), ==, WYRELOG_E_OK);
-        if (action == 0)
+        if (published)
           g_assert_cmpint (wyl_policy_store_user_require (reopened,
               "committed-user", TRUE), ==, WYRELOG_E_OK);
         else
@@ -1047,7 +1114,7 @@ test_encrypted_commit_retries_transient_reader (void)
         wyl_policy_store_set_encrypted_replacement_retry_hook_for_test
           (store, NULL, NULL);
         wyl_policy_store_close (store);
-        if (action != 0) {
+        if (!published) {
           g_autofree gchar *after_close = NULL;
           gsize after_size = 0;
           g_assert_true (g_file_get_contents (path, &after_close,
@@ -1055,8 +1122,8 @@ test_encrypted_commit_retries_transient_reader (void)
           g_assert_true (after_size == size
               && memcmp (after_close, image, size) == 0);
         }
-        if (action == 1)
-          g_assert_cmpint (g_remove (saved_source), ==, 0);
+        if (action == REPLACEMENT_HARD_LINK)
+          g_assert_cmpint (g_remove (other), ==, 0);
         g_autofree gchar *copy_lock = g_strconcat (copy, ".wyrelog-lock",
                 NULL);
         g_autofree gchar *lock = g_strconcat (path, ".wyrelog-lock", NULL);
