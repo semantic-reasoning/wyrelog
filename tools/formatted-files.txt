@@ -120,6 +120,7 @@ tests/test-login-req.c
 tests/test-perm.c
 tests/test-policy-graph-authority.c
 tests/test-policy-service-namespace.c
+tests/test-policy-store-data-credential.c
 tests/test-policy-store-lease.c
 tests/test-policy-store-service-cvk.c
 tests/test-policy-store-service-schema.c

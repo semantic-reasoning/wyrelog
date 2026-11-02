@@ -1815,7 +1815,8 @@ assert_immediate_parent_objects (sqlite3 *db)
   for (gsize i = 0; i < wyl_policy_store_required_table_count (); i++) {
     const gchar *name = wyl_policy_store_required_table_name (i);
     g_assert_nonnull (name);
-    if (g_str_has_prefix (name, "service_") || g_str_has_prefix (name, "human_"))
+    if (g_str_has_prefix (name, "service_") || g_str_has_prefix (name, "human_")
+        || g_str_has_prefix (name, "data_credential"))
       continue;
     g_autofree gchar *sql =
         g_strdup_printf

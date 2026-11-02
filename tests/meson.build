@@ -3565,6 +3565,20 @@ test('policy-store-service-cvk', test_policy_store_service_cvk,
   timeout : 120,
 )
 
+test_policy_store_data_credential = executable(
+  'test-policy-store-data-credential',
+  'test-policy-store-data-credential.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+  c_args : [
+    '-DWYL_TEST_SOURCE_ROOT="' + meson.project_source_root() + '"',
+  ],
+)
+
+test('policy-store-data-credential', test_policy_store_data_credential,
+  timeout : 120,
+)
+
 test_handle_id = executable('test-handle-id',
   'test-handle-id.c',
   dependencies : [wyrelog_dep],

@@ -2431,6 +2431,172 @@ wyrelog_error_t wyl_policy_store_foreach_service_credential_event
   (wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * subject_id, const gchar * tenant_id,
     wyl_policy_service_credential_event_cb cb, gpointer user_data);
+/* Owner-issued data credentials (#1341, #1473).  The boundary they implement
+ * is docs/service-credential-threat-model.md, "Owner-issued data credentials".
+ *
+ * A data credential is bound at issuance to its tenant, its issuer (the
+ * tenant's owner), an operation set and an optional graph scope, and has a
+ * mandatory expiry.  The store keeps a salted verifier and never the secret.
+ *
+ * Every mutation, and verify (which records last use), is a transaction body:
+ * the caller holds wyl_policy_store_begin_mutation and commits or rolls back.
+ * A call outside such a transaction returns WYRELOG_E_INVALID.  Issue, rotate
+ * and verify read the store's credential verification key, which must already
+ * be materialized: call wyl_policy_store_ensure_service_cvk_for_issuance (or,
+ * for verify, wyl_policy_store_materialize_service_cvk_existing) before
+ * beginning the transaction, or they return WYRELOG_E_BUSY.
+ *
+ * Revoke, the bulk revokes and settings_set do not authorize: actor_subject_id
+ * is recorded, not checked.  The caller decides who may revoke (the owner or
+ * a SYSTEM administrator, even while the tenant is sealed) and who may change
+ * settings.
+ *
+ * now_us is the caller's clock and must not run backwards.  A write with a
+ * now_us earlier than the credential's created_at_us is refused by a CHECK
+ * constraint and returns WYRELOG_E_IO; no other ordering against stored
+ * timestamps is enforced.
+ *
+ * Every WylDataCredentialInfo *out must be zero-initialized or previously
+ * cleared: it is cleared before it is filled.
+ *
+ * Results:
+ *   WYRELOG_E_INVALID   malformed argument, an expiry that is not positive or
+ *                       exceeds the configured maximum, settings out of bounds,
+ *                       or no caller-owned transaction
+ *   WYRELOG_E_NOT_FOUND unknown tenant, graph or credential
+ *   WYRELOG_E_AUTH      for issue and rotate, the issuer or actor is not the
+ *                       tenant's owner (and, for rotate, the credential's
+ *                       issuer); verify of an unknown, revoked, expired or
+ *                       mismatching credential
+ *   WYRELOG_E_SUBJECT_NOT_REGISTERED the issuer is not an active human user
+ *   WYRELOG_E_POLICY    the tenant is the built-in tenant or is sealed, sealing
+ *                       or unsealing; no key provider; schema drift
+ *   WYRELOG_E_CONFLICT  a request id reused with a different request, or a
+ *                       rotation of a credential that is not active
+ *   WYRELOG_E_RESOURCE_LIMIT a per-tenant cap would be exceeded
+ *   WYRELOG_E_BUSY      the verification key is not materialized */
+#define WYL_DATA_CREDENTIAL_OP_QUERY (1u << 0)
+#define WYL_DATA_CREDENTIAL_OP_INFER (1u << 1)
+#define WYL_DATA_CREDENTIAL_OP_INSERT (1u << 2)
+#define WYL_DATA_CREDENTIAL_OP_DELETE (1u << 3)
+#define WYL_DATA_CREDENTIAL_OP_UPDATE (1u << 4)
+#define WYL_DATA_CREDENTIAL_OPS_ALL 0x1Fu
+/* Holding any of these makes a credential write-capable for the caps. */
+#define WYL_DATA_CREDENTIAL_OPS_WRITE 0x1Cu
+#define WYL_DATA_CREDENTIAL_MAX_GRAPHS 64u
+#define WYL_DATA_CREDENTIAL_DEFAULT_MAX_EXPIRY_US \
+  (G_GINT64_CONSTANT (90) * 24 * 3600 * G_USEC_PER_SEC)
+#define WYL_DATA_CREDENTIAL_DEFAULT_LIVE_CAP 32u
+#define WYL_DATA_CREDENTIAL_DEFAULT_WRITE_CAP 8u
+#define WYL_DATA_CREDENTIAL_MIN_MAX_EXPIRY_US \
+  (G_GINT64_CONSTANT (3600) * G_USEC_PER_SEC)
+#define WYL_DATA_CREDENTIAL_MAX_MAX_EXPIRY_US \
+  (G_GINT64_CONSTANT (3650) * 24 * 3600 * G_USEC_PER_SEC)
+#define WYL_DATA_CREDENTIAL_CAP_LIMIT 1024u
+
+typedef struct
+{
+  gint64 max_expiry_us;
+  guint32 live_cap;
+  guint32 write_cap;
+  gboolean is_default;
+} WylDataCredentialSettings;
+
+typedef enum
+{
+  WYL_DATA_CREDENTIAL_REVOKE_OWNERSHIP_TRANSFER = 1,
+  WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DISABLED,
+  WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DELETED,
+  WYL_DATA_CREDENTIAL_REVOKE_TENANT_DELETED,
+} WylDataCredentialLifecycleReason;
+
+/* Carries no salt and no verifier.  graph_ids is sorted; empty means every
+ * graph in the tenant.  last_used_at_us and revoked_at_us are 0 when unset. */
+typedef struct
+{
+  gchar *credential_id;
+  guint32 credential_format_version;
+  gchar *tenant_id;
+  gchar *issuer_subject_id;
+  guint32 operations;
+  GPtrArray *graph_ids;
+  guint64 generation;
+  gchar *state;
+  gchar *request_id;
+  gint64 expires_in_us;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+  gint64 expires_at_us;
+  gint64 last_used_at_us;
+  gchar *revoked_by;
+  gint64 revoked_at_us;
+  gchar *revoked_reason;
+  gchar *rotated_from_id;
+} WylDataCredentialInfo;
+
+void wyl_data_credential_info_clear (WylDataCredentialInfo * info);
+void wyl_data_credential_info_free (gpointer info);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylDataCredentialInfo,
+    wyl_data_credential_info_clear)
+
+/* Settings are deployment-wide.  Without a stored row the defaults apply and
+ * is_default is TRUE. */
+wyrelog_error_t wyl_policy_store_data_credential_settings_get
+  (wyl_policy_store_t * store, WylDataCredentialSettings * out);
+wyrelog_error_t wyl_policy_store_data_credential_settings_set
+  (wyl_policy_store_t * store, gint64 max_expiry_us, guint32 live_cap,
+    guint32 write_cap, const gchar * actor_subject_id, gint64 now_us);
+
+/* expires_in_us is the requested lifetime; the expiry is now_us plus it.  A
+ * repeated request_id with the same tenant, issuer, operations, graphs and
+ * lifetime replays: *out_replayed is TRUE, out describes the credential and
+ * no secret is returned.  On success with a new credential the caller owns
+ * *out_secret and clears it with wyl_service_credential_secret_clear(). */
+wyrelog_error_t wyl_policy_store_data_credential_issue
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * issuer_subject_id, const gchar * request_id,
+    guint32 operations, const gchar * const *graph_ids, gsize n_graph_ids,
+    gint64 expires_in_us, gint64 now_us, WylDataCredentialInfo * out,
+    wyl_service_credential_secret_t ** out_secret, gboolean * out_replayed);
+/* Revokes the active, unexpired old credential and issues its successor with
+ * the same scope and original expiry.  The actor must be both the tenant's
+ * owner and the credential's issuer. */
+wyrelog_error_t wyl_policy_store_data_credential_rotate
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * old_credential_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 now_us, WylDataCredentialInfo * out,
+    wyl_service_credential_secret_t ** out_secret, gboolean * out_replayed);
+/* Revoking an already revoked credential succeeds with *out_changed FALSE. */
+wyrelog_error_t wyl_policy_store_data_credential_revoke
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * credential_id, const gchar * actor_subject_id,
+    gint64 now_us, WylDataCredentialInfo * out, gboolean * out_changed);
+/* Bulk revocation for lifecycle events.  *out_revoked receives the
+ * credentials this call revoked, as WylDataCredentialInfo ordered by id, so
+ * the caller can audit each one in the same transaction. */
+wyrelog_error_t wyl_policy_store_data_credential_revoke_tenant
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, WylDataCredentialLifecycleReason reason,
+    gint64 now_us, GPtrArray ** out_revoked);
+/* tenant_id NULL revokes the issuer's credentials in every tenant. */
+wyrelog_error_t wyl_policy_store_data_credential_revoke_issuer
+  (wyl_policy_store_t * store, const gchar * issuer_subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    WylDataCredentialLifecycleReason reason, gint64 now_us,
+    GPtrArray ** out_revoked);
+/* Verifies the credential only; the per-use checks of #1475 are the
+ * caller's.  Every refusal of a well-formed presentation is WYRELOG_E_AUTH. */
+wyrelog_error_t wyl_policy_store_data_credential_verify
+  (wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * presented_secret, gsize presented_secret_len,
+    gint64 now_us, WylDataCredentialInfo * out);
+wyrelog_error_t wyl_policy_store_data_credential_lookup
+  (wyl_policy_store_t * store, const gchar * credential_id,
+    WylDataCredentialInfo * out);
+/* Ordered by creation time, then id. */
+wyrelog_error_t wyl_policy_store_data_credential_list
+  (wyl_policy_store_t * store, const gchar * tenant_id, GPtrArray ** out);
+
 gsize wyl_policy_store_required_table_count (void);
 const gchar *wyl_policy_store_required_table_name (gsize idx);
 gsize wyl_policy_store_builtin_role_count (void);
