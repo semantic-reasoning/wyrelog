@@ -131,7 +131,59 @@ def nested_meson_environment():
     return env
 
 
+SOURCE_SIGNATURE = "System Wirelog candidate lacks source-query v1 signatures."
+SOURCE_LINK = "System Wirelog candidate cannot link source-query v1 functions."
+FALLBACK_SOURCE = "Pinned Wirelog fallback lacks source-query v1 signatures."
+
+SOURCE_APIS = {
+    "count": ("const char *relation, const int64_t *tuple, uint32_t ncols, "
+              "uint64_t max_rows, uint64_t *out_count",
+              "relation; (void)tuple; (void)ncols; (void)max_rows; (void)out_count"),
+    "key_exists": ("const char *relation, int64_t key, uint64_t max_rows, "
+                   "bool *out_exists",
+                   "relation; (void)key; (void)max_rows; (void)out_exists"),
+    "validate": ("const char *relation, uint32_t ncols",
+                 "relation; (void)ncols"),
+    "lookup_symbol": ("const char *symbol, int64_t *out_id, bool *out_found",
+                      "symbol; (void)out_id; (void)out_found"),
+}
+
+
+def source_api_name(name):
+    return ("wirelog_easy_lookup_symbol" if name == "lookup_symbol" else
+            "wirelog_easy_source_" + name)
+
+
+def source_header(kind):
+    macro = ("" if kind == "missing_source_macro" else
+             "#define WIRELOG_SOURCE_QUERY_VERSION " +
+             ("0" if kind == "old_source_macro" else "1") + "\n")
+    result = ("#pragma once\n#include <stdbool.h>\n#include <stdint.h>\n" + macro +
+              "typedef struct wirelog_easy_session wirelog_easy_session_t;\n"
+              "typedef enum { WIRELOG_SOURCE_QUERY_OK = 0 } "
+              "wirelog_source_query_status_t;\n")
+    for name, (args, _) in SOURCE_APIS.items():
+        result += ("int" if kind == "wrong_source_signature" and name == "count"
+                   else "wirelog_source_query_status_t")
+        result += " " + source_api_name(name) + "(wirelog_easy_session_t *s, " + args + ");\n"
+    return result
+
+
+def source_definitions(kind):
+    result = "#include <wirelog/wirelog-easy.h>\n"
+    for name, (args, unused) in SOURCE_APIS.items():
+        if kind == "missing_source_" + name:
+            continue
+        result += ("int" if kind == "wrong_source_signature" and name == "count"
+                   else "wirelog_source_query_status_t")
+        result += (" " + source_api_name(name) + "(wirelog_easy_session_t *s, " + args +
+                   ") { (void)s; (void)" + unused + "; return 0; }\n")
+    return result
+
+
 def provider_header(kind, provider):
+    if "source" in kind:
+        kind = "compatible"
     marker = f"WIRELOG_PROVIDER_{provider.upper()}"
     declaration = ""
     if kind in ("compatible", "missing_symbol"):
@@ -152,6 +204,8 @@ typedef struct wirelog_program wirelog_program_t;
 
 
 def provider_source(kind, provider):
+    if "source" in kind:
+        kind = "compatible"
     if kind == "compatible":
         return f"""#include <string.h>
 #include <wirelog/wirelog-parser.h>
@@ -189,7 +243,8 @@ def install_system_provider(scenario_dir, kind):
   default_options : ['c_std=c17'],
 )
 wirelog_lib = static_library('wirelog', 'wirelog.c', install : true)
-install_headers('wirelog/wirelog-parser.h', subdir : 'wirelog')
+install_headers('wirelog/wirelog-parser.h', 'wirelog/wirelog-easy.h',
+  subdir : 'wirelog')
 pkg = import('pkgconfig')
 pkg.generate(wirelog_lib,
   name : 'wirelog',
@@ -204,7 +259,9 @@ pkg.generate(wirelog_lib,
         source_dir / "wirelog" / "wirelog-parser.h",
         provider_header(kind, "system"),
     )
-    write(source_dir / "wirelog.c", provider_source(kind, "system"))
+    write(source_dir / "wirelog" / "wirelog-easy.h", source_header(kind))
+    write(source_dir / "wirelog.c", provider_source(kind, "system") +
+          source_definitions(kind))
     env = nested_meson_environment()
     require_success(
         f"{scenario_dir.name}: system provider setup",
@@ -272,7 +329,9 @@ endif
         fallback / "wirelog" / "wirelog-parser.h",
         provider_header(kind, "fallback"),
     )
-    write(fallback / "wirelog.c", provider_source(kind, "fallback"))
+    write(fallback / "wirelog" / "wirelog-easy.h", source_header(kind))
+    write(fallback / "wirelog.c", provider_source(kind, "fallback") +
+          source_definitions(kind))
     write(fallback / "benchmark.c",
           '#error Dependency benchmarks must not be built by the consumer\n')
 
@@ -281,13 +340,18 @@ def consumer_source(expected):
     expected_macro = f"WIRELOG_PROVIDER_{expected.upper()}"
     other = "FALLBACK" if expected == "system" else "SYSTEM"
     return f"""#include <wirelog/wirelog-parser.h>
+#include <wirelog/wirelog-easy.h>
 #if !defined({expected_macro}) || defined(WIRELOG_PROVIDER_{other})
 #error selected Wirelog provider does not match the scenario
 #endif
 int
 main(void)
 {{
-  return wirelog_program_relation_has_input(0, "{expected}") ? 0 : 1;
+  return !wirelog_program_relation_has_input(0, "{expected}")
+      || wirelog_easy_source_count(0, 0, 0, 0, 0, 0)
+      || wirelog_easy_source_key_exists(0, 0, 0, 0, 0)
+      || wirelog_easy_source_validate(0, 0, 0)
+      || wirelog_easy_lookup_symbol(0, 0, 0, 0);
 }}
 """
 
@@ -359,7 +423,7 @@ FALLBACK_SIGNATURE = (
 )
 NOFALLBACK = (
     "--wrap-mode=nofallback refuses the pinned Wirelog fallback required "
-    f"to satisfy {required_api}."
+    f"to satisfy {required_api} and source-query v1."
 )
 
 
@@ -497,5 +561,18 @@ with tempfile.TemporaryDirectory(prefix="wyrelog-wirelog-boundary-") as temp:
         forbidden=["Prior system rejection:"],
     )
     fallback_missing_definition_scenario(base)
+    for kind in ("missing_source_macro", "old_source_macro", "wrong_source_signature"):
+        successful_scenario(base, kind, kind, "compatible", "fallback",
+                            messages=[SOURCE_SIGNATURE])
+        setup_failure_scenario(base, "nofallback-" + kind, kind, "compatible",
+                               ["--wrap-mode=nofallback"], [SOURCE_SIGNATURE])
+    for name in SOURCE_APIS:
+        kind = "missing_source_" + name
+        successful_scenario(base, kind, kind, "compatible", "fallback",
+                            messages=[SOURCE_LINK])
+    setup_failure_scenario(base, "fallback-old-source", "compatible",
+                           "old_source_macro", ["--force-fallback-for=wirelog"],
+                           [FALLBACK_SOURCE])
+
 
 print("Wirelog dependency boundary: OK")

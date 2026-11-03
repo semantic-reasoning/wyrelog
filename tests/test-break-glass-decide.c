@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
@@ -119,6 +120,7 @@ check_decide_marks_break_glass_used_when_armed (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 10;
+  register_test_human (wyl_handle_get_policy_store (handle), "bg-decide-user-1");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 11;
@@ -165,6 +167,7 @@ check_decide_does_not_mark_when_inactive (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 30;
+  register_test_human (wyl_handle_get_policy_store (handle), "bg-decide-user-2");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 31;
@@ -194,6 +197,7 @@ check_disarm_clears_used_and_active (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 40;
+  register_test_human (wyl_handle_get_policy_store (handle), "bg-decide-user-3");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 41;
@@ -231,6 +235,7 @@ check_ttl_expiry_disarm_and_rearm (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 70;
+  register_test_human (wyl_handle_get_policy_store (handle), "bg-decide-user-4");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 71;
@@ -294,6 +299,7 @@ check_decide_fact_insert_failure_does_not_latch_used (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 90;
+  register_test_human (wyl_handle_get_policy_store (handle), "bg-decide-user-5");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 91;

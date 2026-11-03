@@ -644,8 +644,8 @@ wyrelog_error_t wyl_engine_verification_has_exact_keyed_row
 wyrelog_error_t wyl_engine_verification_has_no_keyed_row
   (WylEngineVerification * verification, const gchar * relation,
     gint64 key, gboolean * out_absent);
-/* Checks an exact host-accepted input fact retained by this read candidate.
- * Unlike snapshot queries this can prove EDB rows that are not IDB outputs. */
+/* Inspects authoritative host input in this exact candidate without
+ * evaluation or retained host witness state. Derived output is separate. */
 wyrelog_error_t wyl_engine_verification_has_exact_input_row
   (WylEngineVerification * verification, const gchar * relation,
     const gint64 * row, gsize ncols, gboolean expected_present,
@@ -708,6 +708,21 @@ wyrelog_error_t wyl_engine_session_run_committed_publication
     gpointer mutate_data, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
     gpointer delta_data, WylCommittedPublicationStage * out_stage);
+
+/* Symbolic exact tuples registered before candidate loading. Specifications
+ * are borrowed for this synchronous call; duplicates are invalid. */
+typedef struct
+{
+  const gchar *relation;
+  const gchar *const *symbols;
+  gsize ncols;
+} WylEngineSourceProbeSpec;
+wyrelog_error_t wyl_engine_session_run_probed_publication
+  (WylEngineSession *session, WylCommittedEngineMutationBody mutate,
+    gpointer mutate_data, WylEnginePublicationVerifier verify,
+    gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
+    gpointer delta_data, WylCommittedPublicationStage *out_stage,
+    const WylEngineSourceProbeSpec *probes, gsize nprobes);
 
 /* Repairs only a poisoned pair from the durable snapshot while the caller
  * retains the same-handle service-auth WRITE lease and outermost engine

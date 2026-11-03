@@ -84,8 +84,10 @@ fixture_init (Fixture *fixture)
   g_assert_true (g_file_set_contents (fixture->key_path,
       (const gchar *) key, sizeof key, NULL));
   fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
+  g_autofree gchar *audit_path = g_build_filename (fixture->root, "audit.db", NULL);
   WylHandleOpenOptions options = {
     .policy_store_path = fixture->db_path,
+    .audit_store_path = audit_path,
     .policy_keyprovider_path = fixture->key_spec,
     .production_mode = TRUE,
   };

@@ -95,6 +95,7 @@ OWNER_FUNCTION_ALLOWLIST = {
     "wyl_engine_session_repair_committed_publication",
     "wyl_engine_session_run_committed_audit_publication",
     "wyl_engine_session_run_committed_publication",
+    "wyl_engine_session_run_probed_publication",
     "wyl_engine_verification_enqueue_delta",
     "wyl_engine_verification_get_accepted_session_state",
     "wyl_engine_verification_has_exact_accepted_member_of",

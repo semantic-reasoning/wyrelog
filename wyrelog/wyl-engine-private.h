@@ -65,10 +65,15 @@ struct _WylEngine
    * so publication verification uses this narrow EDB receipt rather than a
    * raw evaluator read. */
   GHashTable *member_of_input_rows;
-  /* Exact multiplicities for host-accepted EDB rows. Snapshot APIs expose
-   * derived relations, not every input relation, so publication witnesses
-   * are retained by the read candidate as facts are loaded. */
-  GHashTable *accepted_input_rows;
+  /* Exact receipts only for the three compound guard input relations.
+   * Entries disappear when request cleanup removes the last occurrence.
+   * Generic source witnesses are queried from Wirelog, never retained. */
+  GHashTable *guard_input_rows;
+  /* Explicit exact probes, present only while a candidate is verified. */
+  GPtrArray *source_probes;
+  gboolean source_inputs_started;
+  /* Schema capabilities derived from the exact source passed to easy_open. */
+  guint inline_source_probe_mask;
 };
 
 /*
@@ -158,11 +163,13 @@ wyrelog_error_t wyl_engine_owned_has_exact_accepted_input_row
 wyrelog_error_t wyl_engine_owned_has_no_accepted_input_key
   (WylEngine * self, const gchar * relation, gint64 key,
     gboolean * out_absent);
-#ifdef WYL_TEST_HANDLE_SEAMS
-wyrelog_error_t wyl_engine_owned_set_accepted_input_row_for_test
-  (WylEngine * self, const gchar * relation, const gint64 * row,
-    gsize ncols, guint64 multiplicity);
-#endif
+wyrelog_error_t wyl_engine_owned_register_source_probe (WylEngine *self,
+    const gchar *relation, const gint64 *row, gsize ncols);
+void wyl_engine_owned_clear_source_probes (WylEngine *self);
+wyrelog_error_t wyl_engine_owned_validate_source (WylEngine *self,
+    const gchar *relation, gsize ncols);
+wyrelog_error_t wyl_engine_owned_lookup_symbol (WylEngine *self,
+    const gchar *symbol, gint64 *out_id);
 wyrelog_error_t wyl_engine_owned_step (WylEngine * self);
 wyrelog_error_t wyl_engine_owned_set_delta_callback (WylEngine * self,
     WylDeltaCallback cb, gpointer user_data);

@@ -35,6 +35,49 @@ main(void)
 }
 '''
 
+# The version string alone cannot distinguish pre/post source-inspection
+# 0.70 builds. Validate the feature contract and every consumed easy symbol.
+wirelog_source_declarations = '''
+#include <stdbool.h>
+#include <stdint.h>
+#include <wirelog/wirelog-easy.h>
+#if !defined(WIRELOG_SOURCE_QUERY_VERSION) || WIRELOG_SOURCE_QUERY_VERSION < 1
+#error Wirelog source-query v1 is required
+#endif
+_Static_assert(_Generic(&wirelog_easy_source_count,
+    wirelog_source_query_status_t (*)(wirelog_easy_session_t *, const char *,
+      const int64_t *, uint32_t, uint64_t, uint64_t *): 1, default: 0),
+    "incompatible source count signature");
+_Static_assert(_Generic(&wirelog_easy_source_key_exists,
+    wirelog_source_query_status_t (*)(wirelog_easy_session_t *, const char *,
+      int64_t, uint64_t, bool *): 1, default: 0),
+    "incompatible source key signature");
+_Static_assert(_Generic(&wirelog_easy_source_validate,
+    wirelog_source_query_status_t (*)(wirelog_easy_session_t *, const char *,
+      uint32_t): 1, default: 0), "incompatible source validate signature");
+_Static_assert(_Generic(&wirelog_easy_lookup_symbol,
+    wirelog_source_query_status_t (*)(wirelog_easy_session_t *, const char *,
+      int64_t *, bool *): 1, default: 0), "incompatible symbol lookup signature");
+'''
+wirelog_source_signature_probe = wirelog_source_declarations + '''
+int main(void) { return 0; }
+'''
+wirelog_source_link_probe = wirelog_source_declarations + '''
+int main(void) {
+  uint64_t count = 0;
+  int64_t id = 0;
+  bool found = false;
+  int result = wirelog_easy_source_count(0, "probe", &id, 1, 1, &count);
+  result += wirelog_easy_source_key_exists(0, "probe", id, 1, &found);
+  result += wirelog_easy_source_validate(0, "probe", 1);
+  result += wirelog_easy_lookup_symbol(0, "probe", &id, &found);
+  return result;
+}
+'''
+wirelog_source_signature_error = 'System Wirelog candidate lacks source-query v1 signatures.'
+wirelog_source_link_error = 'System Wirelog candidate cannot link source-query v1 functions.'
+wirelog_source_fallback_error = 'Pinned Wirelog fallback lacks source-query v1 signatures.'
+
 wirelog_system_signature_error = (
   'System Wirelog candidate lacks required public API signature '
   + 'wirelog_program_relation_has_input from '
@@ -55,7 +98,7 @@ wirelog_fallback_signature_error = (
 )
 wirelog_nofallback_error = (
   '--wrap-mode=nofallback refuses the pinned Wirelog fallback required '
-  + 'to satisfy wirelog_program_relation_has_input.'
+  + 'to satisfy wirelog_program_relation_has_input and source-query v1.'
 )
 
 wirelog_force_fallback = (
@@ -80,6 +123,14 @@ if not wirelog_force_fallback
         dependencies : wirelog_system_candidate,
         name : 'system Wirelog required API link')
       wirelog_system_rejection = wirelog_system_link_error
+    elif not cc.compiles(wirelog_source_signature_probe,
+        dependencies : wirelog_system_candidate,
+        name : 'system Wirelog source-query v1 signatures')
+      wirelog_system_rejection = wirelog_source_signature_error
+    elif not cc.links(wirelog_source_link_probe,
+        dependencies : wirelog_system_candidate,
+        name : 'system Wirelog source-query v1 link')
+      wirelog_system_rejection = wirelog_source_link_error
     else
       wirelog_dep = wirelog_system_candidate
     endif
@@ -123,6 +174,13 @@ if not wirelog_dep.found()
       )
     endif
     error(wirelog_fallback_error)
+  endif
+
+  if not cc.compiles(wirelog_source_signature_probe,
+      args : wirelog_consumer_args,
+      include_directories : [wirelog_inc, wirelog_src_inc],
+      name : 'pinned Wirelog source-query v1 signatures')
+    error(wirelog_source_fallback_error)
   endif
 
   wirelog_dep = declare_dependency(
