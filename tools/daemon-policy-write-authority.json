@@ -1,8 +1,8 @@
 {
-  "aggregate": "41dff24a4ca93e7d683523f0825f6920b77b7551af8cddbdbfde93ed7cc88001",
+  "aggregate": "99363b062ad1ff8df34762a51f2e4a0ffbf74f294e8256c8d04bb39e3a0b8209",
   "directives": {
-    "count": 567,
-    "sha256": "2d3dd1da5fdffdada05d0e383ce121c9fd168130ab183bb8568dca5b2451c8ae"
+    "count": 577,
+    "sha256": "acf79583ccc55e7ab21c1b8cb108e3e0f832b9848939751bfa2c0d31e18b96d8"
   },
   "functions": {
     "direct_permission_mutation_handler": "96a5a83b20c41cb6c2aef671c721d732730956cf2026d7308b0442c045c18e31",
@@ -17,6 +17,7 @@
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
     "mfa_enroll_confirm_handler": "f633de54f079dd8374cc10d84e01563380f2a723b4f1f05b687276ed72bd0c4c",
     "mfa_enroll_subject_exists": "cc77193cff332f0bc837bb6ce33ec3c564c8e7e176986d358e27310e682d42d9",
+    "mutate_data_credential_publication": "0dd7b41f6e76097bbf329bd991cca3d2165cf3730f289ac1660df4c2262003eb",
     "mutate_tenant_lifecycle_publication": "be4c54abb439205de08e2870f3ff6875bb144c484170b7849725e2da45f38c69",
     "mutate_tenant_transfer": "5f1a706c97f11c47a98d129b7ebce80b3ea6338a1ecca1dc57ca032adeb05054",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
@@ -45,6 +46,10 @@
     "tenant_create_durable_bundle": "b203b90ec04cfd8a62e5419834806a63b232fec59d8f721934367592880261d5",
     "tenant_create_handler": "46772d7892d18662bde4f9427e1c87385c24866ff69b7407e4ce09dc6a2115b1",
     "tenant_create_resolve_failed_publication": "1cba13e791cfd419bcd859b6cca89cea428873245f83f55128f2e8cf2d29c2c1",
+    "tenant_data_credential_issue_handler": "721b7d3f1053517056136a7076a2c47bd3f2ff0c00adc3646e927dbaa32739bb",
+    "tenant_data_credential_mutation_handler": "297e05e92e0050ca56ad208bc470c02e824e09f5dda2e6d98154c2438507f3ec",
+    "tenant_data_credential_revoke_handler": "ec605336d9134f0193e19d2cb3aa4213c7bcc4c1da455a5ce04230b56f82bcf8",
+    "tenant_data_credential_rotate_handler": "2bfbf4e240648b415b3a20cb3134bcd414f94b24f75d0bf2af25bf64282ec216",
     "tenant_delete_authorize": "17589eda43d802efb73977ac4062e747613f528f298ebc8afb567ec08180cc72",
     "tenant_delete_execute": "fe4d419b80b4618f31f6b8dccd523549b0354c4e2646676fe9b9b20f88ca8915",
     "tenant_delete_handler": "3322ba825e54b5e9a9711aceccb0f089162fd496df668a6bc8037161dc1c8783",
@@ -81,8 +86,8 @@
     "wyl_daemon_policy_write_record_primary": "fd545eb0aa25baaf932a661079bf4cf18a04b49204f08d86f45db4ebbfae4e30"
   },
   "owners": {
-    "count": 19,
-    "sha256": "44922c1066490505b2c09fb5e91b49c7dcca14733dba6eddd07d8611df4ecfc0"
+    "count": 20,
+    "sha256": "b3875b8913cbb0aad01cc0e4759cbced34f21c78f703d4b8084c8d35ca758e7a"
   },
   "profile": "raw-conditional-declarations-v1",
   "rationale": "Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.",

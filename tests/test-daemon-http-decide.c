@@ -29,6 +29,7 @@
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-log-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -1143,17 +1144,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 45;
-  const guint expected_exact = 40;
+  const guint expected_total = 48;
+  const guint expected_exact = 43;
 #elif defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 47;
+  const guint expected_exact = 42;
+#elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 44;
   const guint expected_exact = 39;
-#elif defined(WYL_HAS_AUDIT)
-  const guint expected_total = 41;
-  const guint expected_exact = 36;
 #else
-  const guint expected_total = 40;
-  const guint expected_exact = 35;
+  const guint expected_total = 43;
+  const guint expected_exact = 38;
 #endif
   if (total != expected_total || prefixes != 5 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -19720,6 +19721,8 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
    "fact_quota_configuration_failed"},
   {17, "fact_restore", 0, 500, "restore_operation_failed"},
   {18, "rule_pack_register", 0, 500, "rule_pack_register_failed"},
+  {19, "data_credential", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
+   500, "data_credential_failed"},
 };
 
 static wyrelog_error_t
@@ -20067,6 +20070,40 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
               WYL_TENANT_DEFAULT, guard);
       body = "big(R) :- rows(R, _).\n";
       break;
+    case 19:
+    {
+      /* The administrator issues as the owner of its own tenant. */
+      wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+      static const gchar *const permissions[] = {
+        "wr.datalog.query", "wr.fact.read",
+      };
+      gboolean created = FALSE;
+      if (wyl_policy_store_create_tenant (store, "owner-fault-dc",
+          "human-principal-admin", &created) != WYRELOG_E_OK
+          || wyl_policy_store_set_session_state (store, "owner-fault-dc",
+          "active") != WYRELOG_E_OK)
+        return 16;
+      for (gsize i = 0; i < G_N_ELEMENTS (permissions); i++)
+        if (wyl_policy_store_grant_direct_permission (store,
+            "human-principal-admin", permissions[i], "owner-fault-dc")
+            != WYRELOG_E_OK
+            || wyl_policy_store_set_permission_state (store,
+            "human-principal-admin", permissions[i], "owner-fault-dc",
+            "armed") != WYRELOG_E_OK)
+          return 17;
+      if (wyl_handle_reload_engine_pair (env->handle) != WYRELOG_E_OK
+          || wyl_request_id_new (request_id, sizeof request_id)
+          != WYRELOG_E_OK)
+        return 18;
+      path = "/tenants/data-credentials/issue";
+      query = g_strdup_printf ("tenant=%s&name=owner-fault-dc&%s",
+              WYL_TENANT_DEFAULT, guard);
+      owned_body = g_strdup_printf ("{\"request_id\":\"%s\","
+              "\"operations\":\"query\",\"graphs\":\"*\","
+              "\"expires_in_seconds\":3600}", request_id);
+      body = owned_body;
+      break;
+    }
     default:
       return 8;
   }
@@ -20108,7 +20145,7 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
 static gint
 check_policy_write_all_owner_faults (void)
 {
-  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 19);
+  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 20);
   G_STATIC_ASSERT (POLICY_WRITE_OWNER_FAULT_MODE_COUNT == 2);
   for (guint mode = 0; mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT; mode++) {
     for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {
@@ -24594,6 +24631,561 @@ check_tenant_data_credential_list_contract (void)
   service_denial_env_clear (&env);
 }
 
+static gchar *
+data_credential_issue_body (const gchar *request, const gchar *operations,
+    const gchar *graphs, const gchar *expires)
+{
+  return g_strdup_printf ("{\"request_id\":\"%s\",\"operations\":\"%s\","
+             "\"graphs\":\"%s\",\"expires_in_seconds\":%s}", request, operations,
+             graphs, expires);
+}
+
+static gchar *
+data_credential_issue (ServiceDenialEnv *env, const gchar *token,
+    const gchar *tenant, const gchar *operations, guint expected_status)
+{
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *body = data_credential_issue_body (request, operations,
+          "*", "3600");
+  return data_credential_request (env, token, "POST", "issue", tenant, body,
+             expected_status);
+}
+
+static gchar *
+data_credential_rotate (ServiceDenialEnv *env, const gchar *token,
+    const gchar *credential_id, const gchar *request, guint expected_status)
+{
+  gchar minted[WYL_REQUEST_ID_STRING_BUF];
+  if (request == NULL) {
+    g_assert_cmpint (wyl_request_id_new (minted, sizeof minted), ==,
+        WYRELOG_E_OK);
+    request = minted;
+  }
+  g_autofree gchar *body = g_strdup_printf ("{\"credential_id\":\"%s\","
+          "\"request_id\":\"%s\"}", credential_id, request);
+  return data_credential_request (env, token, "POST", "rotate", "dc-1474",
+             body, expected_status);
+}
+
+static gchar *
+data_credential_revoke (ServiceDenialEnv *env, const gchar *token,
+    const gchar *tenant, const gchar *credential_id, guint expected_status)
+{
+  g_autofree gchar *body = g_strdup_printf ("{\"credential_id\":\"%s\"}",
+          credential_id);
+  return data_credential_request (env, token, "POST", "revoke", tenant, body,
+             expected_status);
+}
+
+static void
+grant_armed_permission (wyl_policy_store_t *store, const gchar *subject,
+    const gchar *permission, const gchar *tenant)
+{
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store, subject,
+      permission, tenant), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store, subject,
+      permission, tenant, "armed"), ==, WYRELOG_E_OK);
+}
+
+static void
+set_data_credential_settings (wyl_policy_store_t *store, guint32 live_cap,
+    guint32 write_cap)
+{
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_data_credential_settings_set (store,
+      WYL_DATA_CREDENTIAL_DEFAULT_MAX_EXPIRY_US, live_cap, write_cap,
+      "test-operator", g_get_real_time ()), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+}
+
+typedef struct
+{
+  GPtrArray *secrets;
+  guint data_credential_rows;
+  guint capacity_owner;
+  guint capacity_admin;
+  gboolean secret_seen;
+} DataCredentialAuditScan;
+
+static gboolean
+data_credential_text_has_secret (const DataCredentialAuditScan *scan,
+    const gchar *text)
+{
+  for (guint i = 0; text != NULL && i < scan->secrets->len; i++)
+    if (strstr (text, g_ptr_array_index (scan->secrets, i)) != NULL)
+      return TRUE;
+  return FALSE;
+}
+
+static wyrelog_error_t
+data_credential_audit_scan_event (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) created_at_us;
+  (void) decision;
+  DataCredentialAuditScan *scan = user_data;
+  const gchar *fields[] = {
+    id, subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++)
+    scan->secret_seen = scan->secret_seen
+        || data_credential_text_has_secret (scan, fields[i]);
+  if (action != NULL && g_str_has_prefix (action, "data_credential_")) {
+    scan->data_credential_rows++;
+    g_assert_cmpstr (resource_id, ==, "dc-1474");
+    g_assert_nonnull (strstr (deny_reason, "credential="));
+    g_assert_nonnull (strstr (deny_reason, ";issuer=dc-alice;operations="));
+    g_assert_nonnull (strstr (deny_reason, ";graphs=*;expires_at_us="));
+    g_assert_true (g_str_has_prefix (deny_origin, "wdc_"));
+    g_assert_nonnull (strstr (deny_reason, deny_origin));
+    if (strstr (deny_reason, ";capacity=owner") != NULL)
+      scan->capacity_owner++;
+    if (strstr (deny_reason, ";capacity=system_admin") != NULL)
+      scan->capacity_admin++;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+data_credential_audit_scan_intention (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, const gchar *state,
+    gint64 attempt_count, const gchar *last_error, gpointer user_data)
+{
+  (void) created_at_us;
+  (void) decision;
+  (void) attempt_count;
+  DataCredentialAuditScan *scan = user_data;
+  const gchar *fields[] = {
+    id, subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+    state, last_error,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++)
+    scan->secret_seen = scan->secret_seen
+        || data_credential_text_has_secret (scan, fields[i]);
+  return WYRELOG_E_OK;
+}
+
+static guint
+data_credential_audit_rows (wyl_policy_store_t *store, GPtrArray *secrets,
+    guint *out_owner, guint *out_admin)
+{
+  DataCredentialAuditScan scan = { .secrets = secrets };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (store,
+      data_credential_audit_scan_event, &scan), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_foreach_audit_intention (store, NULL,
+      data_credential_audit_scan_intention, &scan), ==, WYRELOG_E_OK);
+  g_assert_false (scan.secret_seen);
+  if (out_owner != NULL)
+    *out_owner = scan.capacity_owner;
+  if (out_admin != NULL)
+    *out_admin = scan.capacity_admin;
+  return scan.data_credential_rows;
+}
+
+/* Takes the secret out of an issue or rotate response and checks that the
+ * body was sent as the wiped, locked chunk. */
+static gchar *
+take_data_credential_secret (ServiceDenialEnv *env, const gchar *body,
+    guint *wipes)
+{
+  gchar *secret = extract_json_string (body, "secret");
+  g_assert_nonnull (secret);
+  g_assert_cmpuint (strlen (secret), ==, WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
+  /* libsoup releases the body after the response is written, on the server
+   * thread, so the wipe is observed shortly after the client has it. */
+  guint count = 0;
+  gboolean seen = FALSE, zero = FALSE;
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  do {
+    wyl_daemon_http_data_credential_response_wipe_snapshot_for_test
+      (env->http.server, &count, &seen, &zero);
+    if (count > *wipes)
+      break;
+    g_usleep (1000);
+  } while (g_get_monotonic_time () < deadline);
+  g_assert_cmpuint (count, ==, *wipes + 1);
+  g_assert_true (seen);
+  g_assert_true (zero);
+  *wipes = count;
+  return secret;
+}
+
+static void
+check_tenant_data_credential_mutation_contract (void)
+{
+  g_autofree gchar *log_dir = g_dir_make_tmp ("wyl-dc-log-XXXXXX", NULL);
+  g_autofree gchar *log_path = g_build_filename (log_dir, "daemon.log", NULL);
+  g_setenv ("WYL_LOG", "*:5", TRUE);
+  g_setenv ("WYL_LOG_FILE", log_path, TRUE);
+  wyl_log_internal_reconfigure ();
+
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *alice = seed_data_credential_human (&env, "dc-alice",
+          TRUE);
+  g_autofree gchar *bob = seed_data_credential_human (&env, "dc-bob", TRUE);
+  g_autofree gchar *carol = seed_data_credential_human (&env, "dc-carol",
+          TRUE);
+  const gchar *shaped = "wdc_0123456789abcdefghijklmnop";
+  g_autofree gchar *wdc = seed_data_credential_human (&env, shaped, TRUE);
+  register_test_human (store, "human-principal-admin");
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-1474",
+      "dc-alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-other",
+      "dc-bob", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-shaped",
+      shaped, &created), ==, WYRELOG_E_OK);
+  const gchar *tenants[] = { "dc-1474", "dc-other", "dc-shaped" };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenants); i++)
+    g_assert_cmpint (wyl_policy_store_set_session_state (store, tenants[i],
+        "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "dc-carol",
+      "wr.system_admin", "dc-1474"), ==, WYRELOG_E_OK);
+  /* The owner may hand out query and insert, and nothing else. */
+  grant_armed_permission (store, "dc-alice", "wr.datalog.query", "dc-1474");
+  grant_armed_permission (store, "dc-alice", "wr.fact.read", "dc-1474");
+  grant_armed_permission (store, "dc-alice", "wr.fact.append", "dc-1474");
+  grant_armed_permission (store, "dc-bob", "wr.datalog.query", "dc-other");
+  grant_armed_permission (store, "dc-bob", "wr.fact.read", "dc-other");
+  grant_armed_permission (store, shaped, "wr.datalog.query", "dc-shaped");
+  grant_armed_permission (store, shaped, "wr.fact.read", "dc-shaped");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GPtrArray) secrets = g_ptr_array_new_with_free_func (g_free);
+  guint wipes = 0;
+
+  /* The owner issues, with no SYSTEM authority, and gets the secret once. */
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *issue_body = data_credential_issue_body (request,
+          "query,insert", "*", "3600");
+  g_autofree gchar *issued = data_credential_request (&env, alice, "POST",
+          "issue", "dc-1474", issue_body, 200);
+  g_assert_nonnull (strstr (issued, "\"replayed\":false,\"credential\":{"));
+  g_assert_nonnull (strstr (issued,
+      "\"operations\":[\"query\",\"insert\"],\"graphs\":[],"
+      "\"all_graphs\":true,\"generation\":1,\"state\":\"active\""));
+  g_autofree gchar *first_id = extract_json_string (issued, "credential_id");
+  g_assert_nonnull (first_id);
+  g_ptr_array_add (secrets, take_data_credential_secret (&env, issued,
+      &wipes));
+
+  /* A retry replays without the secret; a different request under the same
+   * id conflicts. */
+  g_autofree gchar *replayed = data_credential_request (&env, alice, "POST",
+          "issue", "dc-1474", issue_body, 200);
+  g_assert_nonnull (strstr (replayed, "\"replayed\":true"));
+  g_assert_nonnull (strstr (replayed, first_id));
+  g_assert_null (strstr (replayed, "secret"));
+  g_autofree gchar *conflicting = data_credential_issue_body (request, "query",
+          "*", "3600");
+  g_free (data_credential_request (&env, alice, "POST", "issue", "dc-1474",
+      conflicting, 409));
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, NULL, NULL),
+      ==, 1);
+
+  /* An operation the owner does not hold is refused until it does. */
+  g_autofree gchar *denied = data_credential_issue (&env, alice, "dc-1474",
+          "delete", 403);
+  g_assert_cmpstr (denied, ==,
+      "{\"error\":\"data_credential_operation_denied\"}");
+  g_free (data_credential_issue (&env, alice, "dc-1474", "update", 403));
+  grant_armed_permission (store, "dc-alice", "wr.fact.retract", "dc-1474");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *deleter = data_credential_issue (&env, alice, "dc-1474",
+          "delete", 200);
+  g_ptr_array_add (secrets, take_data_credential_secret (&env, deleter,
+      &wipes));
+
+  /* Nobody but the owner issues or rotates: not a non-owner, not a
+   * tenant-scoped administrator, not SYSTEM, and not a credential-shaped
+   * subject even in the tenant it owns. */
+  g_assert_cmpint (grant_tenant_manage_authority (env.handle,
+      "human-principal-admin"), ==, WYRELOG_E_OK);
+  const gchar *refused[] = { bob, carol, env.access_token };
+  for (gsize i = 0; i < G_N_ELEMENTS (refused); i++) {
+    g_autofree gchar *body = data_credential_issue (&env, refused[i],
+            "dc-1474", "query", 403);
+    g_assert_cmpstr (body, ==, "{\"error\":\"data_credential_denied\"}");
+    g_free (data_credential_rotate (&env, refused[i], first_id, NULL, 403));
+  }
+  g_autofree gchar *shaped_refused = data_credential_issue (&env, wdc,
+          "dc-shaped", "query", 403);
+  g_assert_cmpstr (shaped_refused, ==,
+      "{\"error\":\"data_credential_denied\"}");
+  g_free (data_credential_issue (&env, "not-a-token", "dc-1474", "query",
+      401));
+  g_autofree gchar *raw_secret_bearer = data_credential_issue (&env,
+          g_ptr_array_index (secrets, 0), "dc-1474", "query", 401);
+  g_assert_null (strstr (raw_secret_bearer,
+      (const gchar *) g_ptr_array_index (secrets, 0)));
+#ifdef WYL_HAS_AUDIT
+  {
+    wyl_service_principal_t principal = { 0 };
+    g_assert_cmpint (wyl_service_principal_create (env.handle, "svc:dc:probe",
+        "Data credential probe", "admin", "dc-probe-principal", &principal),
+        ==, WYRELOG_E_OK);
+    wyl_service_principal_clear (&principal);
+    g_auto (ActualServiceTokens) svc = { 0 };
+    g_assert_true (actual_service_tokens_init (env.http.server,
+        "svc:dc:probe", WYL_TENANT_DEFAULT, "dc-probe-credential", &svc));
+    g_free (data_credential_issue (&env, svc.token_a, "dc-1474", "query",
+        403));
+    g_free (data_credential_rotate (&env, svc.token_a, first_id, NULL, 403));
+    g_free (data_credential_revoke (&env, svc.token_a, "dc-1474", first_id,
+        403));
+    g_free (data_credential_request (&env, svc.token_a, "GET", NULL,
+        "dc-1474", NULL, 403));
+  }
+#endif
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, NULL, NULL),
+      ==, 2);
+
+  /* An owner who is also SYSTEM issues as the owner. */
+  g_assert_cmpint (grant_tenant_manage_authority (env.handle, "dc-alice"), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *dual = data_credential_issue (&env, alice, "dc-1474",
+          "query", 200);
+  g_ptr_array_add (secrets, take_data_credential_secret (&env, dual, &wipes));
+  guint owner_rows = 0, admin_rows = 0;
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, &owner_rows,
+      &admin_rows), ==, 3);
+  g_assert_cmpuint (owner_rows, ==, 3);
+  g_assert_cmpuint (admin_rows, ==, 0);
+
+  /* The lifetime is mandatory and bounded. */
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *no_expiry = g_strdup_printf ("{\"request_id\":\"%s\","
+          "\"operations\":\"query\",\"graphs\":\"*\"}", request);
+  g_autofree gchar *missing = data_credential_request (&env, alice, "POST",
+          "issue", "dc-1474", no_expiry, 400);
+  g_assert_cmpstr (missing, ==,
+      "{\"error\":\"data_credential_expiry_required\"}");
+  /* The strict parser takes no sign, so a negative lifetime is a malformed
+   * body; zero parses and is refused as a lifetime. */
+  static const gchar *const bad_expiry[][2] = {
+    { "0", "{\"error\":\"data_credential_expiry_invalid\"}" },
+    { "-1", "{\"error\":\"invalid_data_credential_request\"}" },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_expiry); i++) {
+    g_autofree gchar *body = data_credential_issue_body (request, "query",
+            "*", bad_expiry[i][0]);
+    g_autofree gchar *refused_body = data_credential_request (&env, alice,
+            "POST", "issue", "dc-1474", body, 400);
+    g_assert_cmpstr (refused_body, ==, bad_expiry[i][1]);
+  }
+  g_autofree gchar *too_long = g_strdup_printf ("%" G_GINT64_FORMAT,
+          WYL_DATA_CREDENTIAL_DEFAULT_MAX_EXPIRY_US / G_USEC_PER_SEC + 1);
+  g_autofree gchar *too_long_body = data_credential_issue_body (request,
+          "query", "*", too_long);
+  g_autofree gchar *exceeded = data_credential_request (&env, alice, "POST",
+          "issue", "dc-1474", too_long_body, 400);
+  g_assert_cmpstr (exceeded, ==,
+      "{\"error\":\"data_credential_expiry_exceeds_maximum\"}");
+
+  /* Scope: a graph must exist; an empty, repeated or unknown operation and
+   * an empty or repeated graph are refused. */
+  static const gchar *const bad_scopes[][2] = {
+    { "query", "" }, { "query", "g1,g1" }, { "", "*" }, { "query,query", "*" },
+    { "fly", "*" }, { "query", "g1,*" },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_scopes); i++) {
+    g_autofree gchar *body = data_credential_issue_body (request,
+            bad_scopes[i][0], bad_scopes[i][1], "3600");
+    g_autofree gchar *refused_body = data_credential_request (&env, alice,
+            "POST", "issue", "dc-1474", body, 400);
+    g_assert_cmpstr (refused_body, ==,
+        "{\"error\":\"invalid_data_credential_request\"}");
+  }
+  g_autofree gchar *unknown_graph = data_credential_issue_body (request,
+          "query", "nope", "3600");
+  g_autofree gchar *unknown = data_credential_request (&env, alice, "POST",
+          "issue", "dc-1474", unknown_graph, 400);
+  g_assert_cmpstr (unknown, ==,
+      "{\"error\":\"data_credential_unknown_graph\"}");
+
+  /* A cap is a conflict, not a malformed request. */
+  set_data_credential_settings (store, WYL_DATA_CREDENTIAL_DEFAULT_LIVE_CAP,
+      0);
+  g_autofree gchar *capped = data_credential_issue (&env, alice, "dc-1474",
+          "insert", 409);
+  g_assert_cmpstr (capped, ==, "{\"error\":\"data_credential_cap_exceeded\"}");
+  set_data_credential_settings (store, WYL_DATA_CREDENTIAL_DEFAULT_LIVE_CAP,
+      WYL_DATA_CREDENTIAL_DEFAULT_WRITE_CAP);
+
+  /* Rotation revokes its predecessor and keeps scope and expiry. */
+  g_autofree gchar *rotation_request = g_malloc (WYL_REQUEST_ID_STRING_BUF);
+  g_assert_cmpint (wyl_request_id_new (rotation_request,
+      WYL_REQUEST_ID_STRING_BUF), ==, WYRELOG_E_OK);
+  g_autofree gchar *rotated = data_credential_rotate (&env, alice, first_id,
+          rotation_request, 200);
+  g_autofree gchar *second_id = extract_json_string (rotated,
+          "credential_id");
+  g_assert_cmpstr (second_id, !=, first_id);
+  g_autofree gchar *rotated_from = g_strdup_printf ("\"rotated_from\":\"%s\"",
+          first_id);
+  g_assert_nonnull (strstr (rotated, rotated_from));
+  g_autofree gchar *second_secret = take_data_credential_secret (&env,
+          rotated, &wipes);
+  g_assert_cmpstr (second_secret, !=, g_ptr_array_index (secrets, 0));
+  g_ptr_array_add (secrets, g_strdup (second_secret));
+  g_autofree gchar *rotate_replay = data_credential_rotate (&env, alice,
+          first_id, rotation_request, 200);
+  g_assert_nonnull (strstr (rotate_replay, "\"replayed\":true"));
+  g_assert_nonnull (strstr (rotate_replay, second_id));
+  g_assert_null (strstr (rotate_replay, "secret"));
+  g_autofree gchar *not_active = data_credential_rotate (&env, alice,
+          first_id, NULL, 409);
+  g_assert_cmpstr (not_active, ==,
+      "{\"error\":\"data_credential_not_active\"}");
+  g_free (data_credential_rotate (&env, alice, "wdc_000000000000000000000000009",
+      NULL, 404));
+  /* An expired credential is as inactive as a revoked one. */
+  {
+    const guint8 *cvk = NULL;
+    gsize cvk_len = 0;
+    g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+        &cvk, &cvk_len), ==, WYRELOG_E_OK);
+    gchar expired_request[WYL_REQUEST_ID_STRING_BUF];
+    g_assert_cmpint (wyl_request_id_new (expired_request,
+        sizeof expired_request), ==, WYRELOG_E_OK);
+    WylDataCredentialInfo expired = { 0 };
+    wyl_service_credential_secret_t *expired_secret = NULL;
+    gboolean expired_replayed = FALSE;
+    g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_data_credential_issue (store, "dc-1474",
+        "dc-alice", expired_request, WYL_DATA_CREDENTIAL_OP_QUERY, NULL, 0,
+        G_TIME_SPAN_HOUR, g_get_real_time () - G_TIME_SPAN_DAY, &expired,
+        &expired_secret, &expired_replayed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==,
+        WYRELOG_E_OK);
+    wyl_service_credential_secret_clear (&expired_secret);
+    g_autofree gchar *expired_refused = data_credential_rotate (&env, alice,
+            expired.credential_id, NULL, 409);
+    g_assert_cmpstr (expired_refused, ==,
+        "{\"error\":\"data_credential_not_active\"}");
+    wyl_data_credential_info_clear (&expired);
+  }
+
+  /* Rotation re-checks the issuer's operations. */
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (store,
+      "dc-alice", "wr.fact.append", "dc-1474"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *rotation_denied = data_credential_rotate (&env, alice,
+          second_id, NULL, 403);
+  g_assert_cmpstr (rotation_denied, ==,
+      "{\"error\":\"data_credential_operation_denied\"}");
+  grant_armed_permission (store, "dc-alice", "wr.fact.append", "dc-1474");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *third = data_credential_rotate (&env, alice, second_id,
+          NULL, 200);
+  g_autofree gchar *third_id = extract_json_string (third, "credential_id");
+  g_ptr_array_add (secrets, take_data_credential_secret (&env, third,
+      &wipes));
+
+  /* A sealed tenant refuses issue and rotate, not list or revoke. */
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "dc-1474",
+      TRUE), ==, WYRELOG_E_OK);
+  g_autofree gchar *sealed = data_credential_issue (&env, alice, "dc-1474",
+          "query", 409);
+  g_assert_cmpstr (sealed, ==, "{\"error\":\"tenant_sealed\"}");
+  g_free (data_credential_rotate (&env, alice, third_id, NULL, 409));
+  g_autofree gchar *revoked = data_credential_revoke (&env, alice, "dc-1474",
+          third_id, 200);
+  g_assert_nonnull (strstr (revoked,
+      "\"state\":\"revoked\",\"changed\":true"));
+  g_autofree gchar *again = data_credential_revoke (&env, alice, "dc-1474",
+          third_id, 200);
+  g_assert_nonnull (strstr (again, "\"changed\":false"));
+  /* SYSTEM revokes any tenant's credential, sealed or not. */
+  g_autofree gchar *dual_id = extract_json_string (dual, "credential_id");
+  g_free (data_credential_revoke (&env, env.access_token, "dc-1474", dual_id,
+      200));
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "dc-1474",
+      FALSE), ==, WYRELOG_E_OK);
+  /* The store-level unseal reaches the decision engine only on a rebuild. */
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+
+  /* Nobody but the owner and SYSTEM revokes, and a credential is found only
+   * in its own tenant. */
+  g_free (data_credential_revoke (&env, bob, "dc-1474", dual_id, 403));
+  g_free (data_credential_revoke (&env, carol, "dc-1474", dual_id, 403));
+  g_free (data_credential_revoke (&env, bob, "dc-other", dual_id, 404));
+
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, &owner_rows,
+      &admin_rows), ==, 7);
+  g_assert_cmpuint (admin_rows, ==, 1);
+
+  /* A failed audit leaves nothing behind and returns no secret. */
+  g_autoptr (GPtrArray) before = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_list (store, "dc-1474",
+      &before), ==, WYRELOG_E_OK);
+  wyl_daemon_http_fail_next_data_credential_audit_for_test (env.http.server);
+  g_autofree gchar *audit_failed = data_credential_issue (&env, alice,
+          "dc-1474", "query", 500);
+  g_assert_cmpstr (audit_failed, ==, "{\"error\":\"data_credential_failed\"}");
+  g_autoptr (GPtrArray) after = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_list (store, "dc-1474",
+      &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after->len, ==, before->len);
+
+  /* Logout at the decisive WRITE check issues nothing. */
+  g_autoptr (WylSession) live = wyl_daemon_http_ref_session_by_id
+        (env.http.server, env.session_token);
+  PermissionTransitionMfaRevocationProbe probe = {
+    .server = env.http.server, .session = live,
+  };
+  g_autofree gchar *admin_owned = NULL;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-admin",
+      "human-principal-admin", &created), ==, WYRELOG_E_OK);
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (env.http.server, tenant_ownership_close_before_write, &probe);
+  admin_owned = data_credential_issue (&env, env.access_token, "dc-admin",
+          "query", 403);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_autoptr (GPtrArray) admin_list = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_list (store, "dc-admin",
+      &admin_list), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admin_list->len, ==, 0);
+
+  /* The secret's bytes appear only in its issue or rotate response: not in
+   * the list, not in any audit row, not in the daemon log. */
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, NULL, NULL),
+      ==, 7);
+  g_autofree gchar *listed = data_credential_request (&env, alice, "GET",
+          NULL, "dc-1474", NULL, 200);
+  for (guint i = 0; i < secrets->len; i++)
+    g_assert_null (strstr (listed, g_ptr_array_index (secrets, i)));
+  service_denial_env_clear (&env);
+  g_unsetenv ("WYL_LOG_FILE");
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reconfigure ();
+  g_autofree gchar *log = NULL;
+  g_assert_true (g_file_get_contents (log_path, &log, NULL, NULL));
+  /* The issue path logs the credential id, so an empty capture cannot pass
+   * for a clean one. */
+  g_assert_nonnull (strstr (log, first_id));
+  for (guint i = 0; i < secrets->len; i++)
+    g_assert_null (strstr (log, g_ptr_array_index (secrets, i)));
+  g_assert_cmpint (g_remove (log_path), ==, 0);
+  g_assert_cmpint (g_rmdir (log_dir), ==, 0);
+}
+
 #if defined(WYL_TEST_VARIANT_REFRESH)
 /*
  * #1030: a client that treats the access token as opaque -- the correct
@@ -25679,6 +26271,7 @@ main (void)
   check_tenant_ownership_contract ();
   check_tenant_delete_contract ();
   check_tenant_data_credential_list_contract ();
+  check_tenant_data_credential_mutation_contract ();
   gint rc = default_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);

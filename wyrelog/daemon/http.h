@@ -401,6 +401,13 @@ void wyl_daemon_http_service_response_wipe_snapshot_for_test
     gboolean * out_all_zero);
 void wyl_daemon_http_reset_service_response_authority_for_test
   (SoupServer * server);
+/* #1474: the data-credential secret response's wipe, observed when libsoup
+ * releases the body. */
+void wyl_daemon_http_data_credential_response_wipe_snapshot_for_test
+  (SoupServer * server, guint * out_count, gboolean * out_secret_seen,
+    gboolean * out_all_zero);
+void wyl_daemon_http_fail_next_data_credential_audit_for_test
+  (SoupServer * server);
 void wyl_daemon_http_set_service_response_checkpoint_for_test
   (SoupServer * server, WylDaemonServiceResponseCheckpoint checkpoint,
     gpointer data);

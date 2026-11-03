@@ -54,6 +54,11 @@ FUNCTIONS = (
     "service_management_authority_arm_handler",
     "wyl_daemon_http_configure_tenant_for_test",
     "wyl_daemon_http_resolve_tenant_create_outcome_for_test",
+    "tenant_data_credential_mutation_handler",
+    "tenant_data_credential_issue_handler",
+    "tenant_data_credential_rotate_handler",
+    "tenant_data_credential_revoke_handler",
+    "mutate_data_credential_publication",
 )
 OWNER_INVENTORY = {
     "wyl_daemon_http_context_rotate_access_token_key":
@@ -94,6 +99,8 @@ OWNER_INVENTORY = {
         ("WYL_DAEMON_POLICY_WRITE_OWNER_MFA_CONFIRM",),
     "service_management_authority_arm_handler":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_SELF_ARM",),
+    "tenant_data_credential_mutation_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_DATA_CREDENTIAL",),
 }
 TEST_ONLY_OWNER_FUNCTIONS = {
     "wyl_daemon_http_configure_tenant_for_test",
@@ -141,6 +148,7 @@ OWNER_TABLE = (
     ("FACT_QUOTA_CONFIGURE", "fact_quota_configure"),
     ("FACT_RESTORE", "fact_restore"),
     ("RULE_PACK_REGISTER", "rule_pack_register"),
+    ("DATA_CREDENTIAL", "data_credential"),
 )
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
@@ -157,6 +165,7 @@ ALLOW_ACQUIRE = {
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
     "service_management_authority_arm_handler",
+    "tenant_data_credential_mutation_handler",
 }
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
     "users_handler",  # reusable human lifecycle coordinator owns WRITE
@@ -167,6 +176,9 @@ ALLOW_MUTATORS = ALLOW_ACQUIRE | {
     # The graph-level update's commit step (#1393) runs under the write its
     # handler acquired and holds the policy store it was handed.
     "facts_graph_update_commit",
+    # The data-credential publication body (#1474) runs under the WRITE its
+    # handler acquired, inside the publication transaction.
+    "mutate_data_credential_publication",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "tenant_transfer_owner_handler", "graph_create_handler", "facts_quota_handler",
@@ -181,6 +193,10 @@ PROTECTED_HANDLERS = {
     "policy_permission_grant_handler", "policy_permission_revoke_handler",
     "policy_role_grant_handler", "policy_role_revoke_handler",
     "wyl_daemon_http_configure_tenant_for_test",
+    "tenant_data_credential_mutation_handler",
+    "tenant_data_credential_issue_handler",
+    "tenant_data_credential_rotate_handler",
+    "tenant_data_credential_revoke_handler",
 }
 MUTATORS = {
     "wyl_handle_delete_tenant",
@@ -211,6 +227,9 @@ MUTATORS = {
     "wyl_handle_apply_permission_state_transition", "wyl_mfa_enrollment_commit",
     "wyl_engine_session_run_committed_publication",
     "wyl_engine_session_repair_committed_publication",
+    "wyl_policy_store_data_credential_issue",
+    "wyl_policy_store_data_credential_rotate",
+    "wyl_policy_store_data_credential_revoke",
 }
 DAEMON_HTTP_OUTPUT = {
     "posix": "wyrelog/wyrelogd.p/daemon_http.c.o",
@@ -558,7 +577,7 @@ def validate_owner_fault_matrix_source(source):
     invoke_values=[value for _,value in invoke[0][2]]
     required_sequences=(
         ("G_STATIC_ASSERT","(","G_N_ELEMENTS","(",
-            "policy_write_owner_fault_cases",")","==","19",")",";"),
+            "policy_write_owner_fault_cases",")","==","20",")",";"),
         ("G_STATIC_ASSERT","(","POLICY_WRITE_OWNER_FAULT_MODE_COUNT","==",
             "2",")",";"),
         ("for","(","guint","mode","=","0",";","mode","<",
@@ -773,6 +792,13 @@ def raw_global_invariants(tokens, defs, check_directives=True):
         "role_membership_mutation_handler": {
             "policy_role_grant_handler": "server msg path query user_data TRUE",
             "policy_role_revoke_handler": "server msg path query user_data FALSE"},
+        "tenant_data_credential_mutation_handler": {
+            "tenant_data_credential_issue_handler":
+                'server msg path query user_data "issue"',
+            "tenant_data_credential_rotate_handler":
+                'server msg path query user_data "rotate"',
+            "tenant_data_credential_revoke_handler":
+                'server msg path query user_data "revoke"'},
     }
     exact="wyl_daemon_http_add_exact_handler"
     prefix="wyl_daemon_http_add_prefix_handler"
@@ -796,6 +822,12 @@ def raw_global_invariants(tokens, defs, check_directives=True):
         "mfa_enroll_confirm_handler": (exact,'"/auth/mfa/enroll/confirm"'),
         "service_management_authority_arm_handler":
             (exact,'"/service-management-authority/arm"'),
+        "tenant_data_credential_issue_handler":
+            (exact,'"/tenants/data-credentials/issue"'),
+        "tenant_data_credential_rotate_handler":
+            (exact,'"/tenants/data-credentials/rotate"'),
+        "tenant_data_credential_revoke_handler":
+            (exact,'"/tenants/data-credentials/revoke"'),
     }
     edge_counts={(inner,outer):0 for inner,outers in wrapper_calls.items()
         for outer in outers}
@@ -868,8 +900,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 22:
-        raise GuardError("daemon WRITE owner inventory must contain 22 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 23:
+        raise GuardError("daemon WRITE owner inventory must contain 23 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():
