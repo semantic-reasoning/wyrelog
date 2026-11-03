@@ -87,3 +87,47 @@ owned the batch fails, including when poisoning occurs on the last row.
 Deterministic concurrency checkpoints are compiled only into the non-installed
 handle test archive. Production shared and static artifacts must not contain
 their symbols; `handle-test-seams-not-shipped` verifies that boundary.
+
+## Source input evidence
+
+Candidate verification normally reads scalar input multiplicities and first-column key
+absence directly from Wirelog's authoritative source storage. Queries run under
+the owning engine session, against the same candidate identity and pinned store
+generation as the derived-output checks. They do not evaluate rules, publish
+callbacks, intern symbols, or retain a host copy of input rows for these queries. Duplicate source
+rows remain distinguishable even when derived snapshots deduplicate them.
+
+For relations containing inline template facts, a publication may explicitly
+register finite exact symbolic tuple probes using the probed-publication
+entrypoint. Candidate construction resolves those symbols before loading the
+pinned snapshot and counts only matching successful host insertions. Static
+facts and derived output contribute zero. Registration closes when host loading
+starts; duplicate registrations are rejected. Overflow is checked before insert,
+and failed mutations do not change counts. Probes survive through verification
+and its delta producer, then are cleared on success or failure; rejected
+candidates also clear them. The daemon startup check uses two probes for
+`role_permission` and `inherits`. Unregistered unsupported queries still fail.
+The inline-origin exception is restricted to `role_permission` and `inherits`
+with exactly two scalar symbol columns and no `.input` directive, certified
+from the same source text used to open that engine. Wrong widths and unsupported
+schemas cannot become absence evidence. Ordinary reloads register no probes. Probe memory is proportional to registered
+tuples, independent of unrelated history.
+
+Source-query v1 is required at configuration time, including exact signatures
+and linkable functions for system dependencies. Unknown relations, unsupported
+schemas or origins (including inline facts), busy state, and resource failures
+are errors, never evidence of absence. Symbol lookup uses Wirelog's authoritative
+intern table without allocating a new symbol; template literals therefore cannot
+be mistaken for missing symbols. Audit replay validates source schemas before
+using a missing-symbol shortcut.
+
+A source query uses constant auxiliary storage and scans the source relation.
+Repeated verification over an entire history can therefore take quadratic total
+scan work; there is no history-sized host witness table or arbitrary history
+cutoff. The existing specialized session-state and membership receipts remain.
+Three request-local compound inputs (`context_now`, `eval_guard`, and
+`guard_context`) use narrowly scoped removal receipts because source-query v1
+does not support compound schemas. Those receipts track outstanding inputs,
+undo failed insertion reservations, and discard entries on their final removal.
+They are never used as publication evidence. Unrelated audit history does not
+increase any of these receipt tables.

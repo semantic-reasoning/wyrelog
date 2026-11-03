@@ -4663,6 +4663,372 @@ check_repair_postcommit_policy_is_internal (void)
   return 0;
 }
 
+/* Source witnesses must describe accepted inputs, never derived set rows. */
+static void
+check_source_inspection_contract (void)
+{
+  g_autoptr (WylEngine) engine = g_object_new (WYL_TYPE_ENGINE, NULL);
+  g_assert_cmpint (wirelog_easy_open (
+        ".decl source(k: int64, v: int64)\n"
+        ".decl derived(k: int64, v: int64)\n"
+        ".decl other(k: int64, v: int64)\n"
+        ".decl seeded(k: int64, v: int64)\n"
+        ".decl literal(v: symbol)\n"
+        "literal(\"template-only-witness\").\n"
+        "seeded(7, 8).\n"
+        "derived(K, V) :- source(K, V).\n", &engine->session), ==, WIRELOG_OK);
+  wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
+  gint64 template_id = 0;
+  g_assert_cmpuint (g_hash_table_size (engine->symbols_by_id), ==, 0);
+  g_assert_cmpint (wyl_engine_owned_lookup_symbol (engine,
+      "template-only-witness", &template_id), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (g_hash_table_size (engine->symbols_by_id), ==, 0);
+  g_assert_cmpint (wyl_engine_owned_validate_source (engine, "literal", 1), ==,
+      WYRELOG_E_POLICY);
+  const gint64 row[] = { 7, 8 };
+  const gint64 sibling[] = { 7, 9 };
+  const gint64 missing[] = { 7, 10 };
+  gboolean exact = FALSE;
+  gboolean absent = FALSE;
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, FALSE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "source", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "source", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_false (exact);
+  RelationSnapshotExpect expected = {
+    .expected_relation = "derived", .expected_row = row, .ncols = 2,
+  };
+  g_assert_cmpint (wyl_engine_snapshot (engine, "derived",
+      relation_snapshot_expect_cb, &expected), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "derived", row, 2, FALSE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_false (exact);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "source", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "source", sibling, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "source", missing, 2), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "source", row, 1), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "source", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "source", row, 2, FALSE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_has_no_accepted_input_key (engine,
+      "source", 7, &absent), ==, WYRELOG_E_OK);
+  g_assert_false (absent);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "source", sibling, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "other", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_no_accepted_input_key (engine,
+      "source", 7, &absent), ==, WYRELOG_E_OK);
+  g_assert_true (absent);
+  /* Unknown or unsupported source origins are errors, never absence. */
+  exact = TRUE;
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "missing", row, 2, FALSE, &exact), !=, WYRELOG_E_OK);
+  g_assert_false (exact);
+  absent = TRUE;
+  g_assert_cmpint (wyl_engine_owned_has_no_accepted_input_key (engine,
+      "seeded", 99, &absent), ==, WYRELOG_E_POLICY);
+  g_assert_false (absent);
+}
+
+/* Inline facts and derived output never count as host acceptance. */
+static void
+check_registered_source_probes (void)
+{
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_engine_open_source (
+        ".decl role_permission(k: symbol, v: symbol)\n"
+        "role_permission(\"a\",\"b\").\n", 1, &engine), ==, WYRELOG_E_OK);
+  wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
+  gint64 row[2] = { 0 }, other[2] = { 0 }, absent[2] = { 0 };
+  g_assert_cmpint (wyl_engine_owned_intern_symbol (engine, "a", &row[0]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_intern_symbol (engine, "b", &row[1]), ==, WYRELOG_E_OK);
+  other[0] = absent[0] = row[0];
+  g_assert_cmpint (wyl_engine_owned_intern_symbol (engine, "other", &other[1]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_intern_symbol (engine, "absent", &absent[1]), ==, WYRELOG_E_OK);
+  /* Inline-origin rejection must not mask malformed probe widths. */
+  g_assert_cmpint (wyl_engine_owned_register_source_probe (engine, "role_permission",
+      row, 1), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_engine_owned_register_source_probe (engine, "role_permission",
+      row, 2), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_register_source_probe (engine, "role_permission",
+      row, 2), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_engine_owned_register_source_probe (engine, "role_permission",
+      absent, 2), ==, WYRELOG_E_OK);
+  gboolean exact = FALSE;
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "role_permission", row, 2, FALSE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "role_permission", row, 2), ==,
+      WYRELOG_E_NOT_FOUND);
+  for (guint i = 0; i < 2; i++)
+    g_assert_cmpint (wyl_engine_owned_insert (engine, "role_permission", row, 2), ==,
+        WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "role_permission", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_false (exact);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "role_permission", row, 1), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "role_permission", absent, 2), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "role_permission", other, 2), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_engine_owned_register_source_probe (engine, "role_permission",
+      other, 2), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "role_permission", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "role_permission", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "role_permission", row, 2), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "role_permission", row, 2, FALSE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  g_assert_cmpuint (engine->source_probes->len, ==, 2);
+  wyl_engine_owned_clear_source_probes (engine);
+  g_assert_null (engine->source_probes);
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "role_permission", row, 2, FALSE, &exact), ==, WYRELOG_E_POLICY);
+  g_assert_false (exact);
+  g_assert_cmpint (wyl_engine_owned_register_source_probe (engine,
+      "missing", row, 2), ==, WYRELOG_E_INVALID);
+
+}
+
+static void
+check_registered_probe_schema_rejection (void)
+{
+  const gchar *sources[] = {
+    ".decl seeded(k: int64, v: int64)\nseeded(7,8).\n",
+    ".decl role_permission(k: int64, v: int64)\nrole_permission(7,8).\n",
+    ".decl role_permission(k: float, v: int64)\n",
+    ".decl role_permission(k: ctx/1, v: symbol)\n",
+    ".decl role_permission(k: symbol, v: symbol, z: symbol)\n",
+  };
+  const gint64 row[] = { 7, 8 };
+  for (guint i = 0; i < G_N_ELEMENTS (sources); i++) {
+    g_autoptr (WylEngine) engine = NULL;
+    g_assert_cmpint (wyl_engine_open_source (sources[i], 1, &engine), ==, WYRELOG_E_OK);
+    wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
+    const gchar *relation = i == 0 ? "seeded" : "role_permission";
+    g_assert_cmpint (wyl_engine_owned_register_source_probe (engine, relation,
+        row, i == 0 ? 1 : 2), !=, WYRELOG_E_OK);
+    g_assert_null (engine->source_probes);
+    gboolean exact = TRUE;
+    g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+        relation, row, i == 0 ? 1 : 2, FALSE, &exact), !=, WYRELOG_E_OK);
+    g_assert_false (exact);
+  }
+}
+
+/* The remaining receipts support live session/member/compound operations;
+ * unrelated audit history must not add entries to any of them. */
+static guint
+retained_input_receipts (WylEngine *engine)
+{
+  return g_hash_table_size (engine->session_state_input_rows)
+         + g_hash_table_size (engine->session_state_input_totals)
+         + g_hash_table_size (engine->member_of_input_rows)
+         + g_hash_table_size (engine->guard_input_rows);
+}
+
+typedef struct
+{
+  guint history_size;
+  guint receipt_count;
+  WylHandle *handle;
+  WylEngine *candidate;
+  guint failure;
+} SourceHistoryProbe;
+
+static wyrelog_error_t
+insert_source_history (wyl_policy_store_t *store, gpointer data)
+{
+  SourceHistoryProbe *probe = data;
+  wyrelog_error_t rc = wyl_policy_store_upsert_role (store,
+          "site.history", "history probe");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_upsert_permission (store, "history.read", "history", "basic");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_role_permission (store, "site.history", "history.read");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  for (guint i = 0; i < probe->history_size; i++) {
+    g_autofree gchar *id = g_strdup_printf ("00000000-0000-7000-8000-%012u", i + 1);
+    gboolean inserted = FALSE;
+    wyrelog_error_t rc = wyl_policy_store_append_audit_event_full (store, id,
+            (gint64) i + 1, NULL, "source-history", NULL, NULL, NULL, NULL,
+            WYL_DECISION_ALLOW, &inserted);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+verify_source_history (WylEngineVerification *verification, gpointer data)
+{
+  SourceHistoryProbe *probe = data;
+  g_assert_cmpuint (retained_input_receipts (
+        wyl_handle_get_read_engine (probe->handle)), ==, probe->receipt_count);
+  g_assert_cmpuint (wyl_handle_get_read_engine (probe->handle)->source_probes->len, ==, 1);
+  gint64 row[2] = { 0 };
+  g_assert_cmpint (wyl_engine_verification_lookup_symbol (verification,
+      "site.history", &row[0]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_verification_lookup_symbol (verification,
+      "history.read", &row[1]), ==, WYRELOG_E_OK);
+  gboolean exact = FALSE;
+  g_assert_cmpint (wyl_engine_verification_has_exact_input_row (verification,
+      "role_permission", row, 2, TRUE, &exact), ==, WYRELOG_E_OK);
+  g_assert_true (exact);
+  if (probe->failure == 1)
+    return WYRELOG_E_POLICY;
+  return wyl_engine_verification_verify_audit_event (verification,
+             "00000000-0000-7000-8000-000000000001", 1, TRUE, NULL, "source-history", NULL, NULL, NULL,
+             NULL);
+}
+
+static void
+capture_source_probe_candidate (gpointer data)
+{
+  SourceHistoryProbe *probe = data;
+  probe->candidate = g_object_ref (wyl_handle_get_read_engine (probe->handle));
+  g_assert_cmpuint (probe->candidate->source_probes->len, ==, 1);
+}
+
+static wyrelog_error_t
+produce_source_history (WylEngineVerification *verification, gpointer data)
+{
+  SourceHistoryProbe *probe = data;
+  (void) verification;
+  g_assert_cmpuint (probe->candidate->source_probes->len, ==, 1);
+  return probe->failure == 2 ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+}
+
+static void
+check_source_history_storage (void)
+{
+  const guint sizes[] = { 1, 2048, 1, 1, 1, 1 };
+  for (guint i = 0; i < G_N_ELEMENTS (sizes); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==,
+        WYRELOG_E_OK);
+    SourceHistoryProbe probe = {
+      .history_size = sizes[i], .handle = handle, .failure = i < 2 ? 0 : i - 1,
+      .receipt_count = retained_input_receipts (wyl_handle_get_read_engine (handle)),
+    };
+    const gchar *symbols[] = { "site.history", "history.read" };
+    const WylEngineSourceProbeSpec specs[] = {
+      { "role_permission", symbols, G_N_ELEMENTS (symbols) },
+    };
+    wyl_handle_set_engine_snapshot_checkpoint_for_test (handle,
+        capture_source_probe_candidate, &probe);
+    if (probe.failure == 3)
+      wyl_handle_set_engine_replacement_fault_once_for_test (handle,
+          WYL_ENGINE_REPLACEMENT_FAULT_ROLE_MEMBERSHIPS);
+    if (probe.failure == 4)
+      wyl_policy_store_read_snapshot_finish_fail_once_for_test (
+        wyl_handle_get_policy_store (handle), WYL_POLICY_SNAPSHOT_FINISH_FAIL_ROLLBACK);
+    g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+    g_assert_nonnull (session);
+    wyrelog_error_t rc = wyl_engine_session_run_probed_publication (session,
+            insert_source_history, &probe, verify_source_history, &probe,
+            produce_source_history, &probe, NULL, specs, G_N_ELEMENTS (specs));
+    g_assert_nonnull (probe.candidate);
+    g_assert_null (probe.candidate->source_probes);
+    g_clear_object (&probe.candidate);
+    if (probe.failure != 0) {
+      g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+      g_assert_true (wyl_handle_engine_pair_is_poisoned (handle));
+      continue;
+    }
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (retained_input_receipts (wyl_handle_get_read_engine (handle)),
+        ==, probe.receipt_count);
+    g_clear_pointer (&session, wyl_engine_session_release);
+    g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+    g_assert_null (wyl_handle_get_read_engine (handle)->source_probes);
+    g_assert_cmpuint (retained_input_receipts (wyl_handle_get_read_engine (handle)),
+        ==, probe.receipt_count);
+  }
+}
+
+static void
+check_compound_guard_receipts (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
+  gint64 user = 0, scope = 0, loc = 0, context = 0;
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, "receipt-user", &user),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, "receipt-scope", &scope),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_intern_engine_symbol (handle, "trusted", &loc),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_make_guard_context_compound (handle, 123, loc,
+      0, scope, &context), ==, WYRELOG_E_OK);
+  WylEngine *engine = wyl_handle_get_read_engine (handle);
+  gint64 row[] = { user, scope, context };
+  gint64 missing[] = { user, user, context };
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "context_now", row, 3),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "context_now", row, 3),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (g_hash_table_size (engine->guard_input_rows), ==, 1);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "context_now", missing, 3),
+      ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_engine_owned_insert (engine, "context_now", row, 2),
+      ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "context_now", row, 2),
+      ==, WYRELOG_E_INVALID);
+  gboolean exact = TRUE;
+  g_assert_cmpint (wyl_engine_owned_has_exact_accepted_input_row (engine,
+      "context_now", row, 3, TRUE, &exact), ==, WYRELOG_E_POLICY);
+  g_assert_false (exact);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "context_now", row, 3),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (g_hash_table_size (engine->guard_input_rows), ==, 1);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "context_now", row, 3),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (g_hash_table_size (engine->guard_input_rows), ==, 0);
+  g_assert_cmpint (wyl_engine_owned_remove (engine, "context_now", row, 3),
+      ==, WYRELOG_E_NOT_FOUND);
+
+  /* Reserve a receipt, then let Wirelog reject an incompatible schema. */
+  g_autoptr (WylEngine) incompatible = g_object_new (WYL_TYPE_ENGINE, NULL);
+  g_assert_cmpint (wirelog_easy_open (
+        ".decl context_now(k: int64, v: int64)\n",
+        &incompatible->session), ==, WIRELOG_OK);
+  wyl_engine_set_owner (incompatible, WYL_ENGINE_OWNER_READ);
+  g_assert_cmpint (wyl_engine_owned_insert (incompatible, "context_now", row, 3),
+      !=, WYRELOG_E_OK);
+  g_assert_cmpuint (g_hash_table_size (incompatible->guard_input_rows), ==, 0);
+}
+
 static gint
 check_candidate_accepted_input_witness (void)
 {
@@ -8126,6 +8492,11 @@ main (int argc, char **argv)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_repair_postcommit_policy_is_internal ()) != 0)
     return wyl_test_normalize_exit_status (rc);
+  check_source_inspection_contract ();
+  check_registered_source_probes ();
+  check_registered_probe_schema_rejection ();
+  check_source_history_storage ();
+  check_compound_guard_receipts ();
   if ((rc = check_candidate_accepted_input_witness ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_committed_publication_fault_stages_and_bundle_classifier ())

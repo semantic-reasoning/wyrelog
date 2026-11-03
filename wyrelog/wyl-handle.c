@@ -254,7 +254,8 @@ static wyrelog_error_t reconcile_committed_engine_pair_in_session
 static wyrelog_error_t reconcile_guarded_engine_pair_in_session
   (WylEngineSession * session, WylEnginePublicationVerifier verify,
     gpointer verify_data, WylEnginePublicationDeltaProducer produce_deltas,
-    gpointer delta_data);
+    gpointer delta_data, const WylEngineSourceProbeSpec *probes,
+    gsize nprobes);
 static wyrelog_error_t wyl_handle_insert_audit_fact_locked (WylHandle * self,
     const gchar * id, gint64 created_at_us, const gchar * subject_id,
     const gchar * action, const gchar * resource_id,
@@ -423,16 +424,9 @@ wyl_handle_lookup_engine_symbol_locked (WylHandle *self, const gchar *symbol,
   if (!WYL_IS_HANDLE (self) || symbol == NULL || out_id == NULL
       || engine_pair_unavailable (self) || self->engine_symbols_by_id == NULL)
     return WYRELOG_E_INVALID;
-  GHashTableIter iter;
-  gpointer key = NULL, value = NULL;
-  g_hash_table_iter_init (&iter, self->engine_symbols_by_id);
-  while (g_hash_table_iter_next (&iter, &key, &value)) {
-    if (g_strcmp0 (value, symbol) == 0) {
-      *out_id = *(const gint64 *) key;
-      return WYRELOG_E_OK;
-    }
-  }
-  return WYRELOG_E_NOT_FOUND;
+  /* Template literals need not appear in the host reverse map. Consult the
+   * authoritative intern table without adding symbols or evaluating. */
+  return wyl_engine_owned_lookup_symbol (self->read_engine, symbol, out_id);
 }
 
 wyrelog_error_t
@@ -2207,6 +2201,21 @@ classify_audit_projection (WylHandle *self, const gchar *id,
   if (engine_pair_unavailable (self)) {
     *out_state = WYL_AUDIT_PROJECTION_EXACT;
     return WYRELOG_E_OK;
+  }
+
+  /* Validate origin/schema before any symbol-not-found absence shortcut.
+   * An inline template input is not a host-accepted audit receipt. */
+  static const gchar *const input_relations[] = {
+    "audit_event_input", "audit_event_subject_input",
+    "audit_event_action_input", "audit_event_resource_input",
+    "audit_event_deny_reason_input", "audit_event_deny_origin_input",
+    "audit_event_request_id_input",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (input_relations); i++) {
+    wyrelog_error_t validate_rc = wyl_engine_owned_validate_source (
+      self->read_engine, input_relations[i], i == 0 ? 3 : 2);
+    if (validate_rc != WYRELOG_E_OK)
+      return validate_rc;
   }
 
   const gchar *decision_name = decision_symbol (decision);
@@ -4455,7 +4464,8 @@ preintern_published_engine_symbols (WylHandle *self,
 
 /* WYL_ENGINE_SESSION_REQUIRES: caller owns the replacement session. */
 static wyrelog_error_t
-replace_engine_pair (WylHandle *self, const gchar *template_dir)
+replace_engine_pair (WylHandle *self, const gchar *template_dir,
+    const WylEngineSourceProbeSpec *probes, gsize nprobes)
 {
   WylPolicyStoreReadSnapshot snapshot = { 0 };
   WylEngine *new_read_engine = NULL;
@@ -4522,6 +4532,16 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   g_assert_false (self->engine_pair_replacement_building);
   self->engine_pair_replacement_building = TRUE;
   rc = preintern_published_engine_symbols (self, old_symbols);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < nprobes; i++) {
+    g_autofree gint64 *row = g_new (gint64, probes[i].ncols);
+    for (gsize column = 0; rc == WYRELOG_E_OK
+        && column < probes[i].ncols; column++)
+      rc = wyl_handle_intern_engine_symbol_locked (self,
+              probes[i].symbols[column], &row[column]);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_engine_owned_register_source_probe (new_read_engine,
+              probes[i].relation, row, probes[i].ncols);
+  }
   if (rc == WYRELOG_E_OK)
     rc = load_current_engine_pair (self,
             wyl_engine_session_state_capability (new_read_engine));
@@ -4578,6 +4598,7 @@ fail_after_install:
       snapshot_finish_failed = TRUE;
     }
   }
+  wyl_engine_owned_clear_source_probes (self->read_engine);
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
@@ -4702,7 +4723,7 @@ reconcile_committed_engine_pair_in_session (WylEngineSession *session,
   }
 
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir, NULL, 0);
   if (rc != WYRELOG_E_OK) {
     poison_engine_pair_locked (self);
     return rc;
@@ -4720,7 +4741,8 @@ reconcile_committed_engine_pair_in_session (WylEngineSession *session,
 static wyrelog_error_t
 reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
     WylEnginePublicationVerifier verify, gpointer verify_data,
-    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data)
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
+    const WylEngineSourceProbeSpec *probes, gsize nprobes)
 {
   if (!engine_session_is_valid (session) || verify == NULL)
     return WYRELOG_E_INVALID;
@@ -4733,11 +4755,12 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
     return WYRELOG_E_INVALID;
   }
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir, probes, nprobes);
   if (rc != WYRELOG_E_OK) {
     poison_engine_pair_locked (self);
     return rc;
   }
+  g_autoptr (WylEngine) probe_engine = g_object_ref (self->read_engine);
   self->engine_pair_poisoned = FALSE;
   WylEngineVerification verification = {
     .session = session,
@@ -4759,6 +4782,7 @@ reconcile_guarded_engine_pair_in_session (WylEngineSession *session,
     verification.producing_deltas = FALSE;
   }
   verification.active = FALSE;
+  wyl_engine_owned_clear_source_probes (probe_engine);
   if (rc != WYRELOG_E_OK)
     poison_engine_pair_locked (self);
   return rc;
@@ -4771,10 +4795,45 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
     WylCommittedPublicationStage *out_stage)
 {
+  return wyl_engine_session_run_probed_publication (session, mutate,
+             mutate_data, verify, verify_data, produce_deltas, delta_data,
+             out_stage, NULL, 0);
+}
+
+wyrelog_error_t
+wyl_engine_session_run_probed_publication (WylEngineSession *session,
+    WylCommittedEngineMutationBody mutate, gpointer mutate_data,
+    WylEnginePublicationVerifier verify, gpointer verify_data,
+    WylEnginePublicationDeltaProducer produce_deltas, gpointer delta_data,
+    WylCommittedPublicationStage *out_stage,
+    const WylEngineSourceProbeSpec *probes, gsize nprobes)
+{
   if (out_stage != NULL)
     *out_stage = WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   if (!engine_session_is_valid (session) || mutate == NULL || verify == NULL)
     return WYRELOG_E_INVALID;
+  if (nprobes != 0 && probes == NULL)
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < nprobes; i++) {
+    if (probes[i].relation == NULL || probes[i].relation[0] == '\0'
+        || probes[i].symbols == NULL || probes[i].ncols == 0
+        || probes[i].ncols > G_MAXUINT32
+        || probes[i].ncols > G_MAXSIZE / sizeof (gint64))
+      return WYRELOG_E_INVALID;
+    for (gsize column = 0; column < probes[i].ncols; column++)
+      if (probes[i].symbols[column] == NULL)
+        return WYRELOG_E_INVALID;
+    for (gsize j = 0; j < i; j++) {
+      if (probes[j].ncols != probes[i].ncols
+          || !g_str_equal (probes[j].relation, probes[i].relation))
+        continue;
+      gboolean same = TRUE;
+      for (gsize column = 0; column < probes[i].ncols; column++)
+        same &= g_str_equal (probes[j].symbols[column], probes[i].symbols[column]);
+      if (same)
+        return WYRELOG_E_INVALID;
+    }
+  }
   if (session->acquisition_depth != 1
       || session->handle->engine_session_depth != 1
       || session->handle->engine_delta_callback_depth > 0)
@@ -4917,7 +4976,7 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
     goto out;
   }
   rc = reconcile_guarded_engine_pair_in_session (session, verify,
-          verify_data, produce_deltas, delta_data);
+          verify_data, produce_deltas, delta_data, probes, nprobes);
   if (rc == WYRELOG_E_OK)
     rc = flush_pending_deltas (self);
   if (rc == WYRELOG_E_OK)
@@ -4966,7 +5025,7 @@ wyl_engine_session_repair_committed_publication (WylEngineSession *session,
   /* The durable mutation precedes this repair call. From here on, a POLICY
    * result describes failure to republish committed state, not a refusal. */
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  rc = replace_engine_pair (self, template_dir);
+  rc = replace_engine_pair (self, template_dir, NULL, 0);
   if (rc != WYRELOG_E_OK)
     goto fail;
   self->engine_pair_poisoned = FALSE;
@@ -5032,7 +5091,7 @@ wyl_engine_session_finish_external_publication (WylEngineSession *session,
           expected_store, expected_generation);
   if (rc == WYRELOG_E_OK)
     rc = reconcile_guarded_engine_pair_in_session (session, verify,
-            verify_data, NULL, NULL);
+            verify_data, NULL, NULL, NULL, 0);
   if (rc == WYRELOG_E_OK)
     rc = flush_pending_deltas (self);
   if (rc != WYRELOG_E_OK) {
@@ -5203,7 +5262,7 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   if (self->read_engine != NULL || self->delta_engine != NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir, NULL, 0);
   if (rc == WYRELOG_E_OK)
     self->engine_pair_poisoned = FALSE;
   return rc;
@@ -5266,7 +5325,7 @@ replace_live_engine_pair_serialized (WylHandle *self,
     clear_pending_deltas (self);
   gboolean was_poisoned = self->engine_pair_poisoned;
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir, NULL, 0);
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (rc == WYRELOG_E_OK && self->engine_replacement_checkpoint != NULL)
     self->engine_replacement_checkpoint (WYL_ENGINE_REPLACEMENT_CANDIDATE_READY,
