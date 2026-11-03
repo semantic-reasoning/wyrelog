@@ -75,6 +75,8 @@ ROUTES = (
     RouteSpec("/tenants/seal", "tenant_seal_handler"),
     RouteSpec("/tenants/unseal", "tenant_unseal_handler"),
     RouteSpec("/tenants/delete", "tenant_delete_handler"),
+    RouteSpec("/tenants/data-credentials",
+              "tenant_data_credential_list_handler"),
     RouteSpec("/graphs/create", "graph_create_handler"),
     RouteSpec("/graphs/seal", "graph_seal_handler"),
     RouteSpec("/graphs", "graphs_list_handler"),
@@ -120,6 +122,9 @@ ISSUE_1335_EXACT_PATHS = {
 ISSUE_1213_EXACT_PATHS = {
     "/facts/rule-pack/register",
 }
+ISSUE_1474_EXACT_PATHS = {
+    "/tenants/data-credentials",
+}
 ISSUE_720_EXACT_PATHS = {
     "/healthz",
     "/readyz",
@@ -158,7 +163,7 @@ PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
     if spec.path not in PREFIX_PATHS | ISSUE_719_EXACT_PATHS
     | PREEXISTING_EXACT_PATHS | ISSUE_720_EXACT_PATHS | ISSUE_1335_EXACT_PATHS
-    | ISSUE_1213_EXACT_PATHS
+    | ISSUE_1213_EXACT_PATHS | ISSUE_1474_EXACT_PATHS
 }
 EXPECTED_BY_PATH = {spec.path: spec for spec in ROUTES}
 

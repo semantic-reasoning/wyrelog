@@ -12801,6 +12801,200 @@ tenant_transfer_owner_handler (SoupServer *server, SoupServerMessage *msg,
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+/* Owner-issued data credentials (#1474).  The boundary they implement is
+ * docs/service-credential-threat-model.md, "Owner-issued data credentials".
+ * The store records actors without authorizing them, so every route below
+ * decides who is asking before it calls the store. */
+static const gchar *const data_credential_operation_names[] = {
+  "query", "infer", "insert", "delete", "update",
+};
+
+/* Authenticates a live, MFA-assured human for a data-credential route on the
+ * tenant named by ?name=.  A data credential authenticates as itself, never
+ * as a human user, so a subject shaped like one is refused whatever
+ * authority it appears to hold. */
+static gboolean
+data_credential_actor_authenticate (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, const gchar **out_tenant,
+    WylDaemonAuthContext *auth, gchar **actor, WylSession **session,
+    gchar **loc, WylManagementReauthorization *authorization)
+{
+  const gchar *tenant = lookup_required_query_string (query, "name");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400, "invalid_tenant_request");
+    return FALSE;
+  }
+  if (g_str_equal (tenant, WYL_TENANT_DEFAULT)) {
+    set_json_error (msg, 403, "tenant_builtin_immutable");
+    return FALSE;
+  }
+  if (!tenant_actor_authenticate (server, msg, query, ctx, tenant, auth,
+      actor, session, loc, authorization))
+    return FALSE;
+  if (g_str_has_prefix (*actor, "wdc_")) {
+    set_json_error (msg, 403, "data_credential_denied");
+    return FALSE;
+  }
+  *out_tenant = tenant;
+  return TRUE;
+}
+
+/* Decides whether the authenticated actor may manage @tenant's data
+ * credentials.  With @owner_only only the current owner qualifies, even when
+ * the actor also holds SYSTEM authority; otherwise a SYSTEM administrator
+ * does too.  A tenant that does not exist is reported only to an
+ * administrator (#1274). */
+static wyrelog_error_t
+data_credential_authorize (WylManagementReauthorization *authorization,
+    const gchar *actor, const gchar *tenant, gboolean owner_only)
+{
+  wyrelog_error_t rc = management_reauthorize_inside_write (authorization,
+          actor);
+  gboolean admin = rc == WYRELOG_E_OK
+      && g_strcmp0 (authorization->acting_capacity, "system_admin") == 0;
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_AUTH;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  rc = wyl_policy_store_read_tenant_authority
+        (wyl_handle_get_policy_store (authorization->handle), tenant, &record);
+  if (rc == WYRELOG_E_NOT_FOUND && !admin)
+    rc = WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK
+      && g_strcmp0 (record->owner_subject_id, actor) == 0)
+    authorization->acting_capacity = "owner";
+  else if (rc == WYRELOG_E_OK && (owner_only || !admin))
+    rc = WYRELOG_E_AUTH;
+  wyl_policy_tenant_authority_record_free (record);
+  return rc;
+}
+
+static void
+set_data_credential_auth_error (SoupServerMessage *msg, wyrelog_error_t rc)
+{
+  if (rc == WYRELOG_E_AUTH)
+    set_json_error (msg, 403, "data_credential_denied");
+  else if (rc == WYRELOG_E_NOT_FOUND)
+    set_json_error (msg, 404, "tenant_not_found");
+  else if (rc == WYRELOG_E_BUSY)
+    set_json_error (msg, 503, "data_credential_unavailable");
+  else
+    set_json_error (msg, 500, "data_credential_failed");
+}
+
+static const gchar *
+data_credential_state (const WylDataCredentialInfo *info, gint64 now_us)
+{
+  if (!g_str_equal (info->state, "active"))
+    return info->state;
+  return info->expires_at_us <= now_us ? "expired" : "active";
+}
+
+static void
+append_json_nullable_us (GString *json, const gchar *name, gint64 value)
+{
+  if (value > 0)
+    g_string_append_printf (json, "\"%s\":%" G_GINT64_FORMAT, name, value);
+  else
+    g_string_append_printf (json, "\"%s\":null", name);
+}
+
+/* Never carries the secret, salt or verifier: WylDataCredentialInfo has
+ * none of them. */
+static void
+append_data_credential_json (GString *json, const WylDataCredentialInfo *info,
+    gint64 now_us)
+{
+  g_string_append (json, "{\"credential_id\":");
+  append_json_string (json, info->credential_id);
+  g_string_append (json, ",\"tenant\":");
+  append_json_string (json, info->tenant_id);
+  g_string_append (json, ",\"issuer\":");
+  append_json_string (json, info->issuer_subject_id);
+  g_string_append (json, ",\"operations\":[");
+  gboolean first = TRUE;
+  for (guint i = 0; i < G_N_ELEMENTS (data_credential_operation_names); i++) {
+    if ((info->operations & (1u << i)) == 0)
+      continue;
+    if (!first)
+      g_string_append_c (json, ',');
+    append_json_string (json, data_credential_operation_names[i]);
+    first = FALSE;
+  }
+  g_string_append (json, "],\"graphs\":[");
+  for (guint i = 0; info->graph_ids != NULL && i < info->graph_ids->len; i++) {
+    if (i > 0)
+      g_string_append_c (json, ',');
+    append_json_string (json, g_ptr_array_index (info->graph_ids, i));
+  }
+  g_string_append_printf (json, "],\"all_graphs\":%s,\"generation\":%"
+      G_GUINT64_FORMAT ",\"state\":",
+      info->graph_ids == NULL || info->graph_ids->len == 0 ? "true" : "false",
+      info->generation);
+  append_json_string (json, data_credential_state (info, now_us));
+  g_string_append_printf (json, ",\"created_at_us\":%" G_GINT64_FORMAT
+      ",\"expires_at_us\":%" G_GINT64_FORMAT ",", info->created_at_us,
+      info->expires_at_us);
+  append_json_nullable_us (json, "last_used_at_us", info->last_used_at_us);
+  g_string_append_c (json, ',');
+  append_json_nullable_us (json, "revoked_at_us", info->revoked_at_us);
+  g_string_append_c (json, ',');
+  append_json_nullable_string (json, "revoked_by", info->revoked_by);
+  g_string_append_c (json, ',');
+  append_json_nullable_string (json, "revoked_reason", info->revoked_reason);
+  g_string_append_c (json, ',');
+  append_json_nullable_string (json, "rotated_from", info->rotated_from_id);
+  g_string_append_c (json, '}');
+}
+
+/* GET /tenants/data-credentials?name=T: the owner or a SYSTEM administrator
+ * lists the tenant's credentials, sealed or not. */
+static void
+tenant_data_credential_list_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  const gchar *tenant = NULL;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL, *loc = NULL;
+  g_autoptr (WylSession) session = NULL;
+  WylManagementReauthorization authorization;
+  if (!data_credential_actor_authenticate (server, msg, query, ctx, &tenant,
+      &auth, &actor, &session, &loc, &authorization))
+    return;
+  wyrelog_error_t rc = data_credential_authorize (&authorization, actor,
+          tenant, FALSE);
+  g_autoptr (GPtrArray) credentials = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_data_credential_list
+          (wyl_handle_get_policy_store (ctx->handle), tenant, &credentials);
+  if (rc != WYRELOG_E_OK) {
+    set_data_credential_auth_error (msg, rc);
+    return;
+  }
+  gint64 now_us = g_get_real_time ();
+  g_autoptr (GString) body = g_string_new ("{\"tenant\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"credentials\":[");
+  for (guint i = 0; i < credentials->len; i++) {
+    if (i > 0)
+      g_string_append_c (body, ',');
+    append_data_credential_json (body, g_ptr_array_index (credentials, i),
+        now_us);
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      body->str, body->len);
+}
+
 static void
 tenant_create_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -20737,6 +20931,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       tenant_unseal_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/tenants/delete",
       tenant_delete_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/tenants/data-credentials",
+      tenant_data_credential_list_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/graphs/create",
       graph_create_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/graphs/seal",

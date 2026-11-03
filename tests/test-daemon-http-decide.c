@@ -1143,17 +1143,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 45;
+  const guint expected_exact = 40;
+#elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 44;
   const guint expected_exact = 39;
-#elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 43;
-  const guint expected_exact = 38;
 #elif defined(WYL_HAS_AUDIT)
+  const guint expected_total = 41;
+  const guint expected_exact = 36;
+#else
   const guint expected_total = 40;
   const guint expected_exact = 35;
-#else
-  const guint expected_total = 39;
-  const guint expected_exact = 34;
 #endif
   if (total != expected_total || prefixes != 5 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -24435,6 +24435,165 @@ check_tenant_ownership_contract (void)
   service_denial_env_clear (&env);
 }
 
+/* #1474: owner-issued data credentials over the tenant surface. */
+static gchar *
+data_credential_request (ServiceDenialEnv *env, const gchar *token,
+    const gchar *method, const gchar *action, const gchar *tenant,
+    const gchar *body, guint expected_status)
+{
+  g_autofree gchar *query = g_strdup_printf ("tenant=__wr_default&name=%s"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=99", tenant);
+  g_autofree gchar *path = action != NULL ?
+      g_strdup_printf ("/tenants/data-credentials/%s", action) :
+      g_strdup ("/tenants/data-credentials");
+  gchar *response = NULL;
+  guint status = 0;
+  g_assert_cmpint (send_raw_service_principal_bearer (env->session, method,
+      env->base_url, path, query, token, body, &status, &response), ==, 0);
+  if (status != expected_status)
+    g_printerr ("data credential %s %s: status=%u body=%s\n", method, path,
+        status, response);
+  g_assert_cmpuint (status, ==, expected_status);
+  return response;
+}
+
+/* Issues straight through the store, as the storage unit does, so the list
+ * route can be exercised before any issue route exists. */
+static void
+seed_data_credential (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *issuer, guint32 operations, WylDataCredentialInfo *out)
+{
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+      &cvk, &cvk_len), ==, WYRELOG_E_OK);
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_secret_t *secret = NULL;
+  gboolean replayed = FALSE;
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_data_credential_issue (store, tenant,
+      issuer, request, operations, NULL, 0, G_TIME_SPAN_DAY,
+      g_get_real_time (), out, &secret, &replayed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+  wyl_service_credential_secret_clear (&secret);
+}
+
+static gchar *
+seed_data_credential_human (ServiceDenialEnv *env, const gchar *subject,
+    gboolean mfa_assured)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  gchar session_id[WYL_ID_STRING_BUF];
+  wyl_id_t generated = WYL_ID_NIL;
+  g_assert_cmpint (wyl_id_new (&generated), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&generated, session_id, sizeof session_id),
+      ==, WYRELOG_E_OK);
+  register_test_human (store, subject);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store, subject,
+      "authenticated"), ==, WYRELOG_E_OK);
+  gchar *access = NULL;
+  g_autofree gchar *refresh = NULL;
+  g_assert_true (seed_human_tokens_with_assurance (env->http.server,
+      session_id, subject, WYL_TENANT_DEFAULT, mfa_assured, &access,
+      &refresh));
+  return access;
+}
+
+static void
+check_tenant_data_credential_list_contract (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *alice = seed_data_credential_human (&env, "dc-alice",
+          TRUE);
+  g_autofree gchar *alice_nonmfa = seed_data_credential_human (&env,
+          "dc-alice", FALSE);
+  g_autofree gchar *bob = seed_data_credential_human (&env, "dc-bob", TRUE);
+  g_autofree gchar *carol = seed_data_credential_human (&env, "dc-carol",
+          TRUE);
+  /* A human registered under a credential-shaped name, owning its tenant, so
+   * only the data-credential refusal stands between it and the routes. */
+  const gchar *shaped = "wdc_0123456789abcdefghijklmnop";
+  g_autofree gchar *wdc = seed_data_credential_human (&env, shaped, TRUE);
+  register_test_human (store, "human-principal-admin");
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-1474",
+      "dc-alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-shaped",
+      shaped, &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "dc-carol",
+      "wr.system_admin", "dc-1474"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+
+  WylDataCredentialInfo first = { 0 };
+  seed_data_credential (store, "dc-1474", "dc-alice",
+      WYL_DATA_CREDENTIAL_OP_QUERY | WYL_DATA_CREDENTIAL_OP_INSERT, &first);
+  WylDataCredentialInfo shaped_credential = { 0 };
+  seed_data_credential (store, "dc-shaped", shaped,
+      WYL_DATA_CREDENTIAL_OP_QUERY, &shaped_credential);
+
+  /* The owner lists without any SYSTEM authority. */
+  g_autofree gchar *listed = data_credential_request (&env, alice, "GET", NULL,
+          "dc-1474", NULL, 200);
+  g_assert_nonnull (strstr (listed, first.credential_id));
+  g_assert_nonnull (strstr (listed,
+      "\"operations\":[\"query\",\"insert\"],\"graphs\":[],"
+      "\"all_graphs\":true,\"generation\":1,\"state\":\"active\""));
+  g_assert_null (strstr (listed, "secret"));
+  g_assert_null (strstr (listed, "salt"));
+  g_assert_null (strstr (listed, "verifier"));
+  g_assert_null (strstr (listed, first.request_id));
+
+  /* Everyone else is refused: a non-owner, a tenant-scoped administrator,
+   * the owner without MFA, and the credential-shaped owner of its own
+   * tenant.  So is SYSTEM, until it holds wr.tenant.manage. */
+  g_free (data_credential_request (&env, bob, "GET", NULL, "dc-1474", NULL,
+      403));
+  g_free (data_credential_request (&env, carol, "GET", NULL, "dc-1474", NULL,
+      403));
+  g_free (data_credential_request (&env, alice_nonmfa, "GET", NULL, "dc-1474",
+      NULL, 403));
+  g_autofree gchar *refused = data_credential_request (&env, wdc, "GET", NULL,
+          "dc-shaped", NULL, 403);
+  g_assert_cmpstr (refused, ==, "{\"error\":\"data_credential_denied\"}");
+  g_free (data_credential_request (&env, env.access_token, "GET", NULL,
+      "dc-1474", NULL, 403));
+  g_free (data_credential_request (&env, "not-a-token", "GET", NULL,
+      "dc-1474", NULL, 401));
+
+  /* A SYSTEM administrator lists any tenant, including the shaped one. */
+  g_assert_cmpint (grant_tenant_manage_authority (env.handle,
+      "human-principal-admin"), ==, WYRELOG_E_OK);
+  g_autofree gchar *admin_listed = data_credential_request (&env,
+          env.access_token, "GET", NULL, "dc-shaped", NULL, 200);
+  g_assert_nonnull (strstr (admin_listed, shaped_credential.credential_id));
+
+  /* A missing tenant is reported only to an administrator (#1274). */
+  g_autofree gchar *missing = data_credential_request (&env, env.access_token,
+          "GET", NULL, "dc-missing", NULL, 404);
+  g_assert_cmpstr (missing, ==, "{\"error\":\"tenant_not_found\"}");
+  g_free (data_credential_request (&env, bob, "GET", NULL, "dc-missing", NULL,
+      403));
+  g_free (data_credential_request (&env, alice, "GET", NULL, "__wr_default",
+      NULL, 403));
+  g_free (data_credential_request (&env, alice, "POST", NULL, "dc-1474", "{}",
+      405));
+
+  /* Sealing does not hide a tenant's credentials from its owner. */
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "dc-1474",
+      TRUE), ==, WYRELOG_E_OK);
+  g_free (data_credential_request (&env, alice, "GET", NULL, "dc-1474", NULL,
+      200));
+
+  wyl_data_credential_info_clear (&first);
+  wyl_data_credential_info_clear (&shaped_credential);
+  service_denial_env_clear (&env);
+}
+
 #if defined(WYL_TEST_VARIANT_REFRESH)
 /*
  * #1030: a client that treats the access token as opaque -- the correct
@@ -25519,6 +25678,7 @@ main (void)
 {
   check_tenant_ownership_contract ();
   check_tenant_delete_contract ();
+  check_tenant_data_credential_list_contract ();
   gint rc = default_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);
