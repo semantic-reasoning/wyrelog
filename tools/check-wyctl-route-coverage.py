@@ -120,7 +120,10 @@ UNSUPPORTED = {
         "with a tenant seal",
 }
 
-PENDING: dict[str, tuple[str, ...]] = {}
+# #1477 adds the wyctl commands for the #1474 data-credential routes.
+PENDING: dict[str, tuple[str, ...]] = {
+    "/tenants/data-credentials": ("tenant", "data-credential", "list"),
+}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {
