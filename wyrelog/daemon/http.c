@@ -622,6 +622,10 @@ typedef struct _WylDaemonHttpContext
   guint service_response_wipe_count;
   gboolean service_response_last_canary_seen;
   gboolean service_response_last_all_zero;
+  guint data_credential_response_wipe_count;
+  gboolean data_credential_response_last_secret_seen;
+  gboolean data_credential_response_last_all_zero;
+  gboolean fail_next_data_credential_audit;
   WylDaemonServiceResponseAuthoritySnapshot service_response_authority;
   WylDaemonServiceResponseCheckpoint service_response_checkpoint;
   gpointer service_response_checkpoint_data;
@@ -759,7 +763,8 @@ typedef enum
   X (SELF_ARM, self_arm) \
   X (FACT_QUOTA_CONFIGURE, fact_quota_configure) \
   X (FACT_RESTORE, fact_restore) \
-  X (RULE_PACK_REGISTER, rule_pack_register)
+  X (RULE_PACK_REGISTER, rule_pack_register) \
+  X (DATA_CREDENTIAL, data_credential)
 
 typedef enum
 {
@@ -2758,6 +2763,35 @@ wyl_daemon_http_context_revoke_session_refresh_tokens (WylDaemonHttpContext
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
+void
+wyl_daemon_http_data_credential_response_wipe_snapshot_for_test
+  (SoupServer *server, guint *out_count, gboolean *out_secret_seen,
+    gboolean *out_all_zero)
+{
+  *out_count = 0;
+  *out_secret_seen = FALSE;
+  *out_all_zero = FALSE;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  *out_count = ctx->data_credential_response_wipe_count;
+  *out_secret_seen = ctx->data_credential_response_last_secret_seen;
+  *out_all_zero = ctx->data_credential_response_last_all_zero;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_fail_next_data_credential_audit_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_data_credential_audit = TRUE;
+  g_mutex_unlock (&ctx->lock);
+}
+
 gboolean
 wyl_daemon_http_store_human_access_token_for_test (SoupServer *server,
     const gchar *jti, const gchar *session_id, const gchar *subject,
@@ -12995,6 +13029,736 @@ tenant_data_credential_list_handler (SoupServer *server, SoupServerMessage *msg,
       body->str, body->len);
 }
 
+/* What each operation requires of its issuer, as the threat model's table
+ * states it: an issuer may hand out only operations it holds itself. */
+static const gchar *const data_credential_operation_permissions[][2] = {
+  { "wr.datalog.query", "wr.fact.read" },
+  { "wr.datalog.infer", NULL },
+  { "wr.fact.append", NULL },
+  { "wr.fact.retract", NULL },
+  { "wr.fact.update", NULL },
+};
+
+typedef enum
+{
+  DATA_CREDENTIAL_ISSUE,
+  DATA_CREDENTIAL_ROTATE,
+  DATA_CREDENTIAL_REVOKE,
+} DataCredentialAction;
+
+typedef struct
+{
+  WylManagementReauthorization *authorization;
+  DataCredentialAction action;
+  const gchar *tenant;
+  const gchar *request_id;
+  const gchar *credential_id;
+  guint32 operations;
+  const gchar *const *graphs;
+  gsize n_graphs;
+  gint64 expires_in_us;
+  gint64 now_us;
+  WylAuditEvent *audit;
+  const gchar *audit_id;
+  WylDataCredentialInfo info;
+  wyl_service_credential_secret_t *secret;
+  gboolean changed;
+#ifdef WYL_TEST_DAEMON_HTTP
+  gboolean fail_audit;
+#endif
+} DataCredentialPublication;
+
+/* Parses a comma-separated list of operation names into its bit set.  Every
+ * name must be known and appear once. */
+static gboolean
+data_credential_operations_parse (const gchar *csv, guint32 *out)
+{
+  *out = 0;
+  g_auto (GStrv) names = g_strsplit (csv, ",", -1);
+  for (guint i = 0; names[i] != NULL; i++) {
+    guint bit = G_N_ELEMENTS (data_credential_operation_names);
+    for (guint j = 0; j < G_N_ELEMENTS (data_credential_operation_names); j++)
+      if (g_str_equal (names[i], data_credential_operation_names[j]))
+        bit = j;
+    if (bit == G_N_ELEMENTS (data_credential_operation_names)
+        || (*out & (1u << bit)) != 0)
+      return FALSE;
+    *out |= 1u << bit;
+  }
+  return *out != 0;
+}
+
+/* "*" is every graph in the tenant and parses to no names; anything else is
+ * a comma-separated list of distinct graph names.  An empty value is
+ * refused, so a tenant-wide credential is never an accident. */
+static gboolean
+data_credential_graphs_parse (const gchar *csv, GStrv *out)
+{
+  *out = NULL;
+  if (g_str_equal (csv, "*")) {
+    *out = g_new0 (gchar *, 1);
+    return TRUE;
+  }
+  g_auto (GStrv) graphs = g_strsplit (csv, ",", -1);
+  guint n = g_strv_length (graphs);
+  if (n == 0 || n > WYL_DATA_CREDENTIAL_MAX_GRAPHS)
+    return FALSE;
+  for (guint i = 0; i < n; i++) {
+    if (graphs[i][0] == '\0' || strlen (graphs[i]) > 255
+        || g_str_equal (graphs[i], "*"))
+      return FALSE;
+    for (guint j = 0; j < i; j++)
+      if (g_str_equal (graphs[i], graphs[j]))
+        return FALSE;
+  }
+  *out = g_steal_pointer (&graphs);
+  return TRUE;
+}
+
+/* Decides every permission behind @operations for the actor in @tenant.
+ * Runs under WRITE, which permission changes also take, and before the
+ * publication transaction, because each decision writes its own audit. */
+static wyrelog_error_t
+data_credential_check_issuer_operations
+  (WylManagementReauthorization *authorization, const gchar *tenant,
+    guint32 operations)
+{
+  for (guint i = 0; i < G_N_ELEMENTS (data_credential_operation_permissions);
+      i++) {
+    if ((operations & (1u << i)) == 0)
+      continue;
+    for (guint j = 0; j < 2; j++) {
+      const gchar *permission = data_credential_operation_permissions[i][j];
+      if (permission == NULL)
+        continue;
+      g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+      g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+      if (req == NULL || resp == NULL)
+        return WYRELOG_E_NOMEM;
+      wyl_decide_req_set_subject_id (req, authorization->actor);
+      wyl_decide_req_set_action (req, permission);
+      wyl_decide_req_set_resource_id (req, tenant);
+      wyl_decide_req_set_guard_context (req, authorization->guard_timestamp,
+          authorization->guard_loc_class, authorization->guard_risk);
+      wyl_decide_req_set_request_id (req, authorization->decision_request_id);
+      wyrelog_error_t rc = wyl_decide (authorization->handle, req, resp);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      /* An unavailable decision audit is an outage, not a refusal. */
+      if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "audit_unavailable") == 0)
+        return WYRELOG_E_BUSY;
+      if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+        return WYRELOG_E_AUTH;
+    }
+  }
+  return WYRELOG_E_OK;
+}
+
+static gchar *
+data_credential_audit_summary (const DataCredentialPublication *publication)
+{
+  const WylDataCredentialInfo *info = &publication->info;
+  GString *summary = g_string_new ("credential=");
+  g_string_append (summary, info->credential_id);
+  g_string_append (summary, ";issuer=");
+  g_string_append (summary, info->issuer_subject_id);
+  g_string_append (summary, ";operations=");
+  gboolean first = TRUE;
+  for (guint i = 0; i < G_N_ELEMENTS (data_credential_operation_names); i++) {
+    if ((info->operations & (1u << i)) == 0)
+      continue;
+    if (!first)
+      g_string_append_c (summary, ',');
+    g_string_append (summary, data_credential_operation_names[i]);
+    first = FALSE;
+  }
+  g_string_append (summary, ";graphs=");
+  if (info->graph_ids == NULL || info->graph_ids->len == 0)
+    g_string_append_c (summary, '*');
+  for (guint i = 0; info->graph_ids != NULL && i < info->graph_ids->len; i++) {
+    if (i > 0)
+      g_string_append_c (summary, ',');
+    g_string_append (summary, g_ptr_array_index (info->graph_ids, i));
+  }
+  g_string_append_printf (summary, ";expires_at_us=%" G_GINT64_FORMAT
+      ";capacity=%s", info->expires_at_us,
+      publication->authorization->acting_capacity);
+  if (publication->action == DATA_CREDENTIAL_ROTATE)
+    g_string_append_printf (summary, ";rotated_from=%s",
+        info->rotated_from_id);
+  if (publication->action == DATA_CREDENTIAL_REVOKE)
+    g_string_append (summary, ";reason=revoked");
+  return g_string_free (summary, FALSE);
+}
+
+/* The publication body: the store change and its audit commit together.  A
+ * replay, or a revoke of an already revoked credential, writes nothing and
+ * reports WYRELOG_E_CANCELLED so the runner rolls the empty transaction
+ * back instead of publishing it. */
+static wyrelog_error_t
+mutate_data_credential_publication (wyl_policy_store_t *store, gpointer data)
+{
+  DataCredentialPublication *publication = data;
+  WylManagementReauthorization *authorization = publication->authorization;
+  if (!management_session_matches_live (authorization->session,
+      authorization->session_id, authorization->actor, WYL_TENANT_DEFAULT,
+      TRUE))
+    return WYRELOG_E_AUTH;
+  gboolean replayed = FALSE;
+  wyrelog_error_t rc;
+  if (publication->action == DATA_CREDENTIAL_ISSUE) {
+    rc = wyl_policy_store_data_credential_issue (store, publication->tenant,
+            authorization->actor, publication->request_id,
+            publication->operations, publication->graphs,
+            publication->n_graphs, publication->expires_in_us,
+            publication->now_us, &publication->info, &publication->secret,
+            &replayed);
+    publication->changed = !replayed;
+  } else if (publication->action == DATA_CREDENTIAL_ROTATE) {
+    rc = wyl_policy_store_data_credential_rotate (store, publication->tenant,
+            publication->credential_id, authorization->actor,
+            publication->request_id, publication->now_us, &publication->info,
+            &publication->secret, &replayed);
+    publication->changed = !replayed;
+  } else {
+    rc = wyl_policy_store_data_credential_revoke (store, publication->tenant,
+            publication->credential_id, authorization->actor,
+            publication->now_us, &publication->info, &publication->changed);
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!publication->changed)
+    return WYRELOG_E_CANCELLED;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (publication->fail_audit)
+    return WYRELOG_E_IO;
+#endif
+  g_autofree gchar *summary = data_credential_audit_summary (publication);
+  wyl_audit_event_set_deny_reason (publication->audit, summary);
+  wyl_audit_event_set_deny_origin (publication->audit,
+      publication->info.credential_id);
+  const WylAuditEvent *event = publication->audit;
+  gboolean inserted = FALSE;
+  rc = wyl_policy_store_record_audit_intention_full (store,
+          publication->audit_id, wyl_audit_event_get_created_at_us (event),
+          wyl_audit_event_get_subject_id (event),
+          wyl_audit_event_get_action (event),
+          wyl_audit_event_get_resource_id (event),
+          wyl_audit_event_get_deny_reason (event),
+          wyl_audit_event_get_deny_origin (event),
+          wyl_audit_event_get_request_id (event),
+          wyl_audit_event_get_decision (event), &inserted);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_audit_event_full (store,
+            publication->audit_id, wyl_audit_event_get_created_at_us (event),
+            wyl_audit_event_get_subject_id (event),
+            wyl_audit_event_get_action (event),
+            wyl_audit_event_get_resource_id (event),
+            wyl_audit_event_get_deny_reason (event),
+            wyl_audit_event_get_deny_origin (event),
+            wyl_audit_event_get_request_id (event),
+            wyl_audit_event_get_decision (event), &inserted);
+  return rc;
+}
+
+static wyrelog_error_t
+verify_data_credential_publication (WylEngineVerification *verification,
+    gpointer data)
+{
+  DataCredentialPublication *publication = data;
+  const WylAuditEvent *event = publication->audit;
+  return wyl_engine_verification_verify_audit_event (verification,
+             publication->audit_id, wyl_audit_event_get_created_at_us (event),
+             TRUE, wyl_audit_event_get_subject_id (event),
+             wyl_audit_event_get_action (event),
+             wyl_audit_event_get_resource_id (event),
+             wyl_audit_event_get_deny_reason (event),
+             wyl_audit_event_get_deny_origin (event),
+             wyl_audit_event_get_request_id (event));
+}
+
+/* Whether a publication whose COMMIT reported an error applied anyway: the
+ * durable credential shows the change only if the transaction did. */
+static gboolean
+data_credential_publication_committed (wyl_policy_store_t *store,
+    const DataCredentialPublication *publication)
+{
+  if (publication->info.credential_id == NULL)
+    return FALSE;
+  WylDataCredentialInfo durable = { 0 };
+  gboolean committed = wyl_policy_store_data_credential_lookup (store,
+          publication->info.credential_id, &durable) == WYRELOG_E_OK
+      && (publication->action != DATA_CREDENTIAL_REVOKE
+      || (g_strcmp0 (durable.state, "revoked") == 0
+      && durable.revoked_at_us == publication->now_us));
+  wyl_data_credential_info_clear (&durable);
+  return committed;
+}
+
+/* The only owner of a response that carries a data-credential secret.  The
+ * buffer is locked and zeroized when libsoup releases the body. */
+typedef struct
+{
+  WylDaemonHttpContext *ctx;
+  gchar *text;
+  gsize len;
+} WylSensitiveDataCredentialResponse;
+
+static void
+wyl_sensitive_data_credential_response_free (gpointer data)
+{
+  WylSensitiveDataCredentialResponse *response = data;
+  if (response == NULL)
+    return;
+  if (response->text != NULL) {
+#ifdef WYL_TEST_DAEMON_HTTP
+    static const gchar marker[] = ",\"secret\":\"";
+    gboolean secret_seen = g_strstr_len (response->text, response->len,
+            marker) != NULL;
+#endif
+    sodium_memzero (response->text, response->len);
+#ifdef WYL_TEST_DAEMON_HTTP
+    gboolean all_zero = TRUE;
+    for (gsize i = 0; i < response->len; i++)
+      all_zero = all_zero && response->text[i] == '\0';
+    if (response->ctx != NULL) {
+      WylDaemonHttpContext *ctx = response->ctx;
+      g_mutex_lock (&ctx->lock);
+      ctx->data_credential_response_wipe_count++;
+      ctx->data_credential_response_last_secret_seen = secret_seen;
+      ctx->data_credential_response_last_all_zero = all_zero;
+      g_mutex_unlock (&ctx->lock);
+    }
+#endif
+    sodium_free (response->text);
+  }
+  wyl_daemon_http_context_unref (response->ctx);
+  sodium_memzero (response, sizeof *response);
+  g_free (response);
+}
+
+/* Sends @prefix followed by the secret as one locked chunk.  The secret is
+ * copied once, into that chunk, and never passes through a growable string
+ * or a formatter that could leave a copy behind. */
+static void
+set_data_credential_secret_response (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, const GString *prefix,
+    const wyl_service_credential_secret_t *secret)
+{
+  static const gchar key[] = ",\"secret\":\"";
+  gsize secret_len = 0;
+  const gchar *encoded = wyl_service_credential_secret_peek_encoded (secret,
+          &secret_len);
+  gsize len = prefix->len + sizeof key - 1 + secret_len + 2;
+  gchar *text = encoded != NULL ? sodium_malloc (len) : NULL;
+  if (text == NULL) {
+    set_json_error (msg, 500, "data_credential_failed");
+    return;
+  }
+  memcpy (text, prefix->str, prefix->len);
+  memcpy (text + prefix->len, key, sizeof key - 1);
+  memcpy (text + prefix->len + sizeof key - 1, encoded, secret_len);
+  memcpy (text + len - 2, "\"}", 2);
+  WylSensitiveDataCredentialResponse *owner =
+      g_new0 (WylSensitiveDataCredentialResponse, 1);
+  owner->ctx = wyl_daemon_http_context_ref (ctx);
+  owner->text = text;
+  owner->len = len;
+  GBytes *bytes = g_bytes_new_with_free_func (text, len,
+          wyl_sensitive_data_credential_response_free, owner);
+  attach_request_id_header (msg);
+  SoupMessageHeaders *headers = soup_server_message_get_response_headers (msg);
+  soup_message_headers_set_content_type (headers, "application/json", NULL);
+  soup_message_headers_replace (headers, "Cache-Control", "no-store");
+  soup_server_message_set_status (msg, 200, NULL);
+  SoupMessageBody *body = soup_server_message_get_response_body (msg);
+  soup_message_body_append_bytes (body, bytes);
+  soup_message_body_complete (body);
+  g_bytes_unref (bytes);
+}
+
+static void
+set_data_credential_store_error (SoupServerMessage *msg,
+    const DataCredentialPublication *publication, gboolean old_active,
+    gboolean over_maximum, wyrelog_error_t rc)
+{
+  switch (rc) {
+    case WYRELOG_E_AUTH:
+    case WYRELOG_E_SUBJECT_NOT_REGISTERED:
+      set_json_error (msg, 403, "data_credential_denied");
+      return;
+    case WYRELOG_E_NOT_FOUND:
+      if (publication->action == DATA_CREDENTIAL_ISSUE)
+        set_json_error (msg, 400, "data_credential_unknown_graph");
+      else
+        set_json_error (msg, 404, "data_credential_not_found");
+      return;
+    case WYRELOG_E_INVALID:
+      set_json_error (msg, 400, over_maximum ?
+          "data_credential_expiry_exceeds_maximum" :
+          "invalid_data_credential_request");
+      return;
+    case WYRELOG_E_CONFLICT:
+      set_json_error (msg, 409, publication->action == DATA_CREDENTIAL_ROTATE
+          && !old_active ? "data_credential_not_active" :
+          "data_credential_request_conflict");
+      return;
+    case WYRELOG_E_RESOURCE_LIMIT:
+      set_json_error (msg, 409, "data_credential_cap_exceeded");
+      return;
+    case WYRELOG_E_BUSY:
+      set_json_error (msg, 503, "data_credential_unavailable");
+      return;
+    default:
+      set_json_error (msg, 500, "data_credential_failed");
+      return;
+  }
+}
+
+static gboolean
+tenant_authority_is_sealed (const WylPolicyTenantAuthorityRecord *record)
+{
+  return record->sealed_compatibility
+         || record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+         || record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED
+         || record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
+}
+
+/* Parses the action's JSON body into @publication.  On failure the response
+ * is already set. */
+static gboolean
+data_credential_parse_body (SoupServerMessage *msg,
+    DataCredentialPublication *publication, gchar **values, GStrv *graphs)
+{
+  static const WylDaemonHttpStrictJsonField issue_fields[] = {
+    { "request_id", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING },
+    { "operations", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING },
+    { "graphs", 16448, WYL_DAEMON_HTTP_STRICT_JSON_STRING },
+    { "expires_in_seconds", 20, WYL_DAEMON_HTTP_STRICT_JSON_INT64 },
+  };
+  static const WylDaemonHttpStrictJsonField rotate_fields[] = {
+    { "credential_id", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING },
+    { "request_id", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING },
+  };
+  static const WylDaemonHttpStrictJsonField revoke_fields[] = {
+    { "credential_id", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING },
+  };
+  if (publication->action == DATA_CREDENTIAL_REVOKE) {
+    if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
+        revoke_fields, G_N_ELEMENTS (revoke_fields), values)
+        || !wyl_data_credential_id_is_canonical (values[0],
+        strlen (values[0]))) {
+      set_json_error (msg, 400, "invalid_data_credential_request");
+      return FALSE;
+    }
+    publication->credential_id = values[0];
+    return TRUE;
+  }
+  if (publication->action == DATA_CREDENTIAL_ROTATE) {
+    if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
+        rotate_fields, G_N_ELEMENTS (rotate_fields), values)
+        || !wyl_data_credential_id_is_canonical (values[0],
+        strlen (values[0])) || !wyl_request_id_is_canonical (values[1])) {
+      set_json_error (msg, 400, "invalid_data_credential_request");
+      return FALSE;
+    }
+    publication->credential_id = values[0];
+    publication->request_id = values[1];
+    return TRUE;
+  }
+  if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 32768,
+      issue_fields, G_N_ELEMENTS (issue_fields), values)) {
+    /* The parser requires every listed field, so a body that parses
+     * without the lifetime is one that only lacks it. */
+    gchar *partial[3] = { NULL };
+    gboolean lacks_expiry =
+        wyl_daemon_http_request_body_dup_strict_json_object (msg, 32768,
+            issue_fields, 3, partial);
+    wyl_daemon_http_clear_strv (partial, 3);
+    set_json_error (msg, 400, lacks_expiry ?
+        "data_credential_expiry_required" :
+        "invalid_data_credential_request");
+    return FALSE;
+  }
+  gint64 seconds = 0;
+  if (!wyl_request_id_is_canonical (values[0])
+      || !data_credential_operations_parse (values[1],
+      &publication->operations)
+      || !data_credential_graphs_parse (values[2], graphs)) {
+    set_json_error (msg, 400, "invalid_data_credential_request");
+    return FALSE;
+  }
+  if (!g_ascii_string_to_signed (values[3], 10, 1,
+      G_MAXINT64 / G_USEC_PER_SEC, &seconds, NULL)) {
+    set_json_error (msg, 400, "data_credential_expiry_invalid");
+    return FALSE;
+  }
+  publication->request_id = values[0];
+  publication->graphs = (const gchar * const *) *graphs;
+  publication->n_graphs = g_strv_length (*graphs);
+  publication->expires_in_us = seconds * G_USEC_PER_SEC;
+  return TRUE;
+}
+
+static void
+set_data_credential_success (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, const DataCredentialPublication *publication)
+{
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant\":");
+  append_json_string (body, publication->tenant);
+  if (publication->action == DATA_CREDENTIAL_REVOKE
+      || !publication->changed) {
+    if (publication->action != DATA_CREDENTIAL_REVOKE)
+      g_string_append (body, ",\"replayed\":true");
+    g_string_append (body, ",\"credential_id\":");
+    append_json_string (body, publication->info.credential_id);
+    g_string_append (body, ",\"state\":");
+    append_json_string (body, data_credential_state (&publication->info,
+        publication->now_us));
+    if (publication->action == DATA_CREDENTIAL_REVOKE)
+      g_string_append_printf (body, ",\"changed\":%s",
+          publication->changed ? "true" : "false");
+    g_string_append_c (body, '}');
+    attach_request_id_header (msg);
+    soup_server_message_set_status (msg, 200, NULL);
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, body->str, body->len);
+    return;
+  }
+  g_string_append (body, ",\"replayed\":false,\"credential\":");
+  append_data_credential_json (body, &publication->info, publication->now_us);
+  set_data_credential_secret_response (msg, ctx, body, publication->secret);
+}
+
+/* POST /tenants/data-credentials/{issue,rotate,revoke}?name=T.  Issue and
+ * rotate are the owner's alone; revoke is also open to a SYSTEM
+ * administrator, and to both while the tenant is sealed. */
+static void
+tenant_data_credential_mutation_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data, const gchar *action_name)
+{
+  (void) path;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  DataCredentialPublication publication = {
+    .action = g_str_equal (action_name, "issue") ? DATA_CREDENTIAL_ISSUE :
+        g_str_equal (action_name, "rotate") ? DATA_CREDENTIAL_ROTATE :
+        DATA_CREDENTIAL_REVOKE,
+  };
+  gchar *values[4] = { NULL };
+  g_auto (GStrv) graphs = NULL;
+  if (!data_credential_parse_body (msg, &publication, values, &graphs)) {
+    wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (values));
+    return;
+  }
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL, *loc = NULL;
+  g_autoptr (WylSession) session = NULL;
+  WylManagementReauthorization authorization;
+  if (!data_credential_actor_authenticate (server, msg, query, ctx,
+      &publication.tenant, &auth, &actor, &session, &loc, &authorization)) {
+    wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (values));
+    return;
+  }
+  publication.authorization = &authorization;
+  gboolean mutates_secret = publication.action != DATA_CREDENTIAL_REVOKE;
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+          WYL_DAEMON_POLICY_WRITE_OWNER_DATA_CREDENTIAL, &write);
+  if (rc == WYRELOG_E_OK && mutates_secret) {
+    g_mutex_lock (&ctx->lock);
+    gboolean recovery_pending = ctx->tenant_recovery != NULL;
+    g_mutex_unlock (&ctx->lock);
+    if (recovery_pending)
+      rc = WYRELOG_E_BUSY;
+  }
+  /* Authority is decided before any store call: the store replays a request
+   * id before its own owner check. */
+  if (rc == WYRELOG_E_OK)
+    rc = data_credential_authorize (&authorization, actor, publication.tenant,
+            mutates_secret);
+  if (rc != WYRELOG_E_OK) {
+    if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+      rc = wyl_daemon_policy_write_record_primary (&write, rc);
+    set_data_credential_auth_error (msg, rc);
+    wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (values));
+    return;
+  }
+  const gchar *error = NULL;
+  guint error_status = 0;
+  gboolean old_active = TRUE;
+  if (mutates_secret) {
+    WylPolicyTenantAuthorityRecord *record = NULL;
+    rc = wyl_policy_store_read_tenant_authority (write.store,
+            publication.tenant, &record);
+    if (rc == WYRELOG_E_OK && tenant_authority_is_sealed (record)) {
+      error_status = 409;
+      error = WYL_DAEMON_ERR_TENANT_SEALED;
+    }
+    wyl_policy_tenant_authority_record_free (record);
+  }
+  if (rc == WYRELOG_E_OK && error == NULL
+      && publication.action == DATA_CREDENTIAL_ROTATE) {
+    /* Rotation re-checks the issuer requirements of issuance against the
+     * operations the old credential carries. */
+    WylDataCredentialInfo old = { 0 };
+    rc = wyl_policy_store_data_credential_lookup (write.store,
+            publication.credential_id, &old);
+    if (rc == WYRELOG_E_OK
+        && !g_str_equal (old.tenant_id, publication.tenant))
+      rc = WYRELOG_E_NOT_FOUND;
+    if (rc == WYRELOG_E_OK) {
+      publication.operations = old.operations;
+      old_active = g_str_equal (data_credential_state (&old,
+              g_get_real_time ()), "active");
+    }
+    wyl_data_credential_info_clear (&old);
+  }
+  if (rc == WYRELOG_E_OK && error == NULL && mutates_secret) {
+    rc = data_credential_check_issuer_operations (&authorization,
+            publication.tenant, publication.operations);
+    if (rc == WYRELOG_E_AUTH) {
+      rc = WYRELOG_E_OK;
+      error_status = 403;
+      error = "data_credential_operation_denied";
+    }
+  }
+  if (rc == WYRELOG_E_OK && error == NULL && mutates_secret) {
+    /* Materializing the key opens its own transaction, so it happens before
+     * the publication's. */
+    const guint8 *cvk = NULL;
+    gsize cvk_len = 0;
+    rc = wyl_policy_store_ensure_service_cvk_for_issuance (write.store, &cvk,
+            &cvk_len);
+    if (rc == WYRELOG_E_POLICY)
+      rc = WYRELOG_E_BUSY;
+  }
+  g_autoptr (WylAuditEvent) audit = NULL;
+  g_autofree gchar *audit_id = NULL;
+  if (rc == WYRELOG_E_OK && error == NULL) {
+    audit = wyl_audit_event_new ();
+    wyl_audit_event_set_subject_id (audit, actor);
+    wyl_audit_event_set_action (audit,
+        publication.action == DATA_CREDENTIAL_ISSUE ? "data_credential_issue" :
+        publication.action == DATA_CREDENTIAL_ROTATE ?
+        "data_credential_rotate" : "data_credential_revoke");
+    wyl_audit_event_set_resource_id (audit, publication.tenant);
+    wyl_audit_event_set_request_id (audit, publication.request_id != NULL ?
+        publication.request_id : ensure_request_id_header (msg));
+    wyl_audit_event_set_decision (audit, WYL_DECISION_ALLOW);
+    audit_id = wyl_audit_event_dup_id_string (audit);
+    if (audit_id == NULL)
+      rc = WYRELOG_E_NOMEM;
+    publication.audit = audit;
+    publication.audit_id = audit_id;
+    publication.now_us = wyl_audit_event_get_created_at_us (audit);
+#ifdef WYL_TEST_DAEMON_HTTP
+    g_mutex_lock (&ctx->lock);
+    publication.fail_audit = ctx->fail_next_data_credential_audit;
+    ctx->fail_next_data_credential_audit = FALSE;
+    g_mutex_unlock (&ctx->lock);
+#endif
+  }
+  if (rc == WYRELOG_E_OK && error == NULL) {
+    g_autoptr (WylEngineSession) engine =
+        wyl_engine_session_acquire (ctx->handle);
+    if (engine == NULL) {
+      rc = WYRELOG_E_BUSY;
+    } else {
+      wyl_daemon_policy_write_observe_cleanup_resource (&write,
+          WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+      WylCommittedPublicationStage stage;
+      rc = wyl_engine_session_run_committed_publication (engine,
+              mutate_data_credential_publication, &publication,
+              verify_data_credential_publication, &publication, NULL, NULL,
+              &stage);
+      gboolean committed = stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
+          || (rc != WYRELOG_E_OK
+          && stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS
+          && data_credential_publication_committed (write.store,
+          &publication));
+      if (rc != WYRELOG_E_OK && committed) {
+        guint64 generation = 0;
+        wyrelog_error_t repair =
+            wyl_handle_policy_store_capture_generation (ctx->handle,
+                write.store, &generation);
+        if (repair == WYRELOG_E_OK)
+          repair = wyl_engine_session_repair_committed_publication (engine,
+                  write.lease, write.store, generation,
+                  verify_data_credential_publication, &publication);
+        if (repair == WYRELOG_E_OK)
+          rc = WYRELOG_E_OK;
+      }
+    }
+    /* Nothing changed, so nothing was published. */
+    if (rc == WYRELOG_E_CANCELLED && !publication.changed)
+      rc = WYRELOG_E_OK;
+    if (rc == WYRELOG_E_OK && publication.changed)
+      wyl_audit_complete_authoritative_event (ctx->handle, audit);
+  }
+  /* The credential id, never its secret, so the change can be traced. */
+  if (rc == WYRELOG_E_OK && error == NULL && publication.changed)
+    WYL_LOG_INFO (WYL_LOG_SECTION_POLICY,
+        "data_credential_%s tenant=%s credential=%s actor=%s capacity=%s",
+        action_name, publication.tenant, publication.info.credential_id,
+        actor, authorization.acting_capacity);
+  /* The route checked the request's shape, so on issue the store's only
+   * remaining refusal is a lifetime beyond the configured maximum.  It is
+   * not checked up front: a replay must still succeed after an operator
+   * lowers the maximum. */
+  gboolean over_maximum = FALSE;
+  WylDataCredentialSettings settings = { 0 };
+  if (rc == WYRELOG_E_INVALID && publication.action == DATA_CREDENTIAL_ISSUE)
+    over_maximum = wyl_policy_store_data_credential_settings_get
+          (write.store, &settings) == WYRELOG_E_OK
+        && publication.expires_in_us > settings.max_expiry_us;
+  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+    (void) wyl_daemon_policy_write_record_primary (&write,
+        error != NULL ? WYRELOG_E_AUTH : rc);
+  if (rc == WYRELOG_E_OK && error != NULL)
+    set_json_error (msg, error_status, error);
+  else if (rc != WYRELOG_E_OK)
+    set_data_credential_store_error (msg, &publication, old_active,
+        over_maximum, rc);
+  else if (wyl_daemon_policy_write_prepare_success_response (msg))
+    set_data_credential_success (msg, ctx, &publication);
+  wyl_service_credential_secret_clear (&publication.secret);
+  wyl_data_credential_info_clear (&publication.info);
+  wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (values));
+}
+
+static void
+tenant_data_credential_issue_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  tenant_data_credential_mutation_handler (server, msg, path, query,
+      user_data, "issue");
+}
+
+static void
+tenant_data_credential_rotate_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  tenant_data_credential_mutation_handler (server, msg, path, query,
+      user_data, "rotate");
+}
+
+static void
+tenant_data_credential_revoke_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  tenant_data_credential_mutation_handler (server, msg, path, query,
+      user_data, "revoke");
+}
+
 static void
 tenant_create_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -20933,6 +21697,15 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       tenant_delete_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/tenants/data-credentials",
       tenant_data_credential_list_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server,
+      "/tenants/data-credentials/issue", tenant_data_credential_issue_handler,
+      ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server,
+      "/tenants/data-credentials/rotate",
+      tenant_data_credential_rotate_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server,
+      "/tenants/data-credentials/revoke",
+      tenant_data_credential_revoke_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/graphs/create",
       graph_create_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/graphs/seal",

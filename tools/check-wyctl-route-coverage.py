@@ -123,6 +123,12 @@ UNSUPPORTED = {
 # #1477 adds the wyctl commands for the #1474 data-credential routes.
 PENDING: dict[str, tuple[str, ...]] = {
     "/tenants/data-credentials": ("tenant", "data-credential", "list"),
+    "/tenants/data-credentials/issue": ("tenant", "data-credential",
+                                        "issue"),
+    "/tenants/data-credentials/rotate": ("tenant", "data-credential",
+                                         "rotate"),
+    "/tenants/data-credentials/revoke": ("tenant", "data-credential",
+                                         "revoke"),
 }
 
 # The function in wyctl.c that dispatches the next step after each prefix.

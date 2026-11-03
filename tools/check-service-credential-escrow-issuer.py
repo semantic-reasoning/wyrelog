@@ -22,7 +22,8 @@ edit can regress into echoing a plaintext credential:
       exchange, spelled with a BARE key "credential_secret" (a request
       field descriptor), which A2 deliberately does NOT match.  A2 is
       intentionally narrow; A1 is what guarantees the daemon HTTP surface
-      can never OBTAIN a fresh secret to echo in the first place.
+      can never OBTAIN a fresh service-credential secret to echo in the
+      first place.
 
   A3  Receipt shape lock on service-credential-handoff-private.c:
       (a) the bare token 'secret' must not appear anywhere in the module;
@@ -35,6 +36,16 @@ edit can regress into echoing a plaintext credential:
           format placeholder) is not extracted, so containment ultimately
           rests on A1 -- the daemon cannot obtain a fresh secret to smuggle
           under any key -- with A3 as the reviewable shape freeze.
+
+  A4  Owner-issued data credentials (#1474) are the one exception to A1:
+      their issue and rotate routes return the secret once, in the response
+      body.  A4 confines that exception.  In the production view of
+      daemon/*.c, each secret-returning data-credential store call, the
+      secret's encoded-text accessor and the escaped \"secret\" response
+      key appear exactly once, each inside the one function allowed to
+      hold it (A4_CONFINEMENT).  A copy of any of them anywhere else in the
+      daemon fails, and the secret's raw-byte accessor may not appear in the
+      daemon at all (A4_FORBIDDEN).
 
 The A3(b) allowlist is a deliberate capstone FREEZE.  A future PR that
 legitimately adds a receipt field MUST update BOTH the allowlist below AND
@@ -77,6 +88,22 @@ RECEIPT_KEY_ALLOWLIST = frozenset({
 })
 
 HANDOFF_MODULE = "service-credential-handoff-private.c"
+
+# A4: (pattern, the only function allowed to contain it).
+A4_CONFINEMENT = (
+    (re.compile(r"\bwyl_policy_store_data_credential_issue\s*\("),
+     "mutate_data_credential_publication"),
+    (re.compile(r"\bwyl_policy_store_data_credential_rotate\s*\("),
+     "mutate_data_credential_publication"),
+    (re.compile(r"\bwyl_service_credential_secret_peek_encoded\s*\("),
+     "set_data_credential_secret_response"),
+    (re.compile(re.escape('\\"secret\\"')),
+     "set_data_credential_secret_response"),
+)
+A4_SOURCE = "http.c"
+A4_FORBIDDEN = (
+    re.compile(r"\bwyl_service_credential_secret_peek_raw\s*\("),
+)
 
 
 def c_logical_lines(text: str) -> list[str]:
@@ -245,6 +272,40 @@ def a3_key_violations(text: str) -> list[str]:
     return sorted(a3_receipt_keys(text) - RECEIPT_KEY_ALLOWLIST)
 
 
+def function_spans(text: str) -> dict[str, tuple[int, int]]:
+    """Map each top-level function defined in TEXT to its character span.
+
+    Relies on the formatter's layout: a definition's name starts a line and
+    its body ends at the next line that is exactly '}'."""
+    spans: dict[str, tuple[int, int]] = {}
+    for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*) \(", text,
+                             re.MULTILINE):
+        end = text.find("\n}\n", match.start())
+        if end < 0:
+            continue
+        spans.setdefault(match.group(1), (match.start(), end))
+    return spans
+
+
+def a4_violations(name: str, text: str) -> list[str]:
+    spans = function_spans(text) if name == A4_SOURCE else {}
+    problems: list[str] = [f"{pattern.pattern} is forbidden in the daemon"
+                           for pattern in A4_FORBIDDEN
+                           for _ in pattern.finditer(text)]
+    for pattern, owner in A4_CONFINEMENT:
+        found = list(pattern.finditer(text))
+        if name != A4_SOURCE:
+            problems += [f"{pattern.pattern} outside {A4_SOURCE}"
+                         for _ in found]
+            continue
+        span = spans.get(owner)
+        if len(found) != 1 or span is None \
+                or not span[0] <= found[0].start() < span[1]:
+            problems.append(f"{pattern.pattern} must appear once, in {owner}"
+                            f" (found {len(found)})")
+    return problems
+
+
 def check_root(root: Path) -> int:
     daemon = root / "wyrelog" / "daemon"
     sources = sorted(daemon.glob("*.c"))
@@ -253,9 +314,15 @@ def check_root(root: Path) -> int:
         return 1
     for source in sources:
         text = source.read_text(encoding="utf-8")
+        production = production_view(text)
+        if production is not None:
+            problems = a4_violations(source.name, production)
+            if problems:
+                print(f"data-credential secret escapes its owner in {source}:",
+                      *problems, sep="\n  ", file=sys.stderr)
+                return 1
         if not a1_violations(text) and not a2_violation(text):
             continue
-        production = production_view(text)
         if production is None:
             print(f"unbalanced or unsupported test conditional in {source}",
                   file=sys.stderr)
@@ -432,6 +499,43 @@ def self_test() -> int:
         comment_view = production_view(line_comment_directives)
         if comment_view is None or not a1_violations(comment_view):
             return 1
+
+    # A4: each call and the response key inside its owner pass; a second
+    # copy, a copy in another function, or one in another file fails.
+    a4_clean = (
+        "static wyrelog_error_t\n"
+        "mutate_data_credential_publication (void)\n{\n"
+        "  wyl_policy_store_data_credential_issue (s);\n"
+        "  wyl_policy_store_data_credential_rotate (s);\n}\n"
+        "static void\n"
+        "set_data_credential_secret_response (void)\n{\n"
+        '  static const gchar key[] = ",\\"secret\\":\\"";\n'
+        "  wyl_service_credential_secret_peek_encoded (s, &n);\n}\n")
+    if a4_violations("http.c", a4_clean):
+        return 1
+    a4_elsewhere = a4_clean + (
+        "static void\n"
+        "leak (void)\n{\n"
+        "  wyl_service_credential_secret_peek_encoded (s, &n);\n}\n")
+    if not a4_violations("http.c", a4_elsewhere):
+        return 1
+    a4_moved = a4_clean.replace(
+        "  wyl_policy_store_data_credential_rotate (s);\n}\n"
+        "static void\nset_data_credential_secret_response (void)\n{\n",
+        "}\nstatic void\nset_data_credential_secret_response (void)\n{\n"
+        "  wyl_policy_store_data_credential_rotate (s);\n")
+    if a4_moved == a4_clean or not a4_violations("http.c", a4_moved):
+        return 1
+    if not a4_violations("other.c",
+                         "wyl_policy_store_data_credential_issue (s);"):
+        return 1
+    if a4_violations("other.c", "wyl_policy_store_data_credential_list (s);"):
+        return 1
+    if not a4_violations("http.c", a4_clean.replace(
+            "  wyl_policy_store_data_credential_rotate (s);\n",
+            "  wyl_policy_store_data_credential_rotate (s);\n"
+            "  wyl_service_credential_secret_peek_raw (s, &n);\n")):
+        return 1
 
     # A2: the escaped response spelling fails; the bare input field passes.
     if not a2_violation('g_string_append (json, ",\\"credential_secret\\":");'):

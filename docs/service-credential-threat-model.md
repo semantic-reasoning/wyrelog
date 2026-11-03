@@ -89,12 +89,13 @@ confinement, not on a network security layer:
 
 ## Owner-issued data credentials (#1341)
 
-**Status: decided, not yet implemented.** This section records the boundary
-that the implementation units must build: #1473 (storage), #1474 (management
-routes), #1475 (exchange and per-use checks), #1476 (lifecycle revocation) and
-#1477 (`wyctl` and runbook). Until those land, no route issues or accepts a data
-credential. Where the shipped behaviour differs from this section, #1477
-corrects this document.
+**Status: partly implemented.** This section records the boundary that the
+implementation units must build: #1473 (storage), #1474 (management routes),
+#1475 (exchange and per-use checks), #1476 (lifecycle revocation) and #1477
+(`wyctl` and runbook). Storage and the management routes have landed, so a
+tenant owner can issue, list, rotate and revoke data credentials. Until #1475
+lands, no route accepts one. Where the shipped behaviour differs from this
+section, #1477 corrects this document.
 
 ### Why the boundary moves
 

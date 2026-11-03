@@ -19,8 +19,13 @@ static gsize
 body_limit (const gchar *path, const gchar *method)
 {
   if (g_str_equal (path, "/profile/events")
-      || g_str_equal (path, "/tenants/seal"))
+      || g_str_equal (path, "/tenants/seal")
+      || g_str_equal (path, "/tenants/data-credentials/rotate")
+      || g_str_equal (path, "/tenants/data-credentials/revoke"))
     return 1024;
+  /* Room for 64 graph names of 255 bytes each (#1474). */
+  if (g_str_equal (path, "/tenants/data-credentials/issue"))
+    return 32 * 1024;
   if (under_path (path, "/datalog")
       || g_str_equal (path, "/auth/service-token"))
     return 16 * 1024;

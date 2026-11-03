@@ -77,6 +77,12 @@ ROUTES = (
     RouteSpec("/tenants/delete", "tenant_delete_handler"),
     RouteSpec("/tenants/data-credentials",
               "tenant_data_credential_list_handler"),
+    RouteSpec("/tenants/data-credentials/issue",
+              "tenant_data_credential_issue_handler"),
+    RouteSpec("/tenants/data-credentials/rotate",
+              "tenant_data_credential_rotate_handler"),
+    RouteSpec("/tenants/data-credentials/revoke",
+              "tenant_data_credential_revoke_handler"),
     RouteSpec("/graphs/create", "graph_create_handler"),
     RouteSpec("/graphs/seal", "graph_seal_handler"),
     RouteSpec("/graphs", "graphs_list_handler"),
@@ -124,6 +130,9 @@ ISSUE_1213_EXACT_PATHS = {
 }
 ISSUE_1474_EXACT_PATHS = {
     "/tenants/data-credentials",
+    "/tenants/data-credentials/issue",
+    "/tenants/data-credentials/rotate",
+    "/tenants/data-credentials/revoke",
 }
 ISSUE_720_EXACT_PATHS = {
     "/healthz",
