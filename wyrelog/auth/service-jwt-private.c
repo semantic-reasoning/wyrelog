@@ -73,48 +73,22 @@ append_json_string (GString *json, const gchar *value)
   g_string_append_c (json, '"');
 }
 
-wyrelog_error_t
-wyl_jwt_sign_hs256_service (const wyl_jwt_service_issue_input_t *input,
+/* Encodes @payload under a header naming @key_id and signs both with
+ * HS256.  Shared by every machine-token shape. */
+static wyrelog_error_t
+sign_payload (const gchar *key_id, const GString *payload,
     const guint8 *secret, gsize secret_len, gchar **out_token)
 {
-  if (out_token == NULL || secret == NULL || secret_len == 0)
-    return WYRELOG_E_INVALID;
-  *out_token = NULL;
-  if (!valid_input (input))
-    return WYRELOG_E_INVALID;
-
   g_autofree gchar *header = NULL;
-  wyrelog_error_t rc = wyl_jwt_build_header_json (input->key_id, &header);
+  wyrelog_error_t rc = wyl_jwt_build_header_json (key_id, &header);
   if (rc != WYRELOG_E_OK)
     return rc;
-  GString *payload = g_string_new ("{\"jti\":");
-#define APPEND_STRING_CLAIM(name, value) G_STMT_START { \
-    g_string_append (payload, name); append_json_string (payload, value); \
-} G_STMT_END
-  append_json_string (payload, input->jti);
-  APPEND_STRING_CLAIM (",\"sub\":", input->subject);
-  APPEND_STRING_CLAIM (",\"iss\":", input->issuer);
-  APPEND_STRING_CLAIM (",\"aud\":", input->audience);
-  g_string_append_printf (payload,
-      ",\"iat\":%" G_GINT64_FORMAT ",\"nbf\":%" G_GINT64_FORMAT
-      ",\"exp\":%" G_GINT64_FORMAT, input->issued_at, input->issued_at,
-      input->issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS);
-  APPEND_STRING_CLAIM (",\"tenant\":", input->tenant);
-  g_string_append (payload, ",\"principal_state_at_issue\":\"authenticated\"");
-  APPEND_STRING_CLAIM (",\"session_id\":", input->session_id);
-  g_string_append (payload, ",\"auth_method\":\"service_credential\"");
-  APPEND_STRING_CLAIM (",\"credential_id\":", input->credential_id);
-#undef APPEND_STRING_CLAIM
-  g_string_append_printf (payload, ",\"credential_generation\":%"
-      G_GUINT64_FORMAT "}", input->credential_generation);
-
   g_autofree gchar *header_segment = NULL, *payload_segment = NULL;
   rc = wyl_jwt_base64url_encode ((const guint8 *) header, strlen (header),
           &header_segment);
   if (rc == WYRELOG_E_OK)
     rc = wyl_jwt_base64url_encode ((const guint8 *) payload->str,
             payload->len, &payload_segment);
-  g_string_free (payload, TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -135,3 +109,93 @@ wyl_jwt_sign_hs256_service (const wyl_jwt_service_issue_input_t *input,
     *out_token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
   return rc;
 }
+
+#define APPEND_STRING_CLAIM(name, value) G_STMT_START { \
+    g_string_append (payload, name); append_json_string (payload, value); \
+} G_STMT_END
+
+wyrelog_error_t
+wyl_jwt_sign_hs256_service (const wyl_jwt_service_issue_input_t *input,
+    const guint8 *secret, gsize secret_len, gchar **out_token)
+{
+  if (out_token == NULL || secret == NULL || secret_len == 0)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+  if (!valid_input (input))
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (GString) payload = g_string_new ("{\"jti\":");
+  append_json_string (payload, input->jti);
+  APPEND_STRING_CLAIM (",\"sub\":", input->subject);
+  APPEND_STRING_CLAIM (",\"iss\":", input->issuer);
+  APPEND_STRING_CLAIM (",\"aud\":", input->audience);
+  g_string_append_printf (payload,
+      ",\"iat\":%" G_GINT64_FORMAT ",\"nbf\":%" G_GINT64_FORMAT
+      ",\"exp\":%" G_GINT64_FORMAT, input->issued_at, input->issued_at,
+      input->issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS);
+  APPEND_STRING_CLAIM (",\"tenant\":", input->tenant);
+  g_string_append (payload, ",\"principal_state_at_issue\":\"authenticated\"");
+  APPEND_STRING_CLAIM (",\"session_id\":", input->session_id);
+  g_string_append (payload, ",\"auth_method\":\"service_credential\"");
+  APPEND_STRING_CLAIM (",\"credential_id\":", input->credential_id);
+  g_string_append_printf (payload, ",\"credential_generation\":%"
+      G_GUINT64_FORMAT "}", input->credential_generation);
+  return sign_payload (input->key_id, payload, secret, secret_len, out_token);
+}
+
+static gboolean
+valid_data_credential_input (const wyl_jwt_data_credential_issue_input_t
+    *input)
+{
+  return input != NULL && input->key_id != NULL && input->key_id[0] != '\0'
+         && canonical_id_text (input->jti)
+         && canonical_id_text (input->session_id)
+         && g_strcmp0 (input->jti, input->session_id) != 0
+         && input->issuer != NULL && input->issuer[0] != '\0'
+         && input->audience != NULL && input->audience[0] != '\0'
+         && input->tenant != NULL
+         && wyl_policy_store_tenant_id_is_valid (input->tenant)
+         && input->credential_id != NULL
+         && wyl_data_credential_id_is_canonical (input->credential_id,
+             strlen (input->credential_id)) && input->credential_generation != 0
+         && input->issued_at >= 0 && input->expires_at > input->issued_at
+         && input->issued_at <= G_MAXINT64
+         - WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS
+         && input->expires_at - input->issued_at
+         <= WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS;
+}
+
+/* A data-credential token (#1475) names the credential as its subject and
+ * never claims an authenticated principal: it authenticates a credential,
+ * not a user, and the bearer resolver re-reads the credential on every use. */
+wyrelog_error_t
+wyl_jwt_sign_hs256_data_credential (const wyl_jwt_data_credential_issue_input_t
+    *input, const guint8 *secret, gsize secret_len, gchar **out_token)
+{
+  if (out_token == NULL || secret == NULL || secret_len == 0)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+  if (!valid_data_credential_input (input))
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (GString) payload = g_string_new ("{\"jti\":");
+  append_json_string (payload, input->jti);
+  APPEND_STRING_CLAIM (",\"sub\":", input->credential_id);
+  APPEND_STRING_CLAIM (",\"iss\":", input->issuer);
+  APPEND_STRING_CLAIM (",\"aud\":", input->audience);
+  g_string_append_printf (payload,
+      ",\"iat\":%" G_GINT64_FORMAT ",\"nbf\":%" G_GINT64_FORMAT
+      ",\"exp\":%" G_GINT64_FORMAT, input->issued_at, input->issued_at,
+      input->expires_at);
+  APPEND_STRING_CLAIM (",\"tenant\":", input->tenant);
+  g_string_append (payload,
+      ",\"principal_state_at_issue\":\"data_credential\"");
+  APPEND_STRING_CLAIM (",\"session_id\":", input->session_id);
+  g_string_append (payload, ",\"auth_method\":\"data_credential\"");
+  APPEND_STRING_CLAIM (",\"credential_id\":", input->credential_id);
+  g_string_append_printf (payload, ",\"credential_generation\":%"
+      G_GUINT64_FORMAT "}", input->credential_generation);
+  return sign_payload (input->key_id, payload, secret, secret_len, out_token);
+}
+
+#undef APPEND_STRING_CLAIM

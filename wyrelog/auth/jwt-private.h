@@ -9,6 +9,9 @@ G_BEGIN_DECLS;
 
 #define WYL_JWT_ACCESS_TTL_SECONDS 900
 #define WYL_JWT_SERVICE_ACCESS_TTL_SECONDS 300
+/* The longest a data-credential access token may live (#1475).  A token
+ * also never outlives its credential. */
+#define WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS 300
 
 typedef struct
 {
@@ -48,6 +51,20 @@ typedef struct
 
 typedef struct
 {
+  const gchar *key_id;
+  const gchar *jti;
+  const gchar *issuer;
+  const gchar *audience;
+  const gchar *tenant;
+  const gchar *session_id;
+  const gchar *credential_id;
+  guint64 credential_generation;
+  gint64 issued_at;
+  gint64 expires_at;
+} wyl_jwt_data_credential_issue_input_t;
+
+typedef struct
+{
   gchar *jti;
   gchar *subject;
   gchar *issuer;
@@ -83,6 +100,9 @@ wyrelog_error_t wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t * input,
     const guint8 * secret, gsize secret_len, gchar ** out_token);
 G_GNUC_INTERNAL wyrelog_error_t wyl_jwt_sign_hs256_service (const
     wyl_jwt_service_issue_input_t * input, const guint8 * secret,
+    gsize secret_len, gchar ** out_token);
+G_GNUC_INTERNAL wyrelog_error_t wyl_jwt_sign_hs256_data_credential (const
+    wyl_jwt_data_credential_issue_input_t * input, const guint8 * secret,
     gsize secret_len, gchar ** out_token);
 wyrelog_error_t wyl_jwt_verify_hs256_signature (const gchar * token,
     const guint8 * secret, gsize secret_len, const gchar * expected_key_id,

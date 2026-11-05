@@ -49,6 +49,7 @@ PROTECTED = (
     "wyl_session_get_service_issued_at_seconds_private",
     "wyl_session_get_service_expires_at_seconds_private",
     "wyl_jwt_sign_hs256_service",
+    "wyl_jwt_sign_hs256_data_credential",
 )
 
 # #358 adds immutable publication-ticket validation only at this exact
@@ -77,9 +78,16 @@ MANIFEST["wyl_jwt_sign_hs256_service"] = {
     "tests/test-jwt.c": 5,
     "tests/test-daemon-http-decide.c": 4,
 }
+# #1475: the data-credential token signer.
+MANIFEST["wyl_jwt_sign_hs256_data_credential"] = {
+    "wyrelog/auth/jwt-private.h": 1,
+    "wyrelog/auth/service-jwt-private.c": 1,
+    "tests/test-jwt.c": 3,
+}
 for symbol in PROTECTED:
     if symbol not in {"wyl_session_new_service_detached",
-                      "wyl_jwt_sign_hs256_service"}:
+                      "wyl_jwt_sign_hs256_service",
+                      "wyl_jwt_sign_hs256_data_credential"}:
         MANIFEST[symbol]["wyrelog/daemon/http.c"] = (
             5 if symbol == "wyl_session_get_auth_method_private" else
             2 if symbol == "wyl_session_is_active_private" else 1)
