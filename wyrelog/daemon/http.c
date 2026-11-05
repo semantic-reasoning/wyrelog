@@ -290,7 +290,20 @@ typedef struct
   gboolean service_authenticated;
   /* Held from bearer resolution through the service decision. */
   WylServiceAuthReadLease *service_lease;
+  /* #1475: set only when the bearer is a data credential's.  The actor is
+   * then the credential id, never a user, and the credential is what the
+   * per-use checks read. */
+  WylDataCredentialInfo *data_credential;
 } WylDaemonAuthContext;
+
+/* #1475: whether a resolver call site accepts a data-credential bearer.
+ * Only the shared authorizer does; it then refuses the bearer on every route
+ * that has not declared a data scope. */
+typedef enum
+{
+  WYL_DAEMON_BEARER_ADMIT_PRINCIPALS = 0,
+  WYL_DAEMON_BEARER_ADMIT_DATA_CREDENTIAL,
+} WylDaemonBearerAdmission;
 
 typedef struct _WylHumanRefreshResult
 {
@@ -1712,6 +1725,7 @@ wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
   g_free (auth->session_id);
   g_free (auth->actor);
   g_free (auth->tenant);
+  g_clear_pointer (&auth->data_credential, wyl_data_credential_info_free);
   if (auth->service_lease != NULL)
     (void) wyl_daemon_auth_context_release_service_lease (auth, NULL,
         "auth_context_fallback", "unwound");
@@ -6683,10 +6697,40 @@ lookup_bearer_token (SoupServerMessage *msg)
  * lease of their own on the same thread, which the coordination authority
  * refuses while one is already held, so retaining unconditionally turns every
  * service-bearer management request into WYRELOG_E_BUSY. */
+#ifdef WYL_HAS_AUDIT
+/* #1475: the first per-use check.  A data-credential bearer stands only
+ * while the credential it names is active, unexpired and of the generation
+ * it was issued for, so a revoked, rotated or expired credential stops its
+ * bearers at their next use. */
+static wyrelog_error_t
+data_credential_session_resolve (WylDaemonHttpContext *ctx,
+    const wyl_jwt_access_claims_t *claims, WylDaemonAuthContext *out_auth)
+{
+  WylDataCredentialInfo *info = g_new0 (WylDataCredentialInfo, 1);
+  wyrelog_error_t rc = wyl_policy_store_data_credential_lookup
+        (wyl_handle_get_policy_store (ctx->handle), claims->credential_id,
+          info);
+  if (rc != WYRELOG_E_OK || !g_str_equal (info->state, "active")
+      || info->expires_at_us <= data_credential_now_us (ctx)
+      || info->generation != claims->credential_generation
+      || !g_str_equal (info->tenant_id, claims->tenant)) {
+    wyl_data_credential_info_free (info);
+    return WYRELOG_E_POLICY;
+  }
+  out_auth->session_id = g_strdup (claims->session_id);
+  out_auth->actor = g_strdup (claims->credential_id);
+  out_auth->tenant = g_strdup (info->tenant_id);
+  out_auth->bearer = TRUE;
+  out_auth->data_credential = info;
+  return WYRELOG_E_OK;
+}
+#endif
+
 static wyrelog_error_t
 resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     const gchar *token, WylDaemonAuthContext *out_auth,
-    const gchar **out_auth_error_code, gboolean retain_service_lease)
+    const gchar **out_auth_error_code, WylDaemonBearerAdmission admission,
+    gboolean retain_service_lease)
 {
   if (out_auth_error_code != NULL)
     *out_auth_error_code = NULL;
@@ -6897,6 +6941,22 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     wyl_jwt_access_claims_clear (&claims);
     return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_POLICY;
   }
+  /* #1475: a data-credential bearer resolves only where it was admitted, and
+   * only while its credential is live; it never reaches the human tail. */
+  if (g_strcmp0 (claims.auth_method, "data_credential") == 0) {
+#ifdef WYL_HAS_AUDIT
+    rc = admission == WYL_DAEMON_BEARER_ADMIT_DATA_CREDENTIAL ?
+        data_credential_session_resolve (ctx, &claims, out_auth) :
+        WYRELOG_E_POLICY;
+#else
+    (void) admission;
+    rc = WYRELOG_E_POLICY;
+#endif
+    if (rc != WYRELOG_E_OK)
+      wyl_daemon_auth_context_clear (out_auth);
+    wyl_jwt_access_claims_clear (&claims);
+    return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  }
   /*
    * Direct JWT-claims tenant gate (defense-in-depth, see function
    * header comment). Runs immediately after signature verify and
@@ -6981,7 +7041,7 @@ wyl_daemon_http_resolve_bearer_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   WylDaemonAuthContext auth = { 0 };
   wyrelog_error_t rc = resolve_bearer_session (server, ctx, token, &auth,
-          NULL, FALSE);
+          NULL, WYL_DAEMON_BEARER_ADMIT_PRINCIPALS, FALSE);
   if (rc == WYRELOG_E_OK) {
     *out_session_id = g_steal_pointer (&auth.session_id);
     *out_actor = g_steal_pointer (&auth.actor);
@@ -7968,7 +8028,7 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
         ? resolve_session_token_auth (server, ctx, session_token, &auth,
             &auth_tenant_error)
         : resolve_bearer_session (server, ctx, bearer_token, &auth,
-            &auth_tenant_error, FALSE);
+            &auth_tenant_error, WYL_DAEMON_BEARER_ADMIT_PRINCIPALS, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error,
           "fact_status_auth_required");
@@ -8745,6 +8805,74 @@ decide_reply_finish (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
       SOUP_MEMORY_COPY, success_body, strlen (success_body));
 }
 
+/* #1475: what a data route declares before it authorizes, so that a data
+ * credential may be judged against it.  A route that declares nothing
+ * refuses every data credential. */
+typedef struct
+{
+  const gchar *tenant;
+  const gchar *graph;
+  /* The route writes no audit row of its own for an allowed use. */
+  gboolean audit_allowed_use;
+} WylDaemonDataRouteScope;
+
+#define WYL_DAEMON_DATA_ROUTE_SCOPE "wyl-data-route-scope"
+
+/* Records one use of a data credential, allowed or refused.  An audit that
+ * cannot be written fails the request closed. */
+static gboolean
+data_credential_audit_use (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
+    const WylDaemonAuthContext *auth, const gchar *action,
+    const WylDaemonDataRouteScope *scope, const gchar *refused)
+{
+  const WylDataCredentialInfo *info = auth->data_credential;
+  g_autofree gchar *resource = scope != NULL && scope->graph != NULL ?
+      g_strdup_printf ("%s/%s", info->tenant_id, scope->graph) :
+      g_strdup (info->tenant_id);
+  g_autofree gchar *summary = g_strdup_printf ("issuer=%s;permission=%s;%s%s",
+          info->issuer_subject_id, action != NULL ? action : "none",
+          refused != NULL ? "refused=" : "result=allow",
+          refused != NULL ? refused : "");
+  g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (event, info->credential_id);
+  wyl_audit_event_set_action (event, "data_token_use");
+  wyl_audit_event_set_resource_id (event, resource);
+  wyl_audit_event_set_deny_reason (event, summary);
+  wyl_audit_event_set_deny_origin (event, info->credential_id);
+  wyl_audit_event_set_request_id (event, ensure_request_id_header (msg));
+  wyl_audit_event_set_decision (event, refused != NULL ? WYL_DECISION_DENY :
+      WYL_DECISION_ALLOW);
+  return wyl_audit_emit (ctx->handle, event) == WYRELOG_E_OK;
+}
+
+/* The per-use checks of a data credential (#1475).  Check 1, that the
+ * credential is live, ran when its bearer resolved.  Every refusal is
+ * audited. */
+static gboolean
+data_credential_authorize_use (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, const WylDaemonAuthContext *auth,
+    const gchar *action, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk)
+{
+  (void) guard_timestamp;
+  (void) guard_loc_class;
+  (void) guard_risk;
+  const WylDaemonDataRouteScope *scope =
+      g_object_get_data (G_OBJECT (msg), WYL_DAEMON_DATA_ROUTE_SCOPE);
+  /* A route that declared no data scope, or authorizes no data action, is
+   * never reachable with a data credential. */
+  const gchar *refused = scope == NULL || action == NULL ? "scope" : NULL;
+  if (!data_credential_audit_use (msg, ctx, auth, action, scope, refused)) {
+    set_json_error (msg, 500, "data_credential_failed");
+    return FALSE;
+  }
+  if (refused != NULL) {
+    set_json_error (msg, 403, "data_credential_denied");
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static gboolean
 authorize_guarded_session_action_extended (SoupServer *server,
     SoupServerMessage *msg,
@@ -8811,13 +8939,20 @@ authorize_guarded_session_action_extended (SoupServer *server,
     }
   } else {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-            bearer_token, &auth, &auth_tenant_error, FALSE);
+            bearer_token, &auth, &auth_tenant_error,
+            WYL_DAEMON_BEARER_ADMIT_DATA_CREDENTIAL, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
       attach_bearer_challenge (msg, "invalid_token");
       return FALSE;
     }
   }
+  /* A data credential is never a decision subject: its use is judged by the
+   * per-use checks against the route's declared scope, or refused. */
+  if (auth.data_credential != NULL
+      && !data_credential_authorize_use (msg, ctx, &auth, action, timestamp,
+      guard_loc_class, risk))
+    return FALSE;
   if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))
     return FALSE;
   if (resource != NULL &&
@@ -8828,7 +8963,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
 
   /* NULL action authenticates and validates guard input for ownership paths;
    * their authority is checked inside WRITE. */
-  if (action != NULL) {
+  if (action != NULL && auth.data_credential == NULL) {
     g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
     g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
     wyl_decide_req_set_subject_id (req, auth.actor);
@@ -8872,6 +9007,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
     out_auth->actor = g_steal_pointer (&auth.actor);
     out_auth->tenant = g_steal_pointer (&auth.tenant);
     out_auth->bearer = auth.bearer;
+    out_auth->data_credential = g_steal_pointer (&auth.data_credential);
   }
   if (out_actor != NULL)
     *out_actor = actor_copy;
@@ -9225,7 +9361,7 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-          bearer_token, &auth, &auth_tenant_error, FALSE);
+          bearer_token, &auth, &auth_tenant_error, WYL_DAEMON_BEARER_ADMIT_PRINCIPALS, FALSE);
   if (auth_rc != WYRELOG_E_OK) {
     service_credential_handoff_log_refusal (action,
         auth_tenant_error != NULL ? "bearer-session-tenant-resolution" :
@@ -18364,7 +18500,7 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   const gchar *tenant_error = NULL;
   if (resolve_bearer_session (server, ctx, bearer, out_auth,
-      &tenant_error, FALSE) != WYRELOG_E_OK ||
+      &tenant_error, WYL_DAEMON_BEARER_ADMIT_PRINCIPALS, FALSE) != WYRELOG_E_OK ||
       g_strcmp0 (actor, out_auth->actor) != 0) {
     set_json_error (msg, 401, "mfa_enroll_auth_required");
     attach_bearer_challenge (msg, "invalid_token");
@@ -21023,7 +21159,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   if (has_bearer_token) {
     const gchar *auth_tenant_error = NULL;
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-            bearer_token, &bearer_auth, &auth_tenant_error, FALSE);
+            bearer_token, &bearer_auth, &auth_tenant_error, WYL_DAEMON_BEARER_ADMIT_PRINCIPALS, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error, "logout_auth_required");
       attach_bearer_challenge (msg, "invalid_token");
@@ -21161,7 +21297,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-          bearer_token, &auth, &auth_tenant_error, TRUE);
+          bearer_token, &auth, &auth_tenant_error, WYL_DAEMON_BEARER_ADMIT_PRINCIPALS, TRUE);
   if (auth_rc != WYRELOG_E_OK) {
     set_auth_failure_error (msg, auth_tenant_error, "decide_auth_required");
     attach_bearer_challenge (msg, "invalid_token");

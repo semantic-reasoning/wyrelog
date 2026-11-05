@@ -25204,6 +25204,9 @@ data_credential_use_fixture (ServiceDenialEnv *env)
   grant_armed_permission (store, "dc-alice", "wr.datalog.query", "dc-1475");
   grant_armed_permission (store, "dc-alice", "wr.fact.read", "dc-1475");
   grant_armed_permission (store, "dc-alice", "wr.fact.append", "dc-1475");
+  grant_armed_permission (store, "dc-alice", "wr.fact.retract", "dc-1475");
+  grant_armed_permission (store, "dc-alice", "wr.fact.update", "dc-1475");
+  grant_armed_permission (store, "dc-alice", "wr.datalog.infer", "dc-1475");
   g_assert_cmpint (wyl_handle_reload_engine_pair (env->handle), ==,
       WYRELOG_E_OK);
   return alice;
@@ -25302,6 +25305,168 @@ data_token_exchange_audit_rows (wyl_policy_store_t *store,
   return scan.rows;
 }
 
+
+typedef struct
+{
+  const gchar *credential_id;
+  guint refused;
+} DataTokenUseAuditScan;
+
+static wyrelog_error_t
+data_token_use_audit_scan (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) resource_id;
+  (void) deny_origin;
+  (void) request_id;
+  DataTokenUseAuditScan *scan = user_data;
+  if (g_strcmp0 (action, "data_token_use") == 0
+      && g_strcmp0 (subject_id, scan->credential_id) == 0
+      && decision == WYL_DECISION_DENY
+      && g_str_has_prefix (deny_reason, "issuer=dc-alice;permission=")
+      && g_str_has_suffix (deny_reason, ";refused=scope"))
+    scan->refused++;
+  return WYRELOG_E_OK;
+}
+
+/* #1475: a data credential holding every operation is still refused on
+ * every route that is not a data route, by default rather than by each
+ * route remembering to refuse it, and every refusal is audited.  The owner's
+ * own bearer passes the same requests' authorization, so each refusal comes
+ * from the credential, not from the request. */
+static void
+check_data_credential_never_routes (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  g_autofree gchar *secret = NULL;
+  g_autofree gchar *id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query,infer,insert,update,delete", "*", "3600", &secret);
+  g_autofree gchar *token = data_credential_bearer (&env, id, secret);
+  gchar rq[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (rq, sizeof rq), ==, WYRELOG_E_OK);
+  g_autofree gchar *issue_body = data_credential_issue_body (rq, "query", "*",
+          "3600");
+  g_autofree gchar *rotate_body = g_strdup_printf ("{\"credential_id\":\"%s\","
+          "\"request_id\":\"%s\"}", id, rq);
+  g_autofree gchar *revoke_body = g_strdup_printf ("{\"credential_id\":\"%s\"}",
+          id);
+  g_autofree gchar *seal_body = g_strdup_printf ("{\"version\":\"1\","
+          "\"request_id\":\"%s\"}", rq);
+  g_autofree gchar *transfer_query = g_strdup_printf ("name=dc-1475&"
+          "to=dc-bob&request_id=%s", rq);
+  g_autofree gchar *delete_query = g_strdup_printf ("name=dc-1475&"
+          "request_id=%s", rq);
+  const gchar *probes[][4] = {
+    {"GET", "/tenants/data-credentials", "name=dc-1475", NULL},
+    {"POST", "/tenants/data-credentials/issue", "name=dc-1475", issue_body},
+    {"POST", "/tenants/data-credentials/rotate", "name=dc-1475", rotate_body},
+    {"POST", "/tenants/data-credentials/revoke", "name=dc-1475", revoke_body},
+    {"POST", "/tenants/seal", "name=dc-1475", seal_body},
+    {"POST", "/tenants/transfer-owner", transfer_query, NULL},
+    {"POST", "/policy/permissions/grant", "subject=dc-bob&perm=wr.fact.read&scope=dc-1475", NULL},
+    {"POST", "/policy/permissions/revoke", "subject=dc-bob&perm=wr.fact.read&scope=dc-1475", NULL},
+    {"POST", "/policy/permissions/transition", "subject=dc-bob&perm=wr.fact.read&scope=dc-1475&event=grant", NULL},
+    {"POST", "/policy/roles/grant", "subject=dc-bob&role=wr.analyst&scope=dc-1475", NULL},
+    {"POST", "/policy/roles/revoke", "subject=dc-bob&role=wr.analyst&scope=dc-1475", NULL},
+    {"GET", "/users", "", NULL},
+    {"POST", "/tenants/create", "name=dc-new", NULL},
+    {"POST", "/tenants/unseal", "name=dc-1475", seal_body},
+    {"POST", "/tenants/delete", delete_query, NULL},
+    {"GET", "/audit/events", "", NULL},
+#ifdef WYL_HAS_FACT_STORE
+    /* The fact routes exist only with the fact store. */
+    {"POST", "/graphs/create", "graph=g9", NULL},
+    {"POST", "/graphs/seal", "graph=g1", NULL},
+    {"GET", "/graphs", "", NULL},
+    {"POST", "/facts/schema/register",
+     "graph=g1&namespace=n&relation=r&schema_version=1", "{}"},
+    {"POST", "/facts/rule-pack/register", "graph=g1", "{}"},
+    {"GET", "/facts/quota", "", NULL},
+    {"POST", "/facts/quota", "limit=1", NULL},
+    {"DELETE", "/facts/dc-1475/g1/rows:forget",
+     "namespace=n&schema_version=1", NULL},
+    {"POST", "/facts/dc-1475/g1/rows:repair", "namespace=n&schema_version=1",
+     NULL},
+    {"POST", "/facts/restore/status", "", "{\"scope\":\"tenant\","
+     "\"tenant_id\":\"dc-1475\",\"graph_id\":\"\",\"bundle_path\":\"\","
+     "\"trusted_manifest_sha256\":\"\",\"operation_uuid\":"
+     "\"01890c10-2e3f-7000-8000-000000000001\",\"expected_revision\":\"0\","
+     "\"confirmed\":\"false\"}"},
+#endif
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (probes); i++) {
+    g_autofree gchar *query = g_strdup_printf ("tenant=%s&%s%s"
+            "guard_timestamp=123&guard_loc_class=public&guard_risk=0",
+            g_str_has_prefix (probes[i][1], "/users")
+            || g_str_has_prefix (probes[i][1], "/facts/restore") ?
+            "__wr_default" : "dc-1475",
+            probes[i][2], probes[i][2][0] ? "&" : "");
+    g_autofree gchar *refused = NULL, *human = NULL;
+    guint status = 0, human_status = 0;
+    g_assert_cmpint (send_raw_service_principal_bearer (env.session,
+        probes[i][0], env.base_url, probes[i][1], query, token, probes[i][3],
+        &status, &refused), ==, 0);
+    if (status != 403 || g_strcmp0 (refused,
+        "{\"error\":\"data_credential_denied\"}") != 0)
+      g_printerr ("never route %s %s: %u %s\n", probes[i][0], probes[i][1],
+          status, refused);
+    g_assert_cmpuint (status, ==, 403);
+    g_assert_cmpstr (refused, ==, "{\"error\":\"data_credential_denied\"}");
+    g_assert_cmpint (send_raw_service_principal_bearer (env.session,
+        probes[i][0], env.base_url, probes[i][1], query, alice, probes[i][3],
+        &human_status, &human), ==, 0);
+    g_assert_null (strstr (human, "data_credential_denied"));
+  }
+  DataTokenUseAuditScan scan = { .credential_id = id };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (env.handle), data_token_use_audit_scan,
+      &scan), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (scan.refused, ==, G_N_ELEMENTS (probes));
+
+  /* Where a bearer resolves outside the shared authorizer, a data
+   * credential is not admitted at all. */
+  static const gchar *const unadmitted[][3] = {
+    {"POST", "/auth/logout", "tenant=dc-1475"},
+    {"GET", "/facts/status", "tenant=dc-1475"},
+    {"GET", "/service-principals",
+     "guard_timestamp=123&guard_loc_class=public&guard_risk=0"},
+    {"POST", "/service-management-authority/arm",
+     "guard_timestamp=123&guard_loc_class=public&guard_risk=0"},
+    {"POST", "/decide",
+     "tenant=dc-1475&user=dc-alice&perm=wr.fact.read&session_token=x"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (unadmitted); i++) {
+    g_autofree gchar *body = NULL;
+    guint status = 0;
+    g_assert_cmpint (send_raw_service_principal_bearer (env.session,
+        unadmitted[i][0], env.base_url, unadmitted[i][1],
+        unadmitted[i][2], token, NULL, &status, &body), ==, 0);
+    if (status != 401)
+      g_printerr ("unadmitted %s: %u %s\n", unadmitted[i][1], status, body);
+    g_assert_cmpuint (status, ==, 401);
+  }
+
+  /* A bearer stops at its next use once its credential has expired, though
+   * the bearer itself has not.  The clock only runs forward, so last. */
+  g_autofree gchar *short_secret = NULL;
+  g_autofree gchar *short_id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &short_secret);
+  g_autofree gchar *short_token = data_credential_bearer (&env, short_id,
+          short_secret);
+  g_free (data_credential_request (&env, short_token, "GET", NULL, "dc-1475",
+      NULL, 403));
+  wyl_daemon_http_advance_data_credential_clock_for_test (env.http.server,
+      2 * G_TIME_SPAN_HOUR);
+  g_free (data_credential_request (&env, short_token, "GET", NULL, "dc-1475",
+      NULL, 401));
+  service_denial_env_clear (&env);
+}
+
 static void
 check_data_credential_exchange_contract (void)
 {
@@ -25379,8 +25544,7 @@ check_data_credential_exchange_contract (void)
   g_assert_cmpuint (data_token_exchange_audit_rows (store, id,
       &issuer_named), ==, 2);
 
-  /* Until the bearer resolver learns data credentials (#1475), the token
-   * authenticates nothing. */
+  /* Outside the shared authorizer the bearer is not admitted at all. */
   g_autofree gchar *sid = NULL, *actor = NULL, *tenant = NULL;
   g_assert_cmpint (wyl_daemon_http_resolve_bearer_for_test (env.http.server,
       token, &sid, &actor, &tenant), ==, WYRELOG_E_POLICY);
@@ -26489,6 +26653,7 @@ main (void)
   check_tenant_data_credential_mutation_contract ();
 #ifdef WYL_HAS_AUDIT
   check_data_credential_exchange_contract ();
+  check_data_credential_never_routes ();
 #endif
   gint rc = default_variant_checks ();
   if (rc != 0)
