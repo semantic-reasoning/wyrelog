@@ -9003,21 +9003,25 @@ authorize_data_route (SoupServer *server, SoupServerMessage *msg,
     const gchar *tenant, const gchar *graph, gboolean audit_allowed_use,
     const gchar *auth_required_code, const gchar *invalid_code,
     const gchar *denied_code, const gchar *failed_code,
-    gchar **out_actor, gchar **out_issuer)
+    WylDaemonAuthContext *out_auth, gchar **out_actor)
 {
   WylDaemonDataRouteScope scope = {
     .tenant = tenant,.graph = graph,.audit_allowed_use = audit_allowed_use,
   };
   g_object_set_data (G_OBJECT (msg), WYL_DAEMON_DATA_ROUTE_SCOPE, &scope);
-  g_auto (WylDaemonAuthContext) auth = { 0 };
   gboolean allowed = authorize_guarded_session_action_extended (server, msg,
           query, ctx, action, tenant, auth_required_code, invalid_code,
-          denied_code, failed_code, &auth, out_actor, NULL, NULL, NULL, NULL);
+          denied_code, failed_code, out_auth, out_actor, NULL, NULL, NULL, NULL);
   g_object_set_data (G_OBJECT (msg), WYL_DAEMON_DATA_ROUTE_SCOPE, NULL);
-  if (allowed && out_issuer != NULL)
-    *out_issuer = auth.data_credential != NULL ?
-        g_strdup (auth.data_credential->issuer_subject_id) : NULL;
   return allowed;
+}
+
+/* The issuer a data-credential use is attributed to, or NULL for a user. */
+static const gchar *
+data_credential_issuer_of (const WylDaemonAuthContext *auth)
+{
+  return auth->data_credential != NULL ?
+         auth->data_credential->issuer_subject_id : NULL;
 }
 #endif
 
@@ -14948,9 +14952,10 @@ facts_verify_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   g_autofree gchar *actor = NULL;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
   if (!authorize_data_route (server, msg, query, ctx, "wr.fact.read", tenant,
       graph, TRUE, "fact_verify_auth_required", "invalid_fact_verify_auth",
-      "fact_verify_denied", "fact_verify_auth_failed", &actor, NULL))
+      "fact_verify_denied", "fact_verify_auth_failed", &auth, &actor))
     return;
   (void) actor;
   wyl_policy_store_t *policy = wyl_handle_get_policy_store (ctx->handle);
@@ -16256,11 +16261,13 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylDaemonHttpContext *ctx = user_data;
   g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
-  g_autofree gchar *actor = NULL, *issuer = NULL;
+  g_autofree gchar *actor = NULL;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
   if (!authorize_data_route (server, msg, auth_query, ctx, "wr.datalog.query",
       tenant, graph, FALSE, "datalog_auth_required", "invalid_datalog_auth",
-      "datalog_denied", "datalog_auth_failed", &actor, &issuer))
+      "datalog_denied", "datalog_auth_failed", &auth, &actor))
     return;
+  const gchar *issuer = data_credential_issuer_of (&auth);
 
   GraphLookupCtx lookup = { 0 };
   wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
@@ -16344,9 +16351,9 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
 
 static wyrelog_error_t
 emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
-    const gchar *tenant, const gchar *graph, const gchar *namespace_id,
-    const gchar *relation, const gchar *batch_id, wyl_fact_store_op_t op,
-    gboolean inserted, const gchar *request_id)
+    const gchar *issuer, const gchar *tenant, const gchar *graph,
+    const gchar *namespace_id, const gchar *relation, const gchar *batch_id,
+    wyl_fact_store_op_t op, gboolean inserted, const gchar *request_id)
 {
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_lock (&ctx->lock);
@@ -16366,13 +16373,18 @@ emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
   wyl_audit_event_set_action (ev, action);
   wyl_audit_event_set_resource_id (ev, resource);
   wyl_audit_event_set_deny_reason (ev, batch_id);
-  wyl_audit_event_set_deny_origin (ev, inserted ? "inserted" : "duplicate");
+  /* A write through a data credential names its issuer (#1475). */
+  g_autofree gchar *origin = g_strdup_printf ("%s%s%s",
+          inserted ? "inserted" : "duplicate",
+          issuer != NULL ? " issuer=" : "", issuer != NULL ? issuer : "");
+  wyl_audit_event_set_deny_origin (ev, origin);
   wyl_audit_event_set_request_id (ev, request_id);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   return wyl_audit_emit (ctx->handle, ev);
 #else
   (void) ctx;
   (void) actor;
+  (void) issuer;
   (void) tenant;
   (void) graph;
   (void) namespace_id;
@@ -16810,8 +16822,8 @@ static void
 facts_graph_update_commit (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
     wyl_policy_store_t *policy, const wyl_policy_fact_graph_info_t *graph_info,
     WylFactReplayAdmission *replay_admission, const gchar *auth_tenant,
-    const gchar *actor, const gchar *tenant, const gchar *graph,
-    const gchar *namespace_id, const gchar *batch_id,
+    const gchar *actor, const gchar *issuer, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *batch_id,
     const gchar *idempotency_key)
 {
   const gchar *fail_code = "fact_update_failed";
@@ -17008,7 +17020,8 @@ facts_graph_update_commit (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
   wyrelog_error_t audit_rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK) {
     g_autofree gchar *relations = fact_graph_update_relations (parts);
-    audit_rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
+    audit_rc = emit_fact_op_audit (ctx, actor, issuer, tenant, graph,
+            namespace_id,
             relations, batch_id, WYL_FACT_STORE_OP_UPDATE, inserted,
             request_id);
 #ifdef WYL_HAS_AUDIT
@@ -17087,10 +17100,9 @@ facts_graph_update_handler (SoupServer *server, SoupServerMessage *msg,
   g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
   g_auto (WylDaemonAuthContext) auth_context = { 0 };
   g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action_extended (server, msg, auth_query, ctx,
-      "wr.fact.update", tenant, "fact_auth_required", "invalid_fact_auth",
-      "fact_denied", "fact_auth_failed", &auth_context, &actor, NULL, NULL,
-      NULL, NULL))
+  if (!authorize_data_route (server, msg, auth_query, ctx, "wr.fact.update",
+      tenant, graph, FALSE, "fact_auth_required", "invalid_fact_auth",
+      "fact_denied", "fact_auth_failed", &auth_context, &actor))
     return;
 
   g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
@@ -17129,8 +17141,9 @@ facts_graph_update_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_daemon_policy_write_observe_cleanup_resource (&write,
       WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
   facts_graph_update_commit (msg, ctx, write.store, &lookup.info,
-      replay_admission, auth_context.tenant, actor, tenant, graph,
-      namespace_id, batch_id, idempotency_key);
+      replay_admission, auth_context.tenant, actor,
+      data_credential_issuer_of (&auth_context), tenant, graph, namespace_id,
+      batch_id, idempotency_key);
   graph_lookup_clear (&lookup);
 }
 
@@ -17824,12 +17837,11 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
   g_auto (WylDaemonAuthContext) auth_context = { 0 };
   g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action_extended (server, msg, auth_query, ctx,
+  if (!authorize_data_route (server, msg, auth_query, ctx,
       op == FACT_HTTP_OP_RETRACT ? "wr.fact.retract"
       : op == FACT_HTTP_OP_UPDATE ? "wr.fact.update" : "wr.fact.append",
-      tenant, "fact_auth_required", "invalid_fact_auth",
-      "fact_denied", "fact_auth_failed", &auth_context, &actor, NULL, NULL,
-      NULL, NULL))
+      tenant, graph, FALSE, "fact_auth_required", "invalid_fact_auth",
+      "fact_denied", "fact_auth_failed", &auth_context, &actor))
     return;
 
   const gchar *fail_code = op == FACT_HTTP_OP_RETRACT ? "fact_retract_failed"
@@ -18074,7 +18086,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
    * not happen. */
   wyrelog_error_t audit_rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK) {
-    audit_rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
+    audit_rc = emit_fact_op_audit (ctx, actor,
+            data_credential_issuer_of (&auth_context), tenant, graph,
+            namespace_id,
             relation, batch_id, store_op, inserted, request_id);
     /* The response already tells this one client the audit was lost.  Tell
      * the operator too: the mutation is durable and its audit record is not,

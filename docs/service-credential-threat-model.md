@@ -92,10 +92,15 @@ confinement, not on a network security layer:
 **Status: partly implemented.** This section records the boundary that the
 implementation units must build: #1473 (storage), #1474 (management routes),
 #1475 (exchange and per-use checks), #1476 (lifecycle revocation) and #1477
-(`wyctl` and runbook). Storage and the management routes have landed, so a
-tenant owner can issue, list, rotate and revoke data credentials. Until #1475
-lands, no route accepts one. Where the shipped behaviour differs from this
-section, #1477 corrects this document.
+(`wyctl` and runbook). Storage, the management routes, the exchange and the
+per-use checks have landed: a tenant owner can issue, list, rotate and revoke
+data credentials, and a program can exchange one at `/auth/service-token` and
+use its bearer on the data routes. A credential's last-used time is the time
+of its last exchange. An exchange of an unknown credential id is refused
+sooner than one with a wrong secret, so its timing can tell whether an id
+exists; ids are not secrets, and the exchange limiter applies. Until #1476
+lands, lifecycle events do not revoke data credentials. Where the shipped
+behaviour differs from this section, #1477 corrects this document.
 
 ### Why the boundary moves
 
