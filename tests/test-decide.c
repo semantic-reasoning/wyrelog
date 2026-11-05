@@ -1642,6 +1642,81 @@ check_decide_evaluates_window_guard (void)
  * /decide allow at a fresh tenant remains gated by Wall 2 and is out of
  * scope for this test.
  */
+/*
+ * #1475: a data credential works while its issuer is logged out, so the
+ * issuer is decided as authenticated for that check alone.  Nothing else is
+ * relaxed: an unarmed grant still denies (the flag never takes the #762
+ * arming), a disabled issuer still denies, and nothing persists.
+ */
+static gint
+check_decide_data_credential_issuer (void)
+{
+  const gchar *issuer = "dc-issuer-1475";
+  const gchar *action = "wr.decide-permission-dc";
+  gint64 probe_row[2];
+  gboolean present = TRUE;
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 730;
+  register_test_human (wyl_handle_get_policy_store (handle), issuer);
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 731;
+  if (insert_service_grant_fixture (handle, issuer, action, "dc-armed")
+      != WYRELOG_E_OK
+      || insert_service_grant_unarmed_fixture (handle, issuer, action,
+      "dc-unarmed") != WYRELOG_E_OK)
+    return 732;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, issuer);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, "dc-armed");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  /* Without the flag, an issuer with no login denies not_authenticated. */
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY
+      || g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+      "not_authenticated") != 0)
+    return 733;
+  /* With it, an armed grant allows. */
+  wyl_decide_req_set_data_credential_issuer_authenticated (req, TRUE);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 734;
+  /* An unarmed grant still denies: the flag arms nothing. */
+  wyl_decide_req_set_resource_id (req, "dc-unarmed");
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY
+      || g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed")
+      != 0)
+    return 735;
+  /* Nothing persists. */
+  if (intern_symbol (handle, issuer, &probe_row[0]) != WYRELOG_E_OK
+      || intern_symbol (handle, "authenticated", &probe_row[1])
+      != WYRELOG_E_OK
+      || wyl_handle_engine_contains (handle, "principal_state", probe_row, 2,
+      &present) != WYRELOG_E_OK || present)
+    return 736;
+  /* A disabled issuer still denies. */
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_begin_mutation (store) != WYRELOG_E_OK
+      || sqlite3_exec (wyl_policy_store_get_db (store),
+      "UPDATE human_users SET state='disabled',generation=generation+1 "
+      "WHERE subject_id='dc-issuer-1475'", NULL, NULL, NULL) != SQLITE_OK
+      || wyl_policy_store_commit_mutation (store) != WYRELOG_E_OK)
+    return 737;
+  wyl_decide_req_set_resource_id (req, "dc-armed");
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY
+      || g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "user_inactive")
+      != 0)
+    return 738;
+  return 0;
+}
+
 static gint
 check_decide_service_bearer_injects_principal_state (void)
 {
@@ -1706,7 +1781,7 @@ check_decide_service_bearer_injects_principal_state (void)
       != 0)
     return 715;
 
-  return 0;
+  return check_decide_data_credential_issuer ();
 }
 
 /*

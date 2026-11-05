@@ -27,6 +27,7 @@ struct _wyl_decide_req
   wyl_guard_window_matcher_t guard_in_window;
   gpointer guard_in_window_user_data;
   gboolean service_bearer_authenticated;
+  gboolean data_credential_issuer_authenticated;
 };
 
 struct _wyl_decide_resp
@@ -228,6 +229,22 @@ wyl_decide_req_get_service_bearer_authenticated (const wyl_decide_req_t *req)
 {
   g_return_val_if_fail (req != NULL, FALSE);
   return req->service_bearer_authenticated;
+}
+
+void
+wyl_decide_req_set_data_credential_issuer_authenticated (wyl_decide_req_t
+    *req, gboolean authenticated)
+{
+  g_return_if_fail (req != NULL);
+  req->data_credential_issuer_authenticated = authenticated;
+}
+
+gboolean
+wyl_decide_req_get_data_credential_issuer_authenticated (const
+    wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, FALSE);
+  return req->data_credential_issuer_authenticated;
 }
 
 wyl_decide_resp_t *
@@ -922,7 +939,10 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
      */
     gint64 perm_state_row[4] = { 0, 0, 0, 0 };
     gboolean perm_state_injected = FALSE;
-    if (wyl_decide_req_get_service_bearer_authenticated (req)) {
+    /* #1475: a data credential's issuer is authenticated the same way, and
+     * for nothing else: it never takes the #762 arming below. */
+    if (wyl_decide_req_get_service_bearer_authenticated (req)
+        || wyl_decide_req_get_data_credential_issuer_authenticated (req)) {
       gint64 authenticated_id = 0;
       rc = wyl_engine_session_intern_symbol (session, "authenticated",
               &authenticated_id);
