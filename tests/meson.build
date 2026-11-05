@@ -1595,7 +1595,7 @@ if host_machine.system() != 'windows' and build_client
             test_human_user_store.full_path()],
           depends : [wyrelogd_exe, wyctl_exe, test_human_user_store],
           is_parallel : false,
-          timeout : 360,
+          timeout : 600,
         )
       endif
       test('service-credential-provider-preflight-e2e', sh,

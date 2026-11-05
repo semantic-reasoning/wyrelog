@@ -828,6 +828,7 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.policy.write", "policy write", "critical"},
   {"wr.policy.grant_role", "policy role grant", "critical"},
   {"wr.tenant.manage", "tenant manage", "critical"},
+  {"wr.tenant.create", "tenant create", "critical"},
   {"wr.login.skip_mfa", "login skip mfa", "critical"},
   {"wr.stream.read", "stream read", "basic"},
   {"wr.stream.write_reserved", "reserved stream write", "critical"},

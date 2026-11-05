@@ -7820,7 +7820,7 @@ check_audit_so_d_permission_taxonomy (void)
   };
   static const gchar *const required_control_permissions[] = {
     "wr.sys.admin", "wr.svc.admin", "wr.policy.write",
-    "wr.policy.grant_role", "wr.svc.grant_role", "wr.tenant.manage",
+    "wr.policy.grant_role", "wr.svc.grant_role", "wr.tenant.manage", "wr.tenant.create",
     "wr.sys.key_rotate", "wr.sys.reload_template",
     "wr.service_principal.manage", "wr.service_credential.manage",
     "wr.service.self_authorize", "wr.svc.unfreeze", "wr.audit.write",

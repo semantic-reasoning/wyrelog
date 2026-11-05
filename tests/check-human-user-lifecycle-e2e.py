@@ -14,6 +14,100 @@ import urllib.parse
 import urllib.request
 
 
+def check_self_service(root, base, admin, cli, http, arm):
+    """Create-only humans keep their grant while exercising isolated tenants."""
+    helper = Path(__file__).with_name('human-user-auth-fixture.py')
+    users, tenants = {}, {}
+    guard = {'guard_timestamp': '123', 'guard_loc_class': 'trusted', 'guard_risk': '0'}
+
+    def login(subject, tenant='__wr_default'):
+        token = root / f'{subject}-{tenant}.token'
+        token.write_text(admin.read_text(encoding='utf-8'), encoding='utf-8')
+        token.chmod(0o600)
+        subprocess.run([sys.executable, str(helper), base, str(token), subject,
+                        str(root / f'{subject}.seed'), tenant], check=True, timeout=100)
+        return token
+
+    def read(tenant, token, status=200):
+        return http(f'/datalog/{tenant}/orders/query', token=token,
+                    query={**guard, 'tenant': tenant},
+                    body={'query': 'orders(O,A)', 'output': 'json', 'limit': 10}, status=status)
+
+    for subject in ('creator-a', 'creator-b'):
+        cli('user', 'create', '--subject', subject, token=admin)
+        cli('policy', 'permission-grant', '--subject', subject,
+            '--perm', 'wr.tenant.create', '--scope', '__wr_default', token=admin)
+        token = login(subject)
+        users[subject] = token
+        refused = cli('tenant', 'create', '--name', subject + '-dormant', token=token, success=False)
+        assert 'tenant_denied' in refused.stderr
+        arm(subject, 'wr.tenant.create', '__wr_default', admin)
+        pending = http('/auth/login', query={'username': subject})
+        http('/tenants/create', query={**guard, 'name': subject + '-nonmfa',
+             'session_token': pending['session_token']}, status=401)
+        cli('user', 'list', token=token, success=False)
+        cli('tenant', 'list', token=token, success=False)
+        for i in (1, 2):
+            tenant = f'{subject}-{i}'
+            cli('tenant', 'create', '--name', tenant, token=token)
+            assert 'changed=false' in cli('tenant', 'create', '--name', tenant, token=token).stdout
+            assert f'owner={subject}' in cli('tenant', 'show', '--name', tenant, token=token).stdout
+            for permission in ('wr.graph.manage', 'wr.schema.manage', 'wr.fact.append',
+                               'wr.fact.forget', 'wr.datalog.query'):
+                arm(subject, permission, tenant, token)
+            scoped = login(subject, tenant)
+            tenants[tenant] = (subject, scoped)
+            cli('graph', 'create', '--tenant', tenant, '--graph', 'orders', token=scoped)
+            cli('fact', 'schema', 'register', '--tenant', tenant, '--graph', 'orders',
+                '--namespace', 'shop', '--relation', 'orders', '--schema-version', '1',
+                '--columns', 'order_id:symbol,amount:int64', token=scoped)
+            http(f'/facts/{tenant}/orders/orders:append', token=scoped,
+                 query={**guard, 'tenant': tenant, 'namespace': 'shop', 'schema_version': 1,
+                        'batch_id': tenant, 'idempotency_key': tenant},
+                 body=f'order_id\tamount\n{tenant}\t42\n')
+            assert read(tenant, scoped)['rows'] == [{'O': tenant, 'A': 42}]
+            # A non-default bearer cannot create, even for its own human.
+            http('/tenants/create', token=scoped,
+                 query={**guard, 'tenant': tenant, 'name': tenant + '-nested'}, status=403)
+
+    for tenant, (subject, scoped) in tenants.items():
+        for foreign in tenants:
+            if foreign == tenant:
+                continue
+            read(foreign, scoped, status=403)
+            http(f'/facts/{foreign}/orders/orders:append', token=scoped,
+                 query={**guard, 'tenant': foreign, 'namespace': 'shop', 'schema_version': 1,
+                        'batch_id': tenant + '-attack', 'idempotency_key': tenant + '-attack'},
+                 body='order_id\tamount\nforeign\t99\n', status=403)
+            http(f'/facts/{foreign}/orders/orders:forget', method='DELETE', token=scoped,
+                 query={**guard, 'tenant': foreign, 'namespace': 'shop', 'schema_version': 1},
+                 body={'batch_id': foreign, 'operator': subject, 'reason': 'test'}, status=403)
+        foreign = 'creator-b-1' if subject == 'creator-a' else 'creator-a-1'
+        for action in ('create', 'show', 'seal', 'unseal', 'delete', 'transfer-owner'):
+            extra = ['--confirm'] if action == 'seal' else ['--to', subject] if action == 'transfer-owner' else []
+            refused = cli('tenant', action, '--name', foreign, *extra, token=users[subject], success=False)
+            expected = 'tenant_transfer_denied' if action == 'transfer-owner' else 'tenant_denied'
+            assert expected in refused.stderr, (action, refused.returncode, refused.stderr)
+        assert read(tenant, scoped)['rows'] == [{'O': tenant, 'A': 42}]
+
+    # Revoke the grant without replacing the live bearer. Existing-name no-ops
+    # must reauthorize too; ownership still permits the separate lifecycle.
+    for subject, token in users.items():
+        cli('policy', 'permission-revoke', '--subject', subject,
+            '--perm', 'wr.tenant.create', '--scope', '__wr_default', token=admin)
+        for name in (subject + '-revoked', subject + '-1'):
+            assert 'tenant_denied' in cli('tenant', 'create', '--name', name,
+                                         token=token, success=False).stderr
+    for tenant, (subject, scoped) in tenants.items():
+        http(f'/facts/{tenant}/orders/orders:forget', method='DELETE', token=scoped,
+             query={**guard, 'tenant': tenant, 'namespace': 'shop', 'schema_version': 1},
+             body={'batch_id': tenant, 'operator': subject, 'reason': 'test cleanup'})
+        assert read(tenant, scoped)['row_count'] == 0
+        cli('tenant', 'seal', '--name', tenant, '--confirm', token=users[subject])
+        cli('tenant', 'delete', '--name', tenant, token=users[subject])
+    assert not list((root / 'facts').rglob('facts.duckdb'))
+
+
 def run(daemon, wyctl, templates, inspector):
     with tempfile.TemporaryDirectory(prefix='human-lifecycle-') as directory:
         root = Path(directory)
@@ -90,6 +184,7 @@ def run(daemon, wyctl, templates, inspector):
             cli('user', 'create', '--subject', 'alice', token=admin, success=False)
             auth_helper = Path(__file__).with_name('human-user-auth-fixture.py')
             subprocess.run([sys.executable, str(auth_helper), base, str(admin), 'admin', str(root / 'admin.seed')], check=True, timeout=60)
+            check_self_service(root, base, admin, cli, http, arm)
             for action in ('disable', 'delete'):
                 args = ['user', action, '--subject', 'admin'] + (['--yes'] if action == 'delete' else [])
                 refused = cli(*args, token=admin, success=False)

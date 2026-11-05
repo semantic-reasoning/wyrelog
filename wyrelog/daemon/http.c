@@ -9212,6 +9212,7 @@ typedef struct
   gint64 guard_risk;
   const gchar *owner_tenant;
   gboolean ownership_replay;
+  gboolean creating_tenant;
   gboolean unsealing;
   const gchar *acting_capacity;
 } WylManagementReauthorization;
@@ -9335,6 +9336,35 @@ management_reauthorize_inside_write (gpointer data,
       authorization->guard_loc_class, authorization->guard_risk);
   wyl_decide_req_set_request_id (req, authorization->decision_request_id);
   rc = wyl_decide (authorization->handle, req, resp);
+  if (authorization->creating_tenant) {
+    /* Global management remains sufficient. A denied management decision is
+     * not a fallback opportunity when its guard or durable audit failed. */
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!wyl_decide_req_guard_is_satisfied (req)
+        || g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+        "audit_unavailable") == 0)
+      return WYRELOG_E_AUTH;
+    if (wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW) {
+      authorization->acting_capacity = "system_admin";
+      return WYRELOG_E_OK;
+    }
+    wyl_decide_req_set_action (req, "wr.tenant.create");
+    g_clear_pointer (&resp, wyl_decide_resp_free);
+    resp = wyl_decide_resp_new ();
+    if (resp == NULL)
+      return WYRELOG_E_NOMEM;
+    rc = wyl_decide (authorization->handle, req, resp);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!wyl_decide_req_guard_is_satisfied (req)
+        || g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+        "audit_unavailable") == 0
+        || wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+      return WYRELOG_E_AUTH;
+    authorization->acting_capacity = "creator";
+    return WYRELOG_E_OK;
+  }
   if (rc == WYRELOG_E_OK && authorization->owner_tenant != NULL) {
     /* wyl_decide reports audit failure as an OK call with a fail-closed
      * denial. It does not establish that SYSTEM authority was absent:
@@ -11215,6 +11245,14 @@ static wyrelog_error_t
 mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
 {
   TenantLifecyclePublication *publication = data;
+  if (publication->create && publication->authorization != NULL) {
+    if (!management_session_matches_live (publication->authorization->session,
+        publication->authorization->session_id, publication->creator_subject,
+        WYL_TENANT_DEFAULT, TRUE))
+      return WYRELOG_E_AUTH;
+    wyl_audit_event_set_deny_reason ((WylAuditEvent *) publication->audit_event,
+        publication->authorization->acting_capacity);
+  }
   if (!publication->create && publication->authorization != NULL) {
     wyrelog_error_t auth_rc = management_session_matches_live (
       publication->authorization->session, publication->authorization->session_id,
@@ -12599,16 +12637,12 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   gint64 guard_timestamp = 0;
   g_autofree gchar *guard_loc_class = NULL;
   gint64 guard_risk = 0;
-  if (!creating) {
-    if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
-        NULL, WYL_TENANT_DEFAULT, "tenant_auth_required",
-        "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed",
-        &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
-        &guard_risk))
-      return;
-  } else if (!authorize_tenant_management (server, msg, query, ctx, &actor)) {
+  if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
+      NULL, WYL_TENANT_DEFAULT, "tenant_auth_required",
+      "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed",
+      &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
+      &guard_risk))
     return;
-  }
 
   gboolean changed = FALSE;
   wyrelog_error_t rc = WYRELOG_E_INVALID;
@@ -12631,7 +12665,8 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     .target_tenant = NULL,
     .decision_request_id = decision_request_id,
     .require_mfa = TRUE,
-    .owner_tenant = tenant,
+    .owner_tenant = creating ? NULL : tenant,
+    .creating_tenant = creating,
     .unsealing = !sealing,
     .guard_timestamp = guard_timestamp,
     .guard_loc_class = guard_loc_class,
@@ -12677,7 +12712,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   } else {
     rc = wyl_daemon_policy_write_acquire (ctx, msg,
             WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
-    if (rc == WYRELOG_E_OK && !creating)
+    if (rc == WYRELOG_E_OK)
       rc = management_reauthorize_inside_write (&reauthorization, actor);
     WylTenantSealCoordination *coordination = NULL;
     WylPolicyTenantAuthorityRecord *coordinated = NULL;
@@ -12690,6 +12725,14 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     gboolean tenant_exists = FALSE;
     if (rc == WYRELOG_E_OK && creating)
       rc = wyl_policy_store_tenant_exists (write.store, tenant, &tenant_exists);
+    if (rc == WYRELOG_E_OK && tenant_exists
+        && g_strcmp0 (reauthorization.acting_capacity, "creator") == 0) {
+      WylPolicyTenantAuthorityRecord *record = NULL;
+      rc = wyl_policy_store_read_tenant_authority (write.store, tenant, &record);
+      if (rc == WYRELOG_E_OK && g_strcmp0 (record->owner_subject_id, actor) != 0)
+        rc = WYRELOG_E_AUTH;
+      wyl_policy_tenant_authority_record_free (record);
+    }
     if (rc == WYRELOG_E_OK && tenant_exists) {
 #ifdef WYL_TEST_DAEMON_HTTP
       tenant_create_discard_noop_faults_for_test (ctx);
@@ -12717,7 +12760,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     TenantLifecyclePublication publication = {
       .tenant = tenant,
       .creator_subject = actor,
-      .authorization = creating ? NULL : &reauthorization,
+      .authorization = &reauthorization,
       .create = creating,
       .coordinated = coordinated,
       .changed = &changed,

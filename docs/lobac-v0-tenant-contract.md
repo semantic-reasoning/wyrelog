@@ -27,9 +27,31 @@ be sealed.
 
 ## Tenant Lifecycle
 
-Tenant rows live in the policy store `tenants` table. The HTTP tenant
-lifecycle surface is guarded by the `wr.tenant.manage` permission on the
-default tenant.
+Tenant rows live in the policy store `tenants` table. Creation accepts an armed `wr.tenant.create` or `wr.tenant.manage` permission
+on `__wr_default`, through a live MFA-verified human session bound to that
+default tenant. The new `wr.tenant.create` permission is a critical control-plane
+permission in the policy-store catalog; normal direct grants and permission
+state projection work with the existing signed templates.
+
+`wr.tenant.create` grants no global listing or lifecycle authority. Listing
+requires `wr.tenant.manage`; show, transfer, seal, unseal and delete use their
+existing global-management or current-owner checks. Owners may unseal only
+owner-sealed tenants. Tenant-bound bearers remain restricted to their tenant,
+even when the same human owns multiple tenants.
+
+Creation checks live session and permission authority inside the policy write
+lease, before both mutation and existing-name responses. A create-only caller
+may retry its own tenant name, but a name owned by another human returns
+`403 tenant_denied` without owner metadata or additional grants. An existing
+name does not bypass permission revocation. Explicit global management keeps
+its existing idempotent behavior for any existing name.
+
+For a new tenant, the creator remains its owner and receives the existing
+`wr.system_admin` role scoped only to that tenant. Creation audit events record
+`creator` in the existing acting-capacity field (`deny_reason`) for self-service
+creation, or `system_admin` for global management; `deny_origin` has no seal
+origin on creation. Global management takes precedence when both capabilities
+are allowed. Guard, evaluator and audit failures never authorize a fallback.
 
 | Method | Path              | Target parameter | Result |
 |--------|-------------------|------------------|--------|
@@ -37,7 +59,39 @@ default tenant.
 | `POST` | `/tenants/create` | `name`           | Creates a tenant idempotently. |
 | `POST` | `/tenants/seal`   | `name`           | Marks a tenant inactive. |
 | `POST` | `/tenants/unseal` | `name`           | Reactivates a sealed tenant. |
-| `POST` | `/tenants/delete` | `name`           | Returns `501 tenant_delete_unsupported`; deletion semantics are intentionally unsupported. |
+| `POST` | `/tenants/delete` | `name` and canonical `request_id` | Deletes a sealed tenant after owner/global authority and remaining-holder checks. |
+
+### Migrating self-service users
+
+Existing `wr.tenant.manage` grants intentionally retain global authority. An
+upgrade does not silently narrow them. To make a registered human a self-service
+creator, an MFA-authenticated administrator grants and arms `wr.tenant.create`
+and revokes any direct global `wr.tenant.manage` grant:
+
+```sh
+# Supply your daemon URL and administrator token file.
+wyctl --daemon-url "$URL" policy permission-grant --subject "$USER" \
+  --perm wr.tenant.create --scope __wr_default \
+  --access-token-file "$ADMIN_TOKEN" --guard-timestamp "$NOW_US" \
+  --guard-loc-class trusted --guard-risk 0
+wyctl --daemon-url "$URL" policy permission-transition --subject "$USER" \
+  --perm wr.tenant.create --scope __wr_default --event grant \
+  --access-token-file "$ADMIN_TOKEN" --guard-timestamp "$NOW_US" \
+  --guard-loc-class trusted --guard-risk 0
+wyctl --daemon-url "$URL" policy permission-revoke --subject "$USER" \
+  --perm wr.tenant.manage --scope __wr_default \
+  --access-token-file "$ADMIN_TOKEN" --guard-timestamp "$NOW_US" \
+  --guard-loc-class trusted --guard-risk 0
+```
+
+Also remove global roles that confer `wr.tenant.manage` if the user is meant to
+have no global authority. Revoking a direct grant does not revoke role-derived
+permissions. The user's own MFA default-tenant token can then repeatedly run
+`wyctl tenant create --name ...` with the usual daemon, token and guard options;
+no temporary global grant is needed. A dormant or revoked creation grant is
+rejected, including for an existing owned name. Listing all tenants remains an
+administrator operation; owners can inspect a known owned name with
+`wyctl tenant show --name ...`.
 
 `tenant=` in query strings remains the request/auth tenant. Lifecycle
 targets use `name=` so target selection cannot be confused with the

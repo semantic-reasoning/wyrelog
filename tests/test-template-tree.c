@@ -237,6 +237,12 @@ check_bootstrap_seed_consistency (void)
           wyl_policy_store_builtin_role_id);
   if (rc != 0)
     return 40 + rc;
+  /* #1485: this capability is projected from durable grants and permission
+   * state, so it does not require a new signed static permission fact. Keep
+   * the exception exact: every other builtin still matches the template. */
+  if (g_hash_table_contains (permissions, "wr.tenant.create"))
+    return 35;
+  g_hash_table_add (permissions, g_strdup ("wr.tenant.create"));
   rc = check_seed_list (permissions,
           wyl_policy_store_builtin_permission_count (),
           wyl_policy_store_builtin_permission_id);
