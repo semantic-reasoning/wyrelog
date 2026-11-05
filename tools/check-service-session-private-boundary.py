@@ -83,6 +83,7 @@ MANIFEST["wyl_jwt_sign_hs256_data_credential"] = {
     "wyrelog/auth/jwt-private.h": 1,
     "wyrelog/auth/service-jwt-private.c": 1,
     "tests/test-jwt.c": 3,
+    "wyrelog/daemon/http.c": 1,
 }
 for symbol in PROTECTED:
     if symbol not in {"wyl_session_new_service_detached",

@@ -524,6 +524,8 @@ typedef struct _WylDaemonHttpContext
   WylTenantRecoverySlot *tenant_recovery;
   /* Wall-clock seconds, clamped monotonically for service JWT lifetime. */
   gint64 service_auth_clock_floor;
+  /* #1475: the data-credential clock, in microseconds, never runs back. */
+  gint64 data_credential_clock_floor_us;
   gboolean shutting_down;
   /* Registry of the request cancellables of policy WRITEs that may currently be
    * parked in the coordination acquire.  wyl_daemon_http_context_terminalize()
@@ -549,6 +551,7 @@ typedef struct _WylDaemonHttpContext
   guint service_auth_retirement_ticks;
   gboolean service_auth_clock_injected;
   gint64 service_auth_clock_now;
+  gint64 data_credential_clock_offset_us;
   gboolean refresh_clock_injected;
   gint64 refresh_clock_now;
   WylDaemonServiceResolverCheckpoint resolver_checkpoint;
@@ -1931,6 +1934,27 @@ service_auth_now_seconds (WylDaemonHttpContext *ctx)
   g_mutex_unlock (&ctx->lock);
   return candidate;
 }
+
+#ifdef WYL_HAS_AUDIT
+/* #1475: the clock data credentials are judged by.  Microseconds, because
+ * the store compares it with a credential's creation time, and clamped so it
+ * never runs back.  Tests may move it forward. */
+static gint64
+data_credential_now_us (WylDaemonHttpContext *ctx)
+{
+  g_mutex_lock (&ctx->lock);
+  gint64 candidate = g_get_real_time ();
+#ifdef WYL_TEST_DAEMON_HTTP
+  candidate += ctx->data_credential_clock_offset_us;
+#endif
+  if (candidate < ctx->data_credential_clock_floor_us)
+    candidate = ctx->data_credential_clock_floor_us;
+  else
+    ctx->data_credential_clock_floor_us = candidate;
+  g_mutex_unlock (&ctx->lock);
+  return candidate;
+}
+#endif
 
 #ifdef WYL_HAS_AUDIT
 static wyrelog_error_t service_auth_retire_due (WylDaemonHttpContext * ctx,
@@ -5472,6 +5496,201 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
   return WYRELOG_E_OK;
 }
 
+/* #1475: exchanging an owner-issued data credential.  The exchange
+ * verifies the credential and records its use, audited in the same
+ * transaction; authority is not decided here but on every use, so a
+ * credential in a sealed tenant still exchanges and is refused when used. */
+typedef struct
+{
+  const gchar *credential_id;
+  const gchar *secret;
+  gsize secret_len;
+  gint64 now_us;
+  const WylDataCredentialInfo *expected;
+  const WylAuditEvent *audit;
+  const gchar *audit_id;
+  WylDataCredentialInfo info;
+  /* What the verify itself answered, as distinct from the lane around it. */
+  wyrelog_error_t verify_rc;
+} DataCredentialExchange;
+
+/* The one-audit-row lane commits this body: the verify (which records last
+ * use) and the exchange's audit row, or neither.  The data_credentials
+ * table is not projected into the engine, so the lane's projection of the
+ * audit row alone keeps the pair exact. */
+static wyrelog_error_t
+mutate_data_credential_exchange (wyl_policy_store_t *store, gpointer data)
+{
+  DataCredentialExchange *exchange = data;
+  wyrelog_error_t rc = wyl_policy_store_data_credential_verify (store,
+          exchange->credential_id, exchange->secret, exchange->secret_len,
+          exchange->now_us, &exchange->info);
+  exchange->verify_rc = rc;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* The audit row was built from a lookup made outside the transaction. */
+  if (!g_str_equal (exchange->info.tenant_id, exchange->expected->tenant_id)
+      || !g_str_equal (exchange->info.issuer_subject_id,
+      exchange->expected->issuer_subject_id)
+      || exchange->info.generation != exchange->expected->generation)
+    return WYRELOG_E_AUTH;
+  const WylAuditEvent *event = exchange->audit;
+  gboolean inserted = FALSE;
+  rc = wyl_policy_store_record_audit_intention_full (store,
+          exchange->audit_id, wyl_audit_event_get_created_at_us (event),
+          wyl_audit_event_get_subject_id (event),
+          wyl_audit_event_get_action (event),
+          wyl_audit_event_get_resource_id (event),
+          wyl_audit_event_get_deny_reason (event),
+          wyl_audit_event_get_deny_origin (event),
+          wyl_audit_event_get_request_id (event),
+          wyl_audit_event_get_decision (event), &inserted);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_audit_event_full (store,
+            exchange->audit_id, wyl_audit_event_get_created_at_us (event),
+            wyl_audit_event_get_subject_id (event),
+            wyl_audit_event_get_action (event),
+            wyl_audit_event_get_resource_id (event),
+            wyl_audit_event_get_deny_reason (event),
+            wyl_audit_event_get_deny_origin (event),
+            wyl_audit_event_get_request_id (event),
+            wyl_audit_event_get_decision (event), &inserted);
+  return rc;
+}
+
+/* Every refusal of a well-formed exchange is WYRELOG_E_AUTH: an unknown,
+ * revoked, expired or mismatching credential is answered alike. */
+static wyrelog_error_t
+data_credential_token_exchange (WylDaemonHttpContext *ctx,
+    const gchar *credential_id, const gchar *secret, gsize secret_len,
+    const gchar *request_id, WylSensitiveServiceTokenResponse **out_response)
+{
+  *out_response = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  WylDataCredentialInfo expected = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_data_credential_lookup (store,
+          credential_id, &expected);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK) {
+    const guint8 *cvk = NULL;
+    gsize cvk_len = 0;
+    rc = wyl_policy_store_materialize_service_cvk_existing (store, &cvk,
+            &cvk_len);
+    if (rc == WYRELOG_E_POLICY || rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_BUSY;
+  }
+  g_autoptr (WylAuditEvent) audit = NULL;
+  g_autofree gchar *audit_id = NULL;
+  g_autofree gchar *summary = NULL;
+  DataCredentialExchange exchange = {
+    .credential_id = credential_id,.secret = secret,.secret_len = secret_len,
+    .now_us = data_credential_now_us (ctx),.expected = &expected,
+  };
+  if (rc == WYRELOG_E_OK) {
+    summary = g_strdup_printf ("issuer=%s;generation=%" G_GUINT64_FORMAT,
+            expected.issuer_subject_id, expected.generation);
+    audit = wyl_audit_event_new ();
+    wyl_audit_event_set_subject_id (audit, credential_id);
+    wyl_audit_event_set_action (audit, "data_token_exchange");
+    wyl_audit_event_set_resource_id (audit, expected.tenant_id);
+    wyl_audit_event_set_deny_reason (audit, summary);
+    wyl_audit_event_set_request_id (audit, request_id);
+    wyl_audit_event_set_decision (audit, WYL_DECISION_ALLOW);
+    audit_id = wyl_audit_event_dup_id_string (audit);
+    if (audit_id == NULL)
+      rc = WYRELOG_E_NOMEM;
+    exchange.audit = audit;
+    exchange.audit_id = audit_id;
+  }
+  if (rc == WYRELOG_E_OK) {
+    g_autoptr (WylEngineSession) session =
+        wyl_engine_session_acquire (ctx->handle);
+    if (session == NULL) {
+      rc = WYRELOG_E_BUSY;
+    } else {
+      WylCommittedAuditProjection projection = {
+        .id = audit_id,
+        .created_at_us = wyl_audit_event_get_created_at_us (audit),
+        .subject_id = credential_id,
+        .action = "data_token_exchange",
+        .resource_id = expected.tenant_id,
+        .deny_reason = summary,
+        .deny_origin = NULL,
+        .request_id = request_id,
+        .decision = WYL_DECISION_ALLOW,
+      };
+      rc = wyl_engine_session_run_committed_audit_publication (session,
+              mutate_data_credential_exchange, &exchange, &projection);
+    }
+    /* Only the verify's own refusals are refusals of the credential; an
+     * unavailable lane is an outage. */
+    if (exchange.verify_rc == WYRELOG_E_AUTH
+        || exchange.verify_rc == WYRELOG_E_INVALID)
+      rc = WYRELOG_E_AUTH;
+    else if (rc == WYRELOG_E_INVALID)
+      rc = WYRELOG_E_BUSY;
+    if (rc == WYRELOG_E_OK)
+      wyl_audit_complete_authoritative_event (ctx->handle, audit);
+  }
+
+  /* The bearer lives at most five minutes and never past its credential. */
+  gint64 issued_at = service_auth_now_seconds (ctx);
+  gint64 expires_at = 0;
+  if (rc == WYRELOG_E_OK) {
+    expires_at = MIN (issued_at + WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS,
+            exchange.info.expires_at_us / G_USEC_PER_SEC);
+    if (expires_at <= issued_at)
+      rc = WYRELOG_E_AUTH;
+  }
+  gchar jti[WYL_ID_STRING_BUF], session_id[WYL_ID_STRING_BUF];
+  wyl_id_t generated = WYL_ID_NIL;
+  if (rc == WYRELOG_E_OK
+      && (wyl_id_new (&generated) != WYRELOG_E_OK
+      || wyl_id_format (&generated, jti, sizeof jti) != WYRELOG_E_OK
+      || wyl_id_new (&generated) != WYRELOG_E_OK
+      || wyl_id_format (&generated, session_id, sizeof session_id)
+      != WYRELOG_E_OK))
+    rc = WYRELOG_E_INTERNAL;
+  guint8 token_secret[WYL_DAEMON_JWT_KEY_LEN];
+  g_autofree gchar *key_id = NULL;
+  if (rc == WYRELOG_E_OK) {
+    rc = service_publication_context_lock (ctx);
+    if (rc == WYRELOG_E_OK) {
+      if (!ctx->access_token_secret_ready || ctx->access_token_key_id == NULL)
+        rc = WYRELOG_E_INTERNAL;
+      else {
+        memcpy (token_secret, ctx->access_token_secret, sizeof token_secret);
+        key_id = g_strdup (ctx->access_token_key_id);
+      }
+      rc = service_publication_context_unlock (ctx, rc);
+    }
+  }
+  g_autofree gchar *token = NULL;
+  if (rc == WYRELOG_E_OK) {
+    const wyl_jwt_data_credential_issue_input_t input = {
+      .key_id = key_id,.jti = jti,.issuer = WYL_DAEMON_JWT_ISSUER,
+      .audience = WYL_DAEMON_JWT_AUDIENCE,.tenant = exchange.info.tenant_id,
+      .session_id = session_id,.credential_id = credential_id,
+      .credential_generation = exchange.info.generation,
+      .issued_at = issued_at,.expires_at = expires_at,
+    };
+    rc = wyl_jwt_sign_hs256_data_credential (&input, token_secret,
+            sizeof token_secret, &token);
+  }
+  sodium_memzero (token_secret, sizeof token_secret);
+  if (rc == WYRELOG_E_OK) {
+    *out_response = build_service_token_response (ctx, token);
+    if (*out_response == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (token != NULL)
+    sodium_memzero (token, strlen (token));
+  wyl_data_credential_info_clear (&exchange.info);
+  wyl_data_credential_info_clear (&expected);
+  return rc;
+}
+
 static wyrelog_error_t
 service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
     const WylDaemonServiceTokenRequest *request, guint *out_status,
@@ -5559,8 +5778,10 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
   credential_secret.zeroed_for_test = request->secret_cleanup_zeroed;
 #endif
   if (credential_id == NULL || credential_secret.value == NULL
-      || !wyl_service_credential_id_is_canonical (credential_id,
-      strlen (credential_id))) {
+      || (!wyl_service_credential_id_is_canonical (credential_id,
+      strlen (credential_id))
+      && !wyl_data_credential_id_is_canonical (credential_id,
+      strlen (credential_id)))) {
     WylServiceExchangeLimiterDecision decision = { 0 };
     wyrelog_error_t rc = service_token_limiter_decide (ctx,
             WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision);
@@ -5594,6 +5815,36 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
       *out_retry_after = decision.retry_after_seconds;
     *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
             WYL_DAEMON_ERR_SERVICE_TOKEN_RATE_LIMITED);
+    return WYRELOG_E_OK;
+  }
+
+  /* A data credential exchanges under the same limiter bucket rules, and
+   * is answered with the same refusals. */
+  if (wyl_data_credential_id_is_canonical (credential_id,
+      strlen (credential_id))) {
+    g_autoptr (WylSensitiveServiceTokenResponse) data_response = NULL;
+    rc = data_credential_token_exchange (ctx, credential_id,
+            credential_secret.value, strlen (credential_secret.value),
+            NULL, &data_response);
+    if (rc == WYRELOG_E_AUTH) {
+      *out_status = 401;
+      *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+              WYL_DAEMON_ERR_SERVICE_TOKEN_AUTH_REQUIRED);
+      return WYRELOG_E_OK;
+    }
+    if (rc == WYRELOG_E_BUSY) {
+      *out_status = 503;
+      *out_body = g_strdup ("{\"error\":\"service_token_unavailable\"}");
+      return WYRELOG_E_OK;
+    }
+    if (rc != WYRELOG_E_OK) {
+      *out_status = 500;
+      *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+              WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
+      return WYRELOG_E_OK;
+    }
+    *out_sensitive_response = g_steal_pointer (&data_response);
+    *out_status = 200;
     return WYRELOG_E_OK;
   }
 
@@ -6111,6 +6362,18 @@ wyl_daemon_http_set_refresh_clock_for_test (SoupServer *server,
   g_mutex_lock (&ctx->lock);
   ctx->refresh_clock_injected = enabled;
   ctx->refresh_clock_now = now;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_advance_data_credential_clock_for_test (SoupServer *server,
+    gint64 offset_us)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || offset_us < 0)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->data_credential_clock_offset_us += offset_us;
   g_mutex_unlock (&ctx->lock);
 }
 
