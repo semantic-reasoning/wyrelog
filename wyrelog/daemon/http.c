@@ -13283,6 +13283,23 @@ tenant_show_handler (SoupServer *server, SoupServerMessage *msg,
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+/* Verifies an audit row read back from the store, field for field. */
+static wyrelog_error_t
+verify_stored_audit_event (WylEngineVerification *verification,
+    const WylAuditEvent *event)
+{
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+  return wyl_engine_verification_verify_audit_event (verification, id,
+             wyl_audit_event_get_created_at_us (event),
+             wyl_audit_event_get_decision (event) == WYL_DECISION_ALLOW,
+             wyl_audit_event_get_subject_id (event),
+             wyl_audit_event_get_action (event),
+             wyl_audit_event_get_resource_id (event),
+             wyl_audit_event_get_deny_reason (event),
+             wyl_audit_event_get_deny_origin (event),
+             wyl_audit_event_get_request_id (event));
+}
+
 typedef struct
 {
   WylManagementReauthorization *authorization;
@@ -13291,6 +13308,7 @@ typedef struct
   const gchar *request_id;
   gboolean changed;
   WylAuditEvent *audit;
+  GPtrArray *revocations;
 } TenantTransferPublication;
 
 static wyrelog_error_t
@@ -13308,6 +13326,10 @@ mutate_tenant_transfer (wyl_policy_store_t *store, gpointer data)
             &publication->changed);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_read_tenant_transfer_audit (store, publication->request_id, &publication->audit);
+  g_clear_pointer (&publication->revocations, g_ptr_array_unref);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_data_credential_lifecycle_audits (store,
+            publication->request_id, &publication->revocations);
   return rc;
 }
 
@@ -13319,11 +13341,18 @@ verify_tenant_transfer (WylEngineVerification *verification, gpointer data)
   if (event == NULL)
     return WYRELOG_E_POLICY;
   g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
-  return wyl_engine_verification_verify_audit_event (verification, id,
-             wyl_audit_event_get_created_at_us (event), TRUE,
-             wyl_audit_event_get_subject_id (event), "tenant_transfer_owner",
-             publication->tenant, wyl_audit_event_get_deny_reason (event),
-             publication->target, publication->request_id);
+  wyrelog_error_t rc = wyl_engine_verification_verify_audit_event
+        (verification, id, wyl_audit_event_get_created_at_us (event), TRUE,
+          wyl_audit_event_get_subject_id (event), "tenant_transfer_owner",
+          publication->tenant, wyl_audit_event_get_deny_reason (event),
+          publication->target, publication->request_id);
+  if (rc == WYRELOG_E_OK && publication->revocations == NULL)
+    rc = WYRELOG_E_POLICY;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < publication->revocations->len;
+      i++)
+    rc = verify_stored_audit_event (verification,
+            g_ptr_array_index (publication->revocations, i));
+  return rc;
 }
 
 static void
@@ -13407,9 +13436,14 @@ tenant_transfer_owner_handler (SoupServer *server, SoupServerMessage *msg,
       }
     }
   }
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
+    for (guint i = 0; i < publication.revocations->len; i++)
+      wyl_audit_complete_authoritative_event (ctx->handle,
+          g_ptr_array_index (publication.revocations, i));
     wyl_audit_complete_authoritative_event (ctx->handle, publication.audit);
+  }
   g_clear_object (&publication.audit);
+  g_clear_pointer (&publication.revocations, g_ptr_array_unref);
   if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
     rc = wyl_daemon_policy_write_record_primary (&write, rc);
   if (rc != WYRELOG_E_OK) {
@@ -13743,30 +13777,10 @@ static gchar *
 data_credential_audit_summary (const DataCredentialPublication *publication)
 {
   const WylDataCredentialInfo *info = &publication->info;
-  GString *summary = g_string_new ("credential=");
-  g_string_append (summary, info->credential_id);
-  g_string_append (summary, ";issuer=");
-  g_string_append (summary, info->issuer_subject_id);
-  g_string_append (summary, ";operations=");
-  gboolean first = TRUE;
-  for (guint i = 0; i < G_N_ELEMENTS (data_credential_operation_names); i++) {
-    if ((info->operations & (1u << i)) == 0)
-      continue;
-    if (!first)
-      g_string_append_c (summary, ',');
-    g_string_append (summary, data_credential_operation_names[i]);
-    first = FALSE;
-  }
-  g_string_append (summary, ";graphs=");
-  if (info->graph_ids == NULL || info->graph_ids->len == 0)
-    g_string_append_c (summary, '*');
-  for (guint i = 0; info->graph_ids != NULL && i < info->graph_ids->len; i++) {
-    if (i > 0)
-      g_string_append_c (summary, ',');
-    g_string_append (summary, g_ptr_array_index (info->graph_ids, i));
-  }
-  g_string_append_printf (summary, ";expires_at_us=%" G_GINT64_FORMAT
-      ";capacity=%s", info->expires_at_us,
+  g_autofree gchar *scope = wyl_policy_store_data_credential_audit_scope
+        (info);
+  GString *summary = g_string_new (scope);
+  g_string_append_printf (summary, ";capacity=%s",
       publication->authorization->acting_capacity);
   if (publication->action == DATA_CREDENTIAL_ROTATE)
     g_string_append_printf (summary, ";rotated_from=%s",

@@ -778,7 +778,14 @@ if build_client
   )
   test_daemon_http_decide_targets += [test_daemon_http_decide]
 
-  test('daemon-http-decide', test_daemon_http_decide, timeout : 240)
+  # The policy-write sanitizer job runs this default variant under ASan+UBSan
+  # and then five more times in parallel.  With the lifecycle revocation
+  # tests of #1476 it measured 175s, 175s and 178s on an 88-core host
+  # (135s, 144s and 144s before them): 74% of a 240s budget before CI's
+  # slower runners and the parallel repeat, which took the audit and service
+  # variants past 240.  It takes their 600s rather than trimming coverage,
+  # and test-daemon-http-decide-private-companion-boundary.py pins it.
+  test('daemon-http-decide', test_daemon_http_decide, timeout : 600)
 
   test_daemon_http_decide_refresh = executable('test-daemon-http-decide-refresh',
     'test-daemon-http-decide.c',

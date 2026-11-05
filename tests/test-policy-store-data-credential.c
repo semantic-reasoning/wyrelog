@@ -7,6 +7,7 @@
 #include <sqlite3.h>
 #include <string.h>
 
+#include "audit.h"
 #include "auth/service-credential-private.h"
 #include "policy/store-private.h"
 #include "wyl-request-id-private.h"
@@ -1003,6 +1004,193 @@ test_revoke_and_bulk (void)
 }
 
 static void
+lookup (wyl_policy_store_t *store, const gchar *id, WylDataCredentialInfo *out)
+{
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, id, out),
+      ==, WYRELOG_E_OK);
+}
+
+static gboolean
+transfer (wyl_policy_store_t *store, const gchar *tenant, const gchar *actor,
+    const gchar *target, const gchar *request)
+{
+  gboolean changed = FALSE;
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store, tenant,
+      actor, target, request, FALSE, &changed), ==, WYRELOG_E_OK);
+  commit (store);
+  return changed;
+}
+
+static GPtrArray *
+lifecycle_audits (wyl_policy_store_t *store, const gchar *request)
+{
+  GPtrArray *audits = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_lifecycle_audits (store,
+      request, &audits), ==, WYRELOG_E_OK);
+  g_assert_nonnull (audits);
+  return audits;
+}
+
+/* An ownership transfer revokes the previous owner's credentials in that
+ * tenant, in its own transaction, with one audit row each (#1476). */
+static void
+test_lifecycle_transfer (void)
+{
+  g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-c", "alice",
+      &created), ==, WYRELOG_E_OK);
+  /* c1 comes from a clock ahead of the store's: its revocation is clamped
+   * to its creation instead of failing the transfer. */
+  gint64 ahead = g_get_real_time () + HOUR;
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  const gchar *const graphs[] = { "g1", "g2" };
+  g_auto (WylDataCredentialInfo) c1 = { 0 };
+  g_auto (WylDataCredentialInfo) c2 = { 0 };
+  g_auto (WylDataCredentialInfo) c3 = { 0 };
+  g_auto (WylDataCredentialInfo) c4 = { 0 };
+  g_assert_cmpint (issue_full (store, "tenant-a", "alice",
+      new_request (request), WYL_DATA_CREDENTIAL_OPS_ALL, graphs, 2, DAY,
+      ahead, &c1, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (issue (store, 1, DAY, NOW, &c2, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (issue_full (store, "tenant-b", "bob", new_request (request),
+      1, NULL, 0, DAY, NOW, &c3, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (issue_full (store, "tenant-c", "alice",
+      new_request (request), 1, NULL, 0, DAY, NOW, &c4, NULL), ==,
+      WYRELOG_E_OK);
+  gboolean changed = FALSE;
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_data_credential_revoke (store, "tenant-a",
+      c2.credential_id, "alice", NOW + 1, NULL, &changed), ==, WYRELOG_E_OK);
+  commit (store);
+
+  gchar first[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_true (transfer (store, "tenant-a", "alice", "bob",
+      new_request (first)));
+  g_auto (WylDataCredentialInfo) now1 = { 0 };
+  lookup (store, c1.credential_id, &now1);
+  g_assert_cmpstr (now1.state, ==, "revoked");
+  g_assert_cmpstr (now1.revoked_reason, ==, "ownership_transfer");
+  g_assert_cmpstr (now1.revoked_by, ==, "alice");
+  g_assert_cmpint (now1.revoked_at_us, ==, c1.created_at_us);
+  /* An already revoked credential keeps its reason; another tenant's and
+   * another issuer's stay active. */
+  g_auto (WylDataCredentialInfo) now2 = { 0 };
+  lookup (store, c2.credential_id, &now2);
+  g_assert_cmpstr (now2.revoked_reason, ==, "revoked");
+  g_auto (WylDataCredentialInfo) now3 = { 0 };
+  lookup (store, c3.credential_id, &now3);
+  g_assert_cmpstr (now3.state, ==, "active");
+  g_auto (WylDataCredentialInfo) now4 = { 0 };
+  lookup (store, c4.credential_id, &now4);
+  g_assert_cmpstr (now4.state, ==, "active");
+
+  /* One audit row, naming the credential's scope and the event. */
+  g_autoptr (WylAuditEvent) event = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_transfer_audit (store, first,
+      &event), ==, WYRELOG_E_OK);
+  g_autofree gchar *event_id = wyl_audit_event_dup_id_string (event);
+  g_autoptr (GPtrArray) audits = lifecycle_audits (store, first);
+  g_assert_cmpuint (audits->len, ==, 1);
+  WylAuditEvent *audit = g_ptr_array_index (audits, 0);
+  g_assert_cmpstr (wyl_audit_event_get_action (audit), ==,
+      "data_credential_lifecycle_revoke");
+  g_assert_cmpstr (wyl_audit_event_get_subject_id (audit), ==, "alice");
+  g_assert_cmpstr (wyl_audit_event_get_resource_id (audit), ==, "tenant-a");
+  g_assert_cmpstr (wyl_audit_event_get_deny_origin (audit), ==,
+      c1.credential_id);
+  g_assert_cmpstr (wyl_audit_event_get_request_id (audit), ==, first);
+  g_assert_cmpint (wyl_audit_event_get_decision (audit), ==,
+      WYL_DECISION_ALLOW);
+  g_assert_cmpint (wyl_audit_event_get_created_at_us (audit), ==,
+      wyl_audit_event_get_created_at_us (event));
+  g_autofree gchar *expected = g_strdup_printf ("credential=%s;issuer=alice;"
+          "operations=query,infer,insert,delete,update;graphs=g1,g2;"
+          "expires_at_us=%" G_GINT64_FORMAT ";capacity=owner;"
+          "reason=ownership_transfer;event=tenant_transfer_owner;"
+          "event_audit=%s", c1.credential_id, c1.expires_at_us, event_id);
+  g_assert_cmpstr (wyl_audit_event_get_deny_reason (audit), ==, expected);
+
+  /* A replay revokes nothing more. */
+  g_assert_true (transfer (store, "tenant-a", "alice", "bob", first));
+  g_autoptr (GPtrArray) replayed = lifecycle_audits (store, first);
+  g_assert_cmpuint (replayed->len, ==, 1);
+
+  /* bob's credential in tenant-a ends when he hands it back. */
+  g_auto (WylDataCredentialInfo) c5 = { 0 };
+  g_assert_cmpint (issue_full (store, "tenant-a", "bob", new_request (request),
+      1, NULL, 0, DAY, g_get_real_time (), &c5, NULL), ==, WYRELOG_E_OK);
+  gchar back[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_true (transfer (store, "tenant-a", "bob", "alice",
+      new_request (back)));
+  g_auto (WylDataCredentialInfo) now5 = { 0 };
+  lookup (store, c5.credential_id, &now5);
+  g_assert_cmpstr (now5.revoked_reason, ==, "ownership_transfer");
+  g_autoptr (GPtrArray) back_audits = lifecycle_audits (store, back);
+  g_assert_cmpuint (back_audits->len, ==, 1);
+
+  /* alice owns tenant-a again.  Replaying her first transfer must not
+   * revoke what she issued since. */
+  g_auto (WylDataCredentialInfo) c6 = { 0 };
+  g_assert_cmpint (issue_full (store, "tenant-a", "alice",
+      new_request (request), 1, NULL, 0, DAY, g_get_real_time (), &c6, NULL),
+      ==, WYRELOG_E_OK);
+  g_assert_true (transfer (store, "tenant-a", "alice", "bob", first));
+  g_auto (WylDataCredentialInfo) now6 = { 0 };
+  lookup (store, c6.credential_id, &now6);
+  g_assert_cmpstr (now6.state, ==, "active");
+  g_autoptr (GPtrArray) after_replay = lifecycle_audits (store, first);
+  g_assert_cmpuint (after_replay->len, ==, 1);
+
+  /* A transfer to the current owner changes nothing and revokes nothing. */
+  gchar same[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_false (transfer (store, "tenant-a", "alice", "alice",
+      new_request (same)));
+  g_auto (WylDataCredentialInfo) still6 = { 0 };
+  lookup (store, c6.credential_id, &still6);
+  g_assert_cmpstr (still6.state, ==, "active");
+  g_autoptr (GPtrArray) same_audits = lifecycle_audits (store, same);
+  g_assert_cmpuint (same_audits->len, ==, 0);
+}
+
+/* The lifecycle revocation runs in the transfer's transaction: when its
+ * audit cannot be written, the transfer fails and nothing changes. */
+static void
+test_lifecycle_transfer_atomic (void)
+{
+  g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
+  g_auto (WylDataCredentialInfo) c1 = { 0 };
+  g_assert_cmpint (issue (store, 1, DAY, NOW, &c1, NULL), ==, WYRELOG_E_OK);
+  exec_ok (store, "CREATE TEMP TRIGGER fail_lifecycle BEFORE INSERT ON "
+      "audit_events WHEN NEW.action='data_credential_lifecycle_revoke' "
+      "BEGIN SELECT RAISE(FAIL,'lifecycle audit refused'); END");
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  gboolean changed = FALSE;
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store, "tenant-a",
+      "alice", "bob", new_request (request), FALSE, &changed), !=,
+      WYRELOG_E_OK);
+  wyl_policy_store_rollback_mutation (store);
+  exec_ok (store, "DROP TRIGGER fail_lifecycle");
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "tenant-a",
+      &record), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (record->owner_subject_id, ==, "alice");
+  wyl_policy_tenant_authority_record_free (record);
+  g_auto (WylDataCredentialInfo) now1 = { 0 };
+  lookup (store, c1.credential_id, &now1);
+  g_assert_cmpstr (now1.state, ==, "active");
+  g_autoptr (GPtrArray) audits = lifecycle_audits (store, request);
+  g_assert_cmpuint (audits->len, ==, 0);
+  /* The same request then applies. */
+  g_assert_true (transfer (store, "tenant-a", "alice", "bob", request));
+  g_auto (WylDataCredentialInfo) after = { 0 };
+  lookup (store, c1.credential_id, &after);
+  g_assert_cmpstr (after.revoked_reason, ==, "ownership_transfer");
+}
+
+static void
 test_replay (void)
 {
   g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
@@ -1388,6 +1576,10 @@ main (int argc, char **argv)
   g_test_add_func ("/data-credential/rotate", test_rotate);
   g_test_add_func ("/data-credential/verify", test_verify);
   g_test_add_func ("/data-credential/revoke-and-bulk", test_revoke_and_bulk);
+  g_test_add_func ("/data-credential/lifecycle-transfer",
+      test_lifecycle_transfer);
+  g_test_add_func ("/data-credential/lifecycle-transfer-atomic",
+      test_lifecycle_transfer_atomic);
   g_test_add_func ("/data-credential/replay", test_replay);
   g_test_add_func ("/data-credential/secret-not-persisted",
       test_secret_not_persisted);

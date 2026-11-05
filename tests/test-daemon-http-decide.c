@@ -25759,6 +25759,222 @@ check_data_credential_exchange_contract (void)
   g_assert_cmpstr (expired, ==, refused);
   service_denial_env_clear (&env);
 }
+static const gchar *
+new_test_request (gchar buf[WYL_REQUEST_ID_STRING_BUF])
+{
+  g_assert_cmpint (wyl_request_id_new (buf, WYL_REQUEST_ID_STRING_BUF), ==,
+      WYRELOG_E_OK);
+  return buf;
+}
+
+static void
+policy_exec (wyl_policy_store_t *store, const gchar *sql)
+{
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  int rc = sqlite3_exec (db, sql, NULL, NULL, NULL);
+  if (rc != SQLITE_OK)
+    g_printerr ("policy exec: %s\n", sqlite3_errmsg (db));
+  g_assert_cmpint (rc, ==, SQLITE_OK);
+}
+
+/* Changes a tenant's owner without a transfer: a pending ownership event
+ * admits the raw UPDATE, which no lifecycle revocation follows. */
+static void
+raw_owner_change (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *from, const gchar *to)
+{
+  gchar request[WYL_REQUEST_ID_STRING_BUF], audit[WYL_REQUEST_ID_STRING_BUF];
+  g_autofree gchar *sql = g_strdup_printf ("BEGIN;"
+          "INSERT INTO tenant_ownership_events(request_id,tenant_id,actor,"
+          "previous_owner,new_owner,changed,audit_id,created_at_us) VALUES("
+          "'%s','%s','%s','%s','%s',1,'%s',1);"
+          "UPDATE tenants SET owner_subject_id='%s' WHERE tenant_id='%s';"
+          "UPDATE tenant_ownership_events SET applied=1 WHERE request_id='%s';"
+          "COMMIT;", new_test_request (request), tenant, from, from, to,
+          new_test_request (audit), to, tenant, request);
+  policy_exec (store, sql);
+}
+
+static void
+data_credential_owned_tenant (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *owner)
+{
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant, owner,
+      &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, tenant,
+      "active"), ==, WYRELOG_E_OK);
+  grant_armed_permission (store, owner, "wr.datalog.query", tenant);
+  grant_armed_permission (store, owner, "wr.fact.read", tenant);
+}
+
+static gchar *
+data_credential_transfer (ServiceDenialEnv *env, const gchar *token,
+    const gchar *tenant, const gchar *target, const gchar *request,
+    guint expected_status)
+{
+  g_autofree gchar *query = g_strdup_printf ("tenant=__wr_default&name=%s&"
+          "to=%s&request_id=%s&guard_timestamp=123&guard_loc_class=public&"
+          "guard_risk=0", tenant, target, request);
+  guint status = 0;
+  gchar *body = NULL;
+  g_assert_cmpint (send_raw_service_principal_bearer (env->session, "POST",
+      env->base_url, "/tenants/transfer-owner", query, token, NULL, &status,
+      &body), ==, 0);
+  if (status != expected_status)
+    g_printerr ("transfer: status=%u body=%s\n", status, body);
+  g_assert_cmpuint (status, ==, expected_status);
+  return body;
+}
+
+/* Fails every audit row of one action while armed.  The trigger is
+ * connection-local, so dropping it restores an empty temp schema. */
+static void
+data_credential_audit_fault (ServiceDenialEnv *env, const gchar *action,
+    gboolean armed)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  g_autofree gchar *sql = armed ? g_strdup_printf ("CREATE TEMP TRIGGER "
+          "lifecycle_fault BEFORE INSERT ON audit_events WHEN NEW.action='%s' "
+          "BEGIN SELECT RAISE(FAIL,'audit refused'); END", action) :
+      g_strdup ("DROP TRIGGER lifecycle_fault");
+  policy_exec (store, sql);
+  gint64 temp_objects = -1;
+  g_assert_true (policy_count_rows (env->handle, "SELECT count(*) FROM "
+      "sqlite_temp_schema", &temp_objects));
+  g_assert_cmpint (temp_objects, ==, armed ? 1 : 0);
+}
+
+/* A data bearer is refused on the list route: with 403 while it resolves
+ * to a live credential, with 401 once it does not. */
+static void
+data_credential_bearer_resolves (ServiceDenialEnv *env, const gchar *bearer,
+    gboolean resolves)
+{
+  g_autofree gchar *body = data_credential_request (env, bearer, "GET", NULL,
+          "dc-1475", NULL, resolves ? 403 : 401);
+  if (resolves)
+    g_assert_cmpstr (body, ==, "{\"error\":\"data_credential_denied\"}");
+}
+
+static guint
+lifecycle_audit_count (ServiceDenialEnv *env, const gchar *credential_id,
+    const gchar *request_id, const gchar *event)
+{
+  g_autofree gchar *sql = g_strdup_printf ("SELECT count(*) FROM "
+          "audit_events WHERE action='data_credential_lifecycle_revoke' AND "
+          "deny_origin GLOB '%s' AND request_id GLOB '%s' AND "
+          "deny_reason GLOB '*;event=%s;event_audit=*'", credential_id,
+          request_id, event);
+  gint64 count = -1;
+  g_assert_true (policy_count_rows (env->handle, sql, &count));
+  return (guint) count;
+}
+
+/* Lifecycle audit rows whose completion ran: their intention is
+ * committed. */
+static guint
+lifecycle_completed_count (ServiceDenialEnv *env)
+{
+  gint64 count = -1;
+  g_assert_true (policy_count_rows (env->handle, "SELECT count(*) FROM "
+      "audit_intentions WHERE action='data_credential_lifecycle_revoke' "
+      "AND state='committed'", &count));
+  return (guint) count;
+}
+
+/* #1476: an ownership transfer revokes the previous owner's credentials in
+ * that tenant, atomically with the transfer.  Only audit is needed: the
+ * bearer is shown on the list route, which refuses it with 403 while it
+ * resolves and with 401 once it is revoked. */
+static void
+check_data_credential_lifecycle_transfer (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *bob = seed_data_credential_human (&env, "dc-bob", TRUE);
+  data_credential_owned_tenant (store, "dc-other", "dc-alice");
+  data_credential_owned_tenant (store, "dc-bobs", "dc-bob");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *s1 = NULL, *s2 = NULL, *s3 = NULL, *s4 = NULL;
+  g_autofree gchar *c1 = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &s1);
+  g_autofree gchar *c2 = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &s2);
+  g_autofree gchar *c3 = data_credential_issue_for_use (&env, alice,
+          "dc-other", "query", "*", "3600", &s3);
+  g_autofree gchar *c4 = data_credential_issue_for_use (&env, bob,
+          "dc-bobs", "query", "*", "3600", &s4);
+  g_free (data_credential_revoke (&env, alice, "dc-1475", c2, 200));
+  g_autofree gchar *b1 = data_credential_bearer (&env, c1, s1);
+  data_credential_bearer_resolves (&env, b1, TRUE);
+
+  /* The revocation and the transfer commit together: when either audit
+   * fails, neither the owner nor the credential changes. */
+  static const gchar *const faults[] = {
+    "data_credential_lifecycle_revoke", "tenant_transfer_owner",
+  };
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  new_test_request (request);
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    data_credential_audit_fault (&env, faults[i], TRUE);
+    g_autofree gchar *failed = data_credential_transfer (&env, alice,
+            "dc-1475", "dc-bob", request, 500);
+    g_assert_cmpstr (failed, ==, "{\"error\":\"tenant_transfer_failed\"}");
+    data_credential_audit_fault (&env, faults[i], FALSE);
+    WylPolicyTenantAuthorityRecord *record = NULL;
+    g_assert_cmpint (wyl_policy_store_read_tenant_authority (store,
+        "dc-1475", &record), ==, WYRELOG_E_OK);
+    g_assert_cmpstr (record->owner_subject_id, ==, "dc-alice");
+    wyl_policy_tenant_authority_record_free (record);
+    data_credential_bearer_resolves (&env, b1, TRUE);
+    g_free (data_credential_bearer (&env, c1, s1));
+    g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 0);
+  }
+
+  /* The retry applies: c1 is revoked, attributed to the transfer. */
+  g_free (data_credential_transfer (&env, alice, "dc-1475", "dc-bob",
+      request, 200));
+  data_credential_bearer_resolves (&env, b1, FALSE);
+  g_free (data_credential_exchange (&env, c1, s1, 401));
+  g_assert_cmpuint (lifecycle_audit_count (&env, c1, request,
+      "tenant_transfer_owner"), ==, 1);
+  g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 1);
+  g_assert_cmpuint (lifecycle_completed_count (&env), ==, 1);
+  g_autofree gchar *listed = data_credential_request (&env, bob, "GET", NULL,
+          "dc-1475", NULL, 200);
+  g_autofree gchar *c1_entry = g_strdup_printf ("\"credential_id\":\"%s\"",
+          c1);
+  const gchar *entry = strstr (listed, c1_entry);
+  g_assert_nonnull (entry);
+  const gchar *end = strchr (entry, '}');
+  g_autofree gchar *c1_json = g_strndup (entry, end - entry);
+  g_assert_nonnull (strstr (c1_json, "\"state\":\"revoked\""));
+  g_assert_nonnull (strstr (c1_json,
+      "\"revoked_by\":\"dc-alice\",\"revoked_reason\":"
+      "\"ownership_transfer\""));
+  /* c2 keeps its own revocation; alice's other tenant and bob's own are
+   * untouched. */
+  g_autofree gchar *c2_entry = g_strdup_printf ("\"credential_id\":\"%s\"",
+          c2);
+  entry = strstr (listed, c2_entry);
+  g_assert_nonnull (entry);
+  end = strchr (entry, '}');
+  g_autofree gchar *c2_json = g_strndup (entry, end - entry);
+  g_assert_nonnull (strstr (c2_json, "\"revoked_reason\":\"revoked\""));
+  g_assert_cmpuint (lifecycle_audit_count (&env, c2, "*", "*"), ==, 0);
+  g_free (data_credential_bearer (&env, c3, s3));
+  g_free (data_credential_bearer (&env, c4, s4));
+
+  /* A replay answers as before and revokes nothing more. */
+  g_free (data_credential_transfer (&env, alice, "dc-1475", "dc-bob",
+      request, 200));
+  g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 1);
+  service_denial_env_clear (&env);
+}
+
 #endif
 
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
@@ -26049,9 +26265,9 @@ check_data_credential_read_contract (void)
   g_free (data_credential_rotate_in (&env, alice, "dc-1475", query_id));
   g_free (data_credential_verify (&env, query, "g2", 401));
 
-  /* A credential stands only while its issuer owns the tenant.  Until
-   * lifecycle revocation (#1476), a transfer does not revoke it; the
-   * per-use owner check refuses it. */
+  /* A credential stands only while its issuer owns the tenant.  Every
+   * transfer revokes it (#1476), so the per-use owner check is reached only
+   * by an owner change that bypasses the transfer: here a raw one. */
   g_autofree gchar *kept_secret = NULL;
   g_autofree gchar *kept_id = data_credential_issue_for_use (&env, alice,
           "dc-1475", "query", "*", "3600", &kept_secret);
@@ -26059,22 +26275,25 @@ check_data_credential_read_contract (void)
           kept_secret);
   g_free (data_credential_verify (&env, kept, "g2", 404));
   g_autofree gchar *bob = seed_data_credential_human (&env, "dc-bob", TRUE);
-  gchar transfer_request[WYL_REQUEST_ID_STRING_BUF];
-  g_assert_cmpint (wyl_request_id_new (transfer_request,
-      sizeof transfer_request), ==, WYRELOG_E_OK);
-  g_autofree gchar *transfer_query = g_strdup_printf ("tenant=__wr_default&"
-          "name=dc-1475&to=dc-bob&request_id=%s&guard_timestamp=123&"
-          "guard_loc_class=public&guard_risk=0", transfer_request);
-  guint transfer_status = 0;
-  g_autofree gchar *transferred = NULL;
-  g_assert_cmpint (send_raw_service_principal_bearer (env.session, "POST",
-      env.base_url, "/tenants/transfer-owner", transfer_query, alice, NULL,
-      &transfer_status, &transferred), ==, 0);
-  g_assert_cmpuint (transfer_status, ==, 200);
+  raw_owner_change (store, "dc-1475", "dc-alice", "dc-bob");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
   g_autofree gchar *former = data_credential_verify (&env, kept, "g2", 403);
   g_assert_cmpstr (former, ==, "{\"error\":\"data_credential_issuer_denied\"}");
+  raw_owner_change (store, "dc-1475", "dc-bob", "dc-alice");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_free (data_credential_verify (&env, kept, "g2", 404));
+  /* A transfer ends the credential itself: its bearer is no longer
+   * resolved and its secret no longer exchanges. */
+  gchar transfer_request[WYL_REQUEST_ID_STRING_BUF];
+  g_free (data_credential_transfer (&env, alice, "dc-1475", "dc-bob",
+      new_test_request (transfer_request), 200));
+  g_free (data_credential_verify (&env, kept, "g2", 401));
+  g_free (data_credential_exchange (&env, kept_id, kept_secret, 401));
   service_denial_env_clear (&env);
 }
+
 #endif
 
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
@@ -27400,6 +27619,9 @@ main (void)
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   check_data_credential_read_contract ();
   check_data_credential_write_contract ();
+#endif
+#ifdef WYL_HAS_AUDIT
+  check_data_credential_lifecycle_transfer ();
 #endif
   gint rc = default_variant_checks ();
   if (rc != 0)

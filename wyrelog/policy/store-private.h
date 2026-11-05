@@ -2586,6 +2586,19 @@ wyrelog_error_t wyl_policy_store_data_credential_revoke_issuer
     const gchar * tenant_id, const gchar * actor_subject_id,
     WylDataCredentialLifecycleReason reason, gint64 now_us,
     GPtrArray ** out_revoked);
+/* The credential's scope as an audit summary: credential, issuer,
+ * operations, graphs ("*" for all) and expiry, ';'-separated.  The route
+ * audits and the lifecycle revocation audits share it. */
+gchar *wyl_policy_store_data_credential_audit_scope
+  (const WylDataCredentialInfo * info);
+/* The lifecycle events revoke their credentials themselves (#1476):
+ * ownership transfer the previous owner's in that tenant, user disable and
+ * delete the issuer's in every tenant, tenant delete the tenant's.  Each
+ * revoked credential gets one audit row, action
+ * "data_credential_lifecycle_revoke", carrying the event's request id.
+ * *out receives those rows as WylAuditEvent, ordered by credential id. */
+wyrelog_error_t wyl_policy_store_data_credential_lifecycle_audits
+  (wyl_policy_store_t * store, const gchar * request_id, GPtrArray ** out);
 /* Verifies the credential only; the per-use checks of #1475 are the
  * caller's.  Every refusal of a well-formed presentation is WYRELOG_E_AUTH. */
 wyrelog_error_t wyl_policy_store_data_credential_verify
