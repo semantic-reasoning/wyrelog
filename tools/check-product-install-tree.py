@@ -175,6 +175,36 @@ def build_options(builddir: Path) -> dict[str, object]:
     return {item["name"]: item["value"] for item in json.loads(result.stdout)}
 
 
+def check_wrap_pins(manifest: dict,
+                    subprojects_dir: Path = ROOT / "subprojects") -> list[str]:
+    """Compare the manifest's top-level provider pins with the wrap files.
+
+    Needs no build directory, so the regular test suite can catch a wrap bump
+    that left the product manifest behind."""
+    errors: list[str] = []
+    wraps = {
+        "duckdb-prebuilt-linux.wrap": "source_hash",
+        "wirelog.wrap": "revision",
+        "libchronoid.wrap": "revision",
+    }
+    for filename, field in wraps.items():
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(subprojects_dir / filename, encoding="utf-8")
+            actual = parser["wrap-file" if field == "source_hash" else "wrap-git"][field]
+        except (OSError, KeyError) as exc:
+            errors.append(f"cannot read pinned provider from {filename}: {exc}")
+            continue
+        expected = manifest["duckdb_wrap_sha256"] if field == "source_hash" else manifest[
+            "wrap_revisions"
+        ][filename]
+        if actual != expected:
+            errors.append(f"{filename} {field}: expected {expected}, got {actual}"
+                          " (keep packaging/linux-product-install.json in step"
+                          f" with subprojects/{filename})")
+    return errors
+
+
 def check_build_provenance(builddir: Path, manifest: dict) -> list[str]:
     errors: list[str] = []
     options = build_options(builddir)
@@ -225,24 +255,7 @@ def check_build_provenance(builddir: Path, manifest: dict) -> list[str]:
                     f"{duckdb_external.get('version')}, got {actual_duckdb_version}"
                 )
 
-    wraps = {
-        "duckdb-prebuilt-linux.wrap": "source_hash",
-        "wirelog.wrap": "revision",
-        "libchronoid.wrap": "revision",
-    }
-    for filename, field in wraps.items():
-        parser = configparser.ConfigParser(interpolation=None)
-        try:
-            parser.read(ROOT / "subprojects" / filename)
-            actual = parser["wrap-file" if field == "source_hash" else "wrap-git"][field]
-        except (OSError, KeyError) as exc:
-            errors.append(f"cannot read pinned provider from {filename}: {exc}")
-            continue
-        expected = manifest["duckdb_wrap_sha256"] if field == "source_hash" else manifest[
-            "wrap_revisions"
-        ][filename]
-        if actual != expected:
-            errors.append(f"{filename} {field}: expected {expected}, got {actual}")
+    errors.extend(check_wrap_pins(manifest))
 
     nested = {
         "nanoarrow.wrap": "revision",
@@ -341,6 +354,27 @@ def self_test() -> None:
         errors = verify(destdir, "/usr", Path(temporary), DEFAULT_MANIFEST)
         assert any("escapes DESTDIR" in error for error in errors)
 
+        pins = Path(temporary) / "subprojects"
+        pins.mkdir()
+        (pins / "duckdb-prebuilt-linux.wrap").write_text(
+            "[wrap-file]\nsource_hash = aa\n", encoding="utf-8")
+        (pins / "wirelog.wrap").write_text(
+            "[wrap-git]\nrevision = bb\n", encoding="utf-8")
+        (pins / "libchronoid.wrap").write_text(
+            "[wrap-git]\nrevision = cc\n", encoding="utf-8")
+        pinned = {
+            "duckdb_wrap_sha256": "aa",
+            "wrap_revisions": {"wirelog.wrap": "bb", "libchronoid.wrap": "cc"},
+        }
+        assert check_wrap_pins(pinned, pins) == []
+        stale = dict(pinned, wrap_revisions={"wirelog.wrap": "old",
+                                             "libchronoid.wrap": "cc"})
+        errors = check_wrap_pins(stale, pins)
+        assert len(errors) == 1 and "wirelog.wrap revision" in errors[0]
+        (pins / "libchronoid.wrap").unlink()
+        errors = check_wrap_pins(pinned, pins)
+        assert len(errors) == 1 and "libchronoid.wrap" in errors[0]
+
 
 def check_profile(builddir: Path, manifest_path: Path) -> list[str]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -355,9 +389,19 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--profile-only", action="store_true")
+    parser.add_argument("--wrap-pins-only", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
+        return 0
+    if args.wrap_pins_only:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        errors = check_wrap_pins(manifest)
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        if errors:
+            return 1
+        print("product install wrap pins match the manifest")
         return 0
     if args.builddir is None:
         parser.error("--builddir is required")

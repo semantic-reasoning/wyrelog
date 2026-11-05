@@ -48,6 +48,12 @@ test('product-install-tree-checker-self-test', python3,
   args : [files('../tools/check-product-install-tree.py'), '--self-test'])
 test('product-install-tree-stager-self-test', python3,
   args : [files('../tools/stage-product-install.py'), '--self-test'])
+# The product manifest's top-level provider pins must follow the wrap files;
+# this needs no build, so bumping one of those wraps without the manifest
+# fails here.  The wirelog version and its nested pins need the resolved
+# subproject and are checked only by the product-install job.
+test('product-install-wrap-pins', python3,
+  args : [files('../tools/check-product-install-tree.py'), '--wrap-pins-only'])
 
 test('wyctl-private-tmpdir-runner-self-test', python3,
   args : [files('test-wyctl-private-tmpdir-runner.py'),
