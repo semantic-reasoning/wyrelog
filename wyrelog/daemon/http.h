@@ -432,6 +432,10 @@ void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
 #endif
 void wyl_daemon_http_set_refresh_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now);
+/* #1475: moves the data-credential clock forward by @offset_us.  The clock
+ * never runs back, so a test that advances it needs a fresh server. */
+void wyl_daemon_http_advance_data_credential_clock_for_test
+  (SoupServer * server, gint64 offset_us);
 void wyl_daemon_http_set_service_auth_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now_seconds);
 gboolean wyl_daemon_http_service_auth_maintenance_active_for_test

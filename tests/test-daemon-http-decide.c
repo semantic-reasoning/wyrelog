@@ -25186,6 +25186,221 @@ check_tenant_data_credential_mutation_contract (void)
   g_assert_cmpint (g_rmdir (log_dir), ==, 0);
 }
 
+#ifdef WYL_HAS_AUDIT
+/* #1475: the shared fixture for data-credential use.  dc-alice owns
+ * dc-1475 and may query (wr.datalog.query, wr.fact.read) and append there.
+ * The caller frees the owner's access token. */
+static gchar *
+data_credential_use_fixture (ServiceDenialEnv *env)
+{
+  g_assert_cmpint (service_denial_env_init (env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  gchar *alice = seed_data_credential_human (env, "dc-alice", TRUE);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-1475",
+      "dc-alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, "dc-1475",
+      "active"), ==, WYRELOG_E_OK);
+  grant_armed_permission (store, "dc-alice", "wr.datalog.query", "dc-1475");
+  grant_armed_permission (store, "dc-alice", "wr.fact.read", "dc-1475");
+  grant_armed_permission (store, "dc-alice", "wr.fact.append", "dc-1475");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env->handle), ==,
+      WYRELOG_E_OK);
+  return alice;
+}
+
+/* Issues through the #1474 route and returns the credential id; the secret
+ * goes to *out_secret. */
+static gchar *
+data_credential_issue_for_use (ServiceDenialEnv *env, const gchar *owner,
+    const gchar *tenant, const gchar *operations, const gchar *graphs,
+    const gchar *expires, gchar **out_secret)
+{
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *body = data_credential_issue_body (request, operations,
+          graphs, expires);
+  g_autofree gchar *issued = data_credential_request (env, owner, "POST",
+          "issue", tenant, body, 200);
+  *out_secret = extract_json_string (issued, "secret");
+  g_assert_nonnull (*out_secret);
+  return extract_json_string (issued, "credential_id");
+}
+
+/* Exchanges a data credential at /auth/service-token.  Returns the response
+ * body. */
+static gchar *
+data_credential_exchange (ServiceDenialEnv *env, const gchar *credential_id,
+    const gchar *secret, guint expected_status)
+{
+  g_autofree gchar *request = g_strdup_printf ("{\"credential_id\":\"%s\","
+          "\"credential_secret\":\"%s\"}", credential_id, secret);
+  gchar *body = NULL;
+  guint status = 0;
+  g_assert_cmpint (send_raw_service_principal_full (env->session, "POST",
+      env->base_url, "/auth/service-token", NULL, request, &status, &body),
+      ==, 0);
+  if (status != expected_status)
+    g_printerr ("data credential exchange: status=%u body=%s\n", status,
+        body);
+  g_assert_cmpuint (status, ==, expected_status);
+  return body;
+}
+
+static gchar *
+data_credential_bearer (ServiceDenialEnv *env, const gchar *credential_id,
+    const gchar *secret)
+{
+  g_autofree gchar *body = data_credential_exchange (env, credential_id,
+          secret, 200);
+  /* Only the access token: there is never a refresh token. */
+  g_assert_true (g_str_has_prefix (body, "{\"access_token\":\""));
+  g_assert_null (strstr (body, "refresh"));
+  gchar *token = extract_json_string (body, "access_token");
+  g_assert_nonnull (token);
+  g_assert_cmpuint (strlen (body), ==, strlen (token) + 19);
+  return token;
+}
+
+typedef struct
+{
+  const gchar *credential_id;
+  guint rows;
+  gboolean issuer_named;
+} DataTokenExchangeAuditScan;
+
+static wyrelog_error_t
+data_token_exchange_audit_scan (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) deny_origin;
+  (void) request_id;
+  DataTokenExchangeAuditScan *scan = user_data;
+  if (g_strcmp0 (action, "data_token_exchange") != 0
+      || g_strcmp0 (subject_id, scan->credential_id) != 0)
+    return WYRELOG_E_OK;
+  scan->rows++;
+  scan->issuer_named = g_strcmp0 (resource_id, "dc-1475") == 0
+      && decision == WYL_DECISION_ALLOW
+      && g_str_has_prefix (deny_reason, "issuer=dc-alice;generation=1");
+  return WYRELOG_E_OK;
+}
+
+static guint
+data_token_exchange_audit_rows (wyl_policy_store_t *store,
+    const gchar *credential_id, gboolean *out_issuer_named)
+{
+  DataTokenExchangeAuditScan scan = { .credential_id = credential_id };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (store,
+      data_token_exchange_audit_scan, &scan), ==, WYRELOG_E_OK);
+  *out_issuer_named = scan.issuer_named;
+  return scan.rows;
+}
+
+static void
+check_data_credential_exchange_contract (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *secret = NULL;
+  g_autofree gchar *id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &secret);
+  WylDataCredentialInfo info = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, id,
+      &info), ==, WYRELOG_E_OK);
+  g_assert_cmpint (info.last_used_at_us, ==, 0);
+  wyl_data_credential_info_clear (&info);
+
+  /* An exchange returns a short-lived bearer naming the credential. */
+  g_autofree gchar *token = data_credential_bearer (&env, id, secret);
+  g_auto (GStrv) parts = g_strsplit (token, ".", -1);
+  g_assert_cmpuint (g_strv_length (parts), ==, 3);
+  g_autoptr (GBytes) payload = NULL;
+  g_assert_cmpint (wyl_jwt_base64url_decode (parts[1], &payload), ==,
+      WYRELOG_E_OK);
+  wyl_jwt_access_claims_t claims = { 0 };
+  g_assert_cmpint (wyl_jwt_parse_access_claims_json (payload, &claims), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (claims.subject, ==, id);
+  g_assert_cmpstr (claims.credential_id, ==, id);
+  g_assert_cmpstr (claims.auth_method, ==, "data_credential");
+  g_assert_cmpstr (claims.tenant, ==, "dc-1475");
+  g_assert_cmpint (claims.expires_at - claims.issued_at, <=,
+      WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS);
+  g_assert_cmpint (claims.expires_at, >, claims.issued_at);
+  wyl_jwt_access_claims_clear (&claims);
+
+  /* The exchange records the use and audits it, naming the issuer. */
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, id,
+      &info), ==, WYRELOG_E_OK);
+  gint64 first_use = info.last_used_at_us;
+  g_assert_cmpint (first_use, >, 0);
+  wyl_data_credential_info_clear (&info);
+  gboolean issuer_named = FALSE;
+  g_assert_cmpuint (data_token_exchange_audit_rows (store, id,
+      &issuer_named), ==, 1);
+  g_assert_true (issuer_named);
+  g_autofree gchar *second = data_credential_bearer (&env, id, secret);
+  g_assert_cmpstr (second, !=, token);
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, id,
+      &info), ==, WYRELOG_E_OK);
+  g_assert_cmpint (info.last_used_at_us, >, first_use);
+  wyl_data_credential_info_clear (&info);
+  g_assert_cmpuint (data_token_exchange_audit_rows (store, id,
+      &issuer_named), ==, 2);
+
+  /* Every refusal of a well-formed exchange reads the same: a wrong
+   * secret, an unknown credential, a revoked one. */
+  static const gchar refused[] = "{\"error\":\"service_token_auth_required\"}";
+  g_autofree gchar *wrong_secret = g_strdup (secret);
+  wrong_secret[0] = wrong_secret[0] == 'A' ? 'B' : 'A';
+  g_autofree gchar *wrong = data_credential_exchange (&env, id, wrong_secret,
+          401);
+  g_assert_cmpstr (wrong, ==, refused);
+  g_autofree gchar *unknown = data_credential_exchange (&env,
+          "wdc_000000000000000000000000009", secret, 401);
+  g_assert_cmpstr (unknown, ==, refused);
+  g_autofree gchar *malformed = data_credential_exchange (&env, "wdc_short",
+          secret, 400);
+  g_assert_null (strstr (malformed, "auth_required"));
+  g_autofree gchar *revoked_secret = NULL;
+  g_autofree gchar *revoked_id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &revoked_secret);
+  g_free (data_credential_revoke (&env, alice, "dc-1475", revoked_id, 200));
+  g_autofree gchar *revoked = data_credential_exchange (&env, revoked_id,
+          revoked_secret, 401);
+  g_assert_cmpstr (revoked, ==, refused);
+  g_assert_cmpuint (data_token_exchange_audit_rows (store, id,
+      &issuer_named), ==, 2);
+
+  /* Until the bearer resolver learns data credentials (#1475), the token
+   * authenticates nothing. */
+  g_autofree gchar *sid = NULL, *actor = NULL, *tenant = NULL;
+  g_assert_cmpint (wyl_daemon_http_resolve_bearer_for_test (env.http.server,
+      token, &sid, &actor, &tenant), ==, WYRELOG_E_POLICY);
+  g_assert_null (actor);
+
+  /* An expired credential cannot be exchanged.  The clock only runs
+   * forward, so this comes last. */
+  g_autofree gchar *short_secret = NULL;
+  g_autofree gchar *short_id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &short_secret);
+  g_free (data_credential_bearer (&env, short_id, short_secret));
+  wyl_daemon_http_advance_data_credential_clock_for_test (env.http.server,
+      2 * G_TIME_SPAN_HOUR);
+  g_autofree gchar *expired = data_credential_exchange (&env, short_id,
+          short_secret, 401);
+  g_assert_cmpstr (expired, ==, refused);
+  service_denial_env_clear (&env);
+}
+#endif
+
 #if defined(WYL_TEST_VARIANT_REFRESH)
 /*
  * #1030: a client that treats the access token as opaque -- the correct
@@ -26272,6 +26487,9 @@ main (void)
   check_tenant_delete_contract ();
   check_tenant_data_credential_list_contract ();
   check_tenant_data_credential_mutation_contract ();
+#ifdef WYL_HAS_AUDIT
+  check_data_credential_exchange_contract ();
+#endif
   gint rc = default_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);

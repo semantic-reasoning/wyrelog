@@ -99,6 +99,10 @@ A4_CONFINEMENT = (
      "mutate_data_credential_publication"),
     (re.compile(r"\bwyl_service_credential_secret_peek_encoded\s*\("),
      "set_data_credential_secret_response"),
+    # #1475: verifying a presented secret, which also records its use, is
+    # confined to the exchange's publication body.
+    (re.compile(r"\bwyl_policy_store_data_credential_verify\s*\("),
+     "mutate_data_credential_exchange"),
     (re.compile(re.escape('\\"secret\\"')),
      "set_data_credential_secret_response"),
 )
@@ -519,7 +523,10 @@ def self_test() -> int:
         "static void\n"
         "set_data_credential_secret_response (void)\n{\n"
         '  static const gchar key[] = ",\\"secret\\":\\"";\n'
-        "  wyl_service_credential_secret_peek_encoded (s, &n);\n}\n")
+        "  wyl_service_credential_secret_peek_encoded (s, &n);\n}\n"
+        "static wyrelog_error_t\n"
+        "mutate_data_credential_exchange (void)\n{\n"
+        "  wyl_policy_store_data_credential_verify (s);\n}\n")
     if a4_violations("http.c", a4_clean):
         return 1
     a4_elsewhere = a4_clean + (
