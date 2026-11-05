@@ -47727,13 +47727,19 @@ wyl_policy_store_tenant_delete_commit (wyl_policy_store_t *store,
   sqlite3_stmt *s = NULL;
   g_autoptr (GPtrArray) rows = g_ptr_array_new_with_free_func (tenant_delete_row_free);
   g_autoptr (GPtrArray) guards = g_ptr_array_new_with_free_func (tenant_delete_guard_free);
-  rc = tenant_delete_capture_rows (store, tenant, rows);
-  if (rc != WYRELOG_E_OK) return rc;
   gchar audit_id[WYL_ID_STRING_BUF] = {0};
   rc = service_domain_new_audit_id (audit_id);
   if (rc != WYRELOG_E_OK) return rc;
   const gchar *capacity = system_admin ? "system_admin" : "owner";
   gint64 now = g_get_real_time ();
+  /* The tenant's data credentials are revoked, and audited, before the
+   * purge removes them (#1476).  A refused delete never gets here. */
+  rc = data_credential_lifecycle_revoke (store, NULL, tenant, actor, capacity,
+          WYL_DATA_CREDENTIAL_REVOKE_TENANT_DELETED, "tenant_delete", audit_id,
+          request_id, now);
+  if (rc != WYRELOG_E_OK) return rc;
+  rc = tenant_delete_capture_rows (store, tenant, rows);
+  if (rc != WYRELOG_E_OK) return rc;
   rc = prepare_stmt (store->db,
           "INSERT INTO tenant_delete_journals(tenant_id,request_id,actor,owner,capacity,manifest,audit_id,phase,created_at_us) "
           "VALUES(?1,?2,?3,?4,?5,?6,?7,'purging',?8)", &s);

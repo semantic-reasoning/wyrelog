@@ -25834,6 +25834,7 @@ data_credential_audit_fault (ServiceDenialEnv *env, const gchar *action,
     gboolean armed)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  g_assert_true (!armed || action != NULL);
   g_autofree gchar *sql = armed ? g_strdup_printf ("CREATE TEMP TRIGGER "
           "lifecycle_fault BEFORE INSERT ON audit_events WHEN NEW.action='%s' "
           "BEGIN SELECT RAISE(FAIL,'audit refused'); END", action) :
@@ -25843,6 +25844,32 @@ data_credential_audit_fault (ServiceDenialEnv *env, const gchar *action,
   g_assert_true (policy_count_rows (env->handle, "SELECT count(*) FROM "
       "sqlite_temp_schema", &temp_objects));
   g_assert_cmpint (temp_objects, ==, armed ? 1 : 0);
+}
+
+/* Fails every write of data_credentials while armed: the revocation itself
+ * fails, and so does the store's closed-schema check. */
+static void
+data_credential_table_fault (ServiceDenialEnv *env, gboolean armed)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  policy_exec (store, armed ? "CREATE TEMP TRIGGER lifecycle_fault BEFORE "
+      "UPDATE ON data_credentials BEGIN SELECT RAISE(FAIL,'credential "
+      "refused'); END" : "DROP TRIGGER lifecycle_fault");
+  gint64 temp_objects = -1;
+  g_assert_true (policy_count_rows (env->handle, "SELECT count(*) FROM "
+      "sqlite_temp_schema", &temp_objects));
+  g_assert_cmpint (temp_objects, ==, armed ? 1 : 0);
+}
+
+static void
+data_credential_assert_state (wyl_policy_store_t *store, const gchar *id,
+    const gchar *state)
+{
+  WylDataCredentialInfo info = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, id, &info),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpstr (info.state, ==, state);
+  wyl_data_credential_info_clear (&info);
 }
 
 /* A data bearer is refused on the list route: with 403 while it resolves
@@ -25881,6 +25908,88 @@ lifecycle_completed_count (ServiceDenialEnv *env)
       "audit_intentions WHERE action='data_credential_lifecycle_revoke' "
       "AND state='committed'", &count));
   return (guint) count;
+}
+
+/* #1476: a tenant delete revokes the tenant's credentials before it purges
+ * them, atomically with the delete.  The purge removes them from the list,
+ * so the retained audit ledger is the evidence. */
+static void
+check_data_credential_lifecycle_tenant_delete (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  data_credential_owned_tenant (store, "dc-other", "dc-alice");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *s1 = NULL, *s2 = NULL, *s3 = NULL;
+  g_autofree gchar *c1 = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &s1);
+  g_autofree gchar *c2 = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &s2);
+  g_autofree gchar *c3 = data_credential_issue_for_use (&env, alice,
+          "dc-other", "query", "*", "3600", &s3);
+  g_autofree gchar *b1 = data_credential_bearer (&env, c1, s1);
+  tenant_ownership_request_named (&env, alice, "dc-1475", "seal", NULL, NULL,
+      200, NULL);
+
+  /* Credentials and their bearers are not another subject's permission:
+   * they never refuse the delete.  Another subject's role does, and then
+   * nothing is revoked. */
+  register_test_human (store, "dc-holder");
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
+      "dc-holder", "wr.system_admin", "dc-1475"), ==, WYRELOG_E_OK);
+  gchar refused[WYL_REQUEST_ID_STRING_BUF];
+  tenant_ownership_request_named (&env, alice, "dc-1475", "delete", NULL,
+      new_test_request (refused), 409, NULL);
+  g_assert_cmpint (wyl_policy_store_revoke_role_membership (store,
+      "dc-holder", "wr.system_admin", "dc-1475"), ==, WYRELOG_E_OK);
+  data_credential_assert_state (store, c1, "active");
+  g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 0);
+
+  /* The revocation and the delete commit together. */
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  new_test_request (request);
+  for (guint i = 0; i < 3; i++) {
+    if (i < 2)
+      data_credential_audit_fault (&env, i == 0
+          ? "data_credential_lifecycle_revoke" : "tenant_delete", TRUE);
+    else
+      data_credential_table_fault (&env, TRUE);
+    tenant_ownership_request_named (&env, alice, "dc-1475", "delete", NULL,
+        request, 503, "{\"error\":\"tenant_delete_failed\"}");
+    if (i < 2)
+      data_credential_audit_fault (&env, NULL, FALSE);
+    else
+      data_credential_table_fault (&env, FALSE);
+    gboolean exists = FALSE;
+    g_assert_cmpint (wyl_policy_store_tenant_exists (store, "dc-1475",
+        &exists), ==, WYRELOG_E_OK);
+    g_assert_true (exists);
+    data_credential_assert_state (store, c1, "active");
+    data_credential_assert_state (store, c2, "active");
+    data_credential_bearer_resolves (&env, b1, TRUE);
+    g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 0);
+  }
+
+  tenant_ownership_request_named (&env, alice, "dc-1475", "delete", NULL,
+      request, 200, NULL);
+  data_credential_bearer_resolves (&env, b1, FALSE);
+  g_free (data_credential_exchange (&env, c1, s1, 401));
+  g_assert_cmpuint (lifecycle_audit_count (&env, c1, request,
+      "tenant_delete"), ==, 1);
+  g_assert_cmpuint (lifecycle_audit_count (&env, c2, request,
+      "tenant_delete"), ==, 1);
+  g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 2);
+  g_assert_cmpuint (lifecycle_completed_count (&env), ==, 2);
+  gint64 left = -1;
+  g_assert_true (policy_count_rows (env.handle, "SELECT (SELECT count(*) "
+      "FROM data_credentials WHERE tenant_id='dc-1475')+(SELECT count(*) "
+      "FROM data_credential_graphs WHERE tenant_id='dc-1475')", &left));
+  g_assert_cmpint (left, ==, 0);
+  /* alice's credential in her other tenant is untouched. */
+  g_free (data_credential_bearer (&env, c3, s3));
+  service_denial_env_clear (&env);
 }
 
 /* #1476: an ownership transfer revokes the previous owner's credentials in
@@ -27622,6 +27731,7 @@ main (void)
 #endif
 #ifdef WYL_HAS_AUDIT
   check_data_credential_lifecycle_transfer ();
+  check_data_credential_lifecycle_tenant_delete ();
 #endif
   gint rc = default_variant_checks ();
   if (rc != 0)

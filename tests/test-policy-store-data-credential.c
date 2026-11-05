@@ -1190,6 +1190,134 @@ test_lifecycle_transfer_atomic (void)
   g_assert_cmpstr (after.revoked_reason, ==, "ownership_transfer");
 }
 
+/* Changes a tenant's owner without a transfer, so nothing is revoked: a
+ * credential of the former owner stays active in the tenant, as one
+ * written before lifecycle revocation would. */
+static void
+raw_owner_change (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *from, const gchar *to)
+{
+  gchar request[WYL_REQUEST_ID_STRING_BUF], audit[WYL_REQUEST_ID_STRING_BUF];
+  g_autofree gchar *sql = g_strdup_printf ("INSERT INTO "
+          "tenant_ownership_events(request_id,tenant_id,actor,previous_owner,"
+          "new_owner,changed,audit_id,created_at_us) VALUES('%s','%s','%s','%s',"
+          "'%s',1,'%s',1);UPDATE tenants SET owner_subject_id='%s' WHERE "
+          "tenant_id='%s';UPDATE tenant_ownership_events SET applied=1 WHERE "
+          "request_id='%s'", new_request (request), tenant, from, from, to,
+          new_request (audit), to, tenant, request);
+  exec_ok (store, sql);
+}
+
+static void
+seal (wyl_policy_store_t *store, const gchar *tenant)
+{
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store, tenant,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==, WYRELOG_E_OK);
+}
+
+/* Deletes alice as root, with every tenant she owns as a child.  The
+ * children's request ids go to *out_children, in preview order. */
+static void
+delete_alice (wyl_policy_store_t *store, const gchar *request,
+    GPtrArray **out_children)
+{
+  g_auto (WylUserDeletePreview) preview = { 0 };
+  g_assert_cmpint (wyl_policy_store_user_preview (store, "alice", &preview),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpstr (preview.unsealed, ==, "");
+  g_assert_cmpstr (preview.blockers, ==, "");
+  GPtrArray *children = g_ptr_array_new_with_free_func (wyl_user_child_free);
+  for (guint i = 0; i < preview.tenants->len; i++) {
+    WylTenantDeleteRecord *child = g_new0 (WylTenantDeleteRecord, 1);
+    gchar child_request[WYL_REQUEST_ID_STRING_BUF];
+    child->tenant = g_strdup (g_ptr_array_index (preview.tenants, i));
+    child->request_id = g_strdup (new_request (child_request));
+    child->manifest = g_strdup ("none");
+    g_ptr_array_add (children, child);
+  }
+  g_auto (WylUserOperation) deleted = { 0 };
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_user_operation_commit (store, "alice",
+      "root", "delete", request, preview.fingerprint, children, &deleted),
+      ==, WYRELOG_E_OK);
+  commit (store);
+  *out_children = children;
+}
+
+static const gchar *
+child_request (GPtrArray *children, const gchar *tenant)
+{
+  for (guint i = 0; i < children->len; i++) {
+    WylTenantDeleteRecord *child = g_ptr_array_index (children, i);
+    if (g_str_equal (child->tenant, tenant))
+      return child->request_id;
+  }
+  g_assert_not_reached ();
+  return NULL;
+}
+
+static void
+assert_lifecycle_audit (wyl_policy_store_t *store, const gchar *request,
+    const gchar *credential_id, const gchar *reason, const gchar *event)
+{
+  g_autoptr (GPtrArray) audits = lifecycle_audits (store, request);
+  for (guint i = 0; i < audits->len; i++) {
+    WylAuditEvent *audit = g_ptr_array_index (audits, i);
+    if (g_strcmp0 (wyl_audit_event_get_deny_origin (audit), credential_id))
+      continue;
+    g_autofree gchar *marker = g_strdup_printf (";reason=%s;event=%s;",
+            reason, event);
+    g_assert_nonnull (strstr (wyl_audit_event_get_deny_reason (audit),
+        marker));
+    return;
+  }
+  g_assert_not_reached ();
+}
+
+/* A user delete deletes the tenants the user owns as children; each child
+ * revokes what is still active in its tenant under its own request. */
+static void
+test_lifecycle_user_delete_children (void)
+{
+  g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
+  register_test_human (store, "root");
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "root",
+      "wr.system_admin", "__wr_default"), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-x", "bob",
+      &created), ==, WYRELOG_E_OK);
+  gint64 now = g_get_real_time ();
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_auto (WylDataCredentialInfo) a1 = { 0 };
+  g_auto (WylDataCredentialInfo) bx = { 0 };
+  g_auto (WylDataCredentialInfo) b1 = { 0 };
+  g_assert_cmpint (issue (store, 1, DAY, now, &a1, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (issue_full (store, "tenant-x", "bob", new_request (request),
+      1, NULL, 0, DAY, now, &bx, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (issue_full (store, "tenant-b", "bob", new_request (request),
+      1, NULL, 0, DAY, now, &b1, NULL), ==, WYRELOG_E_OK);
+  /* bob's credential stays active in tenant-x after alice takes it over. */
+  raw_owner_change (store, "tenant-x", "bob", "alice");
+  seal (store, "tenant-a");
+  seal (store, "tenant-x");
+
+  gchar deletion[WYL_REQUEST_ID_STRING_BUF];
+  g_autoptr (GPtrArray) children = NULL;
+  delete_alice (store, new_request (deletion), &children);
+  g_assert_cmpuint (children->len, ==, 2);
+  assert_lifecycle_audit (store, child_request (children, "tenant-a"),
+      a1.credential_id, "tenant_deleted", "tenant_delete");
+  assert_lifecycle_audit (store, child_request (children, "tenant-x"),
+      bx.credential_id, "tenant_deleted", "tenant_delete");
+  g_autoptr (GPtrArray) parent = lifecycle_audits (store, deletion);
+  g_assert_cmpuint (parent->len, ==, 0);
+  /* bob's credential in his own tenant is not alice's to end. */
+  g_auto (WylDataCredentialInfo) still = { 0 };
+  lookup (store, b1.credential_id, &still);
+  g_assert_cmpstr (still.state, ==, "active");
+}
+
 static void
 test_replay (void)
 {
@@ -1393,22 +1521,58 @@ test_tenant_delete_with_credentials (void)
     wyl_service_credential_secret_clear (&secret);
     commit (store);
 
+    /* A refused delete commits no revocation.  (The rollback would also
+     * hide one made before the refusal, so this shows atomicity, not
+     * ordering.) */
+    gchar refused[WYL_REQUEST_ID_STRING_BUF];
+    begin (store);
+    g_auto (WylTenantDeleteRecord) unsealed = { 0 };
+    g_assert_cmpint (wyl_policy_store_tenant_delete_commit (store, "tenant-b",
+        "bob", new_request (refused), FALSE, "none", &unsealed), !=,
+        WYRELOG_E_OK);
+    wyl_policy_store_rollback_mutation (store);
+    g_auto (WylDataCredentialInfo) kept = { 0 };
+    lookup (store, second.credential_id, &kept);
+    g_assert_cmpstr (kept.state, ==, "active");
+    g_autoptr (GPtrArray) none = lifecycle_audits (store, refused);
+    g_assert_cmpuint (none->len, ==, 0);
+
     WylPolicyAuthorityMutationResult result;
     g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
         "tenant-b", WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==,
         WYRELOG_E_OK);
-    /* The delete revokes, then purges, in one transaction. */
+    /* The delete revokes, then purges, in one transaction: the active
+     * credential is audited, the rotated one is not, and the audit row
+     * outlives the purged credential. */
+    gchar deletion[WYL_REQUEST_ID_STRING_BUF];
     begin (store);
-    g_autoptr (GPtrArray) revoked = NULL;
-    g_assert_cmpint (wyl_policy_store_data_credential_revoke_tenant (store,
-        "tenant-b", "bob", WYL_DATA_CREDENTIAL_REVOKE_TENANT_DELETED, NOW + 2,
-        &revoked), ==, WYRELOG_E_OK);
-    g_assert_cmpuint (revoked->len, ==, 1);
     g_auto (WylTenantDeleteRecord) record = { 0 };
     g_assert_cmpint (wyl_policy_store_tenant_delete_commit (store, "tenant-b",
-        "bob", new_request (request), FALSE, "none", &record), ==,
+        "bob", new_request (deletion), FALSE, "none", &record), ==,
         WYRELOG_E_OK);
     commit (store);
+    g_autoptr (GPtrArray) audits = lifecycle_audits (store, deletion);
+    g_assert_cmpuint (audits->len, ==, 1);
+    WylAuditEvent *audit = g_ptr_array_index (audits, 0);
+    g_assert_cmpstr (wyl_audit_event_get_deny_origin (audit), ==,
+        second.credential_id);
+    g_assert_cmpstr (wyl_audit_event_get_resource_id (audit), ==, "tenant-b");
+    g_assert_cmpstr (wyl_audit_event_get_subject_id (audit), ==, "bob");
+    g_assert_cmpint (wyl_audit_event_get_created_at_us (audit), ==,
+        record.created_at_us);
+    g_autofree gchar *tail = g_strdup_printf (";capacity=owner;"
+            "reason=tenant_deleted;event=tenant_delete;event_audit=%s",
+            record.audit_id);
+    g_assert_true (g_str_has_suffix (wyl_audit_event_get_deny_reason (audit),
+        tail));
+    /* A replay of the delete writes no second row. */
+    begin (store);
+    g_auto (WylTenantDeleteRecord) replay = { 0 };
+    g_assert_cmpint (wyl_policy_store_tenant_delete_commit (store, "tenant-b",
+        "bob", deletion, FALSE, "none", &replay), ==, WYRELOG_E_OK);
+    commit (store);
+    g_autoptr (GPtrArray) again = lifecycle_audits (store, deletion);
+    g_assert_cmpuint (again->len, ==, 1);
     sqlite3_stmt *stmt = NULL;
     g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
         "SELECT (SELECT count(*) FROM data_credentials WHERE tenant_id="
@@ -1580,6 +1744,8 @@ main (int argc, char **argv)
       test_lifecycle_transfer);
   g_test_add_func ("/data-credential/lifecycle-transfer-atomic",
       test_lifecycle_transfer_atomic);
+  g_test_add_func ("/data-credential/lifecycle-user-delete-children",
+      test_lifecycle_user_delete_children);
   g_test_add_func ("/data-credential/replay", test_replay);
   g_test_add_func ("/data-credential/secret-not-persisted",
       test_secret_not_persisted);

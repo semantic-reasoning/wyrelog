@@ -6683,7 +6683,46 @@ typedef struct
   const WylTenantDeleteRuntime *runtime;
   WylTenantDeleteRecord *record;
   gboolean system_admin;
+  GPtrArray *revocations;
+  /* Set for a user delete's children: the user event reads and verifies
+   * every child's revocations with its own. */
+  gboolean revocations_verified_by_parent;
 } HandleTenantDelete;
+
+/* The lifecycle revocations (#1476) an event wrote, read back by its
+ * request id: verified with the event, then completed like its audit. */
+static wyrelog_error_t
+handle_verify_lifecycle_audits (WylEngineVerification *verification,
+    const GPtrArray *audits)
+{
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < audits->len; i++) {
+    const WylAuditEvent *event = g_ptr_array_index (audits, i);
+    g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+    rc = wyl_engine_verification_verify_audit_event (verification, id,
+            wyl_audit_event_get_created_at_us (event),
+            wyl_audit_event_get_decision (event) == WYL_DECISION_ALLOW,
+            wyl_audit_event_get_subject_id (event),
+            wyl_audit_event_get_action (event),
+            wyl_audit_event_get_resource_id (event),
+            wyl_audit_event_get_deny_reason (event),
+            wyl_audit_event_get_deny_origin (event),
+            wyl_audit_event_get_request_id (event));
+  }
+  return rc;
+}
+
+static void
+handle_complete_lifecycle_audits (WylHandle *self, const gchar *request_id)
+{
+  g_autoptr (GPtrArray) audits = NULL;
+  if (wyl_policy_store_data_credential_lifecycle_audits (self->policy_store,
+      request_id, &audits) != WYRELOG_E_OK)
+    return;
+  for (guint i = 0; i < audits->len; i++)
+    wyl_audit_complete_authoritative_event (self,
+        g_ptr_array_index (audits, i));
+}
 
 static wyrelog_error_t
 handle_tenant_delete_checkpoint (HandleTenantDelete *d, const gchar *point)
@@ -6699,6 +6738,10 @@ handle_tenant_delete_mutate (wyl_policy_store_t *store, gpointer data)
   wyrelog_error_t rc = d->runtime->validate (d->runtime->data);
   if (rc == WYRELOG_E_OK) rc = wyl_policy_store_tenant_delete_commit (store,
             d->tenant, d->actor, d->request_id, d->system_admin, d->manifest, d->record);
+  g_clear_pointer (&d->revocations, g_ptr_array_unref);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_data_credential_lifecycle_audits (store,
+            d->request_id, &d->revocations);
   if (rc == WYRELOG_E_OK) rc = handle_tenant_delete_checkpoint (d, "before_policy_commit");
   return rc;
 }
@@ -6718,6 +6761,11 @@ handle_tenant_delete_verify (WylEngineVerification *verification, gpointer data)
   if (rc == WYRELOG_E_OK) rc = wyl_engine_verification_verify_audit_event (verification,
             r->audit_id, r->created_at_us, TRUE, r->actor, "tenant_delete", r->tenant,
             summary, r->manifest, r->request_id);
+  if (rc == WYRELOG_E_OK && d->revocations == NULL
+      && !d->revocations_verified_by_parent)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && d->revocations != NULL)
+    rc = handle_verify_lifecycle_audits (verification, d->revocations);
   return rc;
 }
 
@@ -6984,7 +7032,9 @@ wyl_handle_delete_tenant (WylHandle *self, const gchar *tenant,
         "tenant_delete", out->tenant, summary, out->manifest, out->request_id,
         WYL_DECISION_ALLOW, &event) == WYRELOG_E_OK)
       wyl_audit_complete_authoritative_event (self, event);
+    handle_complete_lifecycle_audits (self, request_id);
   }
+  g_clear_pointer (&d.revocations, g_ptr_array_unref);
   if (rc == WYRELOG_E_OK) rc = handle_tenant_delete_checkpoint (&d, "after_policy_commit");
   if (rc == WYRELOG_E_OK) rc = handle_tenant_delete_cleanup (self, out, runtime);
 #ifdef WYL_HAS_FACT_STORE
@@ -7010,7 +7060,31 @@ typedef struct
   GPtrArray *children;
   WylUserOperation *out;
   GPtrArray *published_children;
+  GPtrArray *revocations;
 } HandleUserMutation;
+
+/* The user event's revocations and then each child's, read back by their
+ * request ids. */
+static wyrelog_error_t
+handle_user_mutation_revocations (wyl_policy_store_t *store,
+    HandleUserMutation *d)
+{
+  g_clear_pointer (&d->revocations, g_ptr_array_unref);
+  wyrelog_error_t rc = wyl_policy_store_data_credential_lifecycle_audits
+        (store, d->request_id, &d->revocations);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < d->published_children->len;
+      i++) {
+    const WylTenantDeleteRecord *child =
+        g_ptr_array_index (d->published_children, i);
+    g_autoptr (GPtrArray) audits = NULL;
+    rc = wyl_policy_store_data_credential_lifecycle_audits (store,
+            child->request_id, &audits);
+    for (guint j = 0; rc == WYRELOG_E_OK && j < audits->len; j++)
+      g_ptr_array_add (d->revocations,
+          g_object_ref (g_ptr_array_index (audits, j)));
+  }
+  return rc;
+}
 
 static wyrelog_error_t
 handle_user_mutation_body (wyl_policy_store_t *store, gpointer data)
@@ -7023,6 +7097,7 @@ handle_user_mutation_body (wyl_policy_store_t *store, gpointer data)
     g_clear_pointer (&d->published_children, g_ptr_array_unref);
     rc = wyl_policy_store_user_children (store, d->request_id, &d->published_children);
   }
+  if (rc == WYRELOG_E_OK) rc = handle_user_mutation_revocations (store, d);
   if (rc == WYRELOG_E_OK && d->runtime->checkpoint != NULL)
     rc = d->runtime->checkpoint ("before_user_commit", d->runtime->data);
   return rc;
@@ -7049,9 +7124,14 @@ handle_user_mutation_verify (WylEngineVerification *verification, gpointer data)
   for (gsize i = 0; rc == WYRELOG_E_OK && d->published_children != NULL
       && i < d->published_children->len; i++) {
     WylTenantDeleteRecord *child = g_ptr_array_index (d->published_children, i);
-    HandleTenantDelete verify_child = {.tenant = child->tenant, .record = child};
+    HandleTenantDelete verify_child = {.tenant = child->tenant,
+                                       .record = child,
+                                       .revocations_verified_by_parent = TRUE};
     rc = handle_tenant_delete_verify (verification, &verify_child);
   }
+  if (rc == WYRELOG_E_OK && d->revocations == NULL) rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = handle_verify_lifecycle_audits (verification, d->revocations);
   return rc;
 }
 
@@ -7193,7 +7273,7 @@ wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *acto
     if (rc == WYRELOG_E_OK && child->manifest == NULL) child->manifest = g_strdup ("none");
     if (rc == WYRELOG_E_OK && runtime->checkpoint != NULL) rc = runtime->checkpoint ("user_child_prepared", runtime->data);
   }
-  HandleUserMutation d = {self,subject,actor,action,request_id,fingerprint,runtime,children,out,NULL};
+  HandleUserMutation d = {self,subject,actor,action,request_id,fingerprint,runtime,children,out,NULL,NULL};
   gboolean committed = FALSE;
   if (rc == WYRELOG_E_OK && retry && !wyl_handle_engine_pair_is_poisoned (self)) {
     rc = runtime->validate (runtime->data);
@@ -7225,7 +7305,11 @@ wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *acto
     }
   }
   g_clear_pointer (&d.published_children, g_ptr_array_unref);
+  g_clear_pointer (&d.revocations, g_ptr_array_unref);
   out->committed = committed;
+  /* Each child's revocations complete with that child's audit, below. */
+  if (rc == WYRELOG_E_OK && committed)
+    handle_complete_lifecycle_audits (self, request_id);
   if (committed && !g_str_equal (action, "create")) {
     handle_user_revoke_sessions (self, subject);
     for (gsize i=0; i<self->human_revocation_observers->len; i++) {
@@ -7247,6 +7331,7 @@ wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *acto
         child->actor, "tenant_delete", child->tenant, child_summary, child->manifest,
         child->request_id, WYL_DECISION_ALLOW, &child_event) == WYRELOG_E_OK)
       wyl_audit_complete_authoritative_event (self, child_event);
+    handle_complete_lifecycle_audits (self, child->request_id);
     rc = handle_tenant_delete_cleanup (self, child, runtime);
     if (rc == WYRELOG_E_OK && runtime->checkpoint != NULL) rc = runtime->checkpoint ("user_child_cleaned", runtime->data);
   }
