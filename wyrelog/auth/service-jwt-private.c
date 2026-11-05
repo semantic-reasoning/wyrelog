@@ -14,26 +14,26 @@ canonical_id_text (const gchar *value)
   wyl_id_t parsed;
   gchar encoded[WYL_ID_STRING_BUF];
   return value != NULL && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
-      && wyl_id_format (&parsed, encoded, sizeof encoded) == WYRELOG_E_OK
-      && strcmp (value, encoded) == 0;
+         && wyl_id_format (&parsed, encoded, sizeof encoded) == WYRELOG_E_OK
+         && strcmp (value, encoded) == 0;
 }
 
 static gboolean
 valid_input (const wyl_jwt_service_issue_input_t *input)
 {
   return input != NULL && input->key_id != NULL && input->key_id[0] != '\0'
-      && canonical_id_text (input->jti)
-      && canonical_id_text (input->session_id) && input->issuer != NULL
-      && input->issuer[0] != '\0' && input->audience != NULL
-      && input->audience[0] != '\0' && input->subject != NULL
-      && wyl_policy_service_subject_is_valid (input->subject,
-      strlen (input->subject)) && input->tenant != NULL
-      && wyl_policy_store_tenant_id_is_valid (input->tenant)
-      && input->credential_id != NULL
-      && wyl_service_credential_id_is_canonical (input->credential_id,
-      strlen (input->credential_id)) && input->credential_generation != 0
-      && input->issued_at >= 0 && input->issued_at <= G_MAXINT64
-      - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS;
+         && canonical_id_text (input->jti)
+         && canonical_id_text (input->session_id) && input->issuer != NULL
+         && input->issuer[0] != '\0' && input->audience != NULL
+         && input->audience[0] != '\0' && input->subject != NULL
+         && wyl_policy_service_subject_is_valid (input->subject,
+             strlen (input->subject)) && input->tenant != NULL
+         && wyl_policy_store_tenant_id_is_valid (input->tenant)
+         && input->credential_id != NULL
+         && wyl_service_credential_id_is_canonical (input->credential_id,
+             strlen (input->credential_id)) && input->credential_generation != 0
+         && input->issued_at >= 0 && input->issued_at <= G_MAXINT64
+         - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS;
 }
 
 static void
@@ -89,7 +89,7 @@ wyl_jwt_sign_hs256_service (const wyl_jwt_service_issue_input_t *input,
     return rc;
   GString *payload = g_string_new ("{\"jti\":");
 #define APPEND_STRING_CLAIM(name, value) G_STMT_START { \
-  g_string_append (payload, name); append_json_string (payload, value); \
+    g_string_append (payload, name); append_json_string (payload, value); \
 } G_STMT_END
   append_json_string (payload, input->jti);
   APPEND_STRING_CLAIM (",\"sub\":", input->subject);
@@ -110,16 +110,16 @@ wyl_jwt_sign_hs256_service (const wyl_jwt_service_issue_input_t *input,
 
   g_autofree gchar *header_segment = NULL, *payload_segment = NULL;
   rc = wyl_jwt_base64url_encode ((const guint8 *) header, strlen (header),
-      &header_segment);
+          &header_segment);
   if (rc == WYRELOG_E_OK)
     rc = wyl_jwt_base64url_encode ((const guint8 *) payload->str,
-        payload->len, &payload_segment);
+            payload->len, &payload_segment);
   g_string_free (payload, TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
-      header_segment, payload_segment);
+          header_segment, payload_segment);
   if (sodium_init () < 0)
     return WYRELOG_E_INTERNAL;
   guint8 signature[crypto_auth_hmacsha256_BYTES];
@@ -130,7 +130,7 @@ wyl_jwt_sign_hs256_service (const wyl_jwt_service_issue_input_t *input,
   crypto_auth_hmacsha256_final (&state, signature);
   g_autofree gchar *signature_segment = NULL;
   rc = wyl_jwt_base64url_encode (signature, sizeof signature,
-      &signature_segment);
+          &signature_segment);
   if (rc == WYRELOG_E_OK)
     *out_token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
   return rc;

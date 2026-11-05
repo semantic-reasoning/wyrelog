@@ -219,6 +219,7 @@ wyrelog/auth/service-credential-private.h
 wyrelog/auth/service-credential.c
 wyrelog/auth/service-exchange-private.c
 wyrelog/auth/service-exchange-projector-private.c
+wyrelog/auth/service-jwt-private.c
 wyrelog/auth/service-session-private.c
 wyrelog/auth/totp.h
 wyrelog/break-glass.h
