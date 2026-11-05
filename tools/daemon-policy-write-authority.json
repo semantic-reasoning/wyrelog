@@ -1,8 +1,8 @@
 {
-  "aggregate": "fffd207bce1d79abb52b6a4f96259b75a392609a4674004f9836fe3a87b3b214",
+  "aggregate": "92c36e297916636ce17380de8efca81c233c52d67a562d9f0ba1170b4335ac5b",
   "directives": {
-    "count": 581,
-    "sha256": "61760b0b9827eca29cf1ff74119e7e5675a6ff05f3d9a58d21b48f9bd31f87c9"
+    "count": 587,
+    "sha256": "1958eebe0e048f8b87d1b117cbc350e10716a990a7a47589cff40fc390c0b2de"
   },
   "functions": {
     "direct_permission_mutation_handler": "96a5a83b20c41cb6c2aef671c721d732730956cf2026d7308b0442c045c18e31",
