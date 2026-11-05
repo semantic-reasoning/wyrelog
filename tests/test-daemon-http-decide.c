@@ -25881,6 +25881,235 @@ check_data_credential_read_contract (void)
 }
 #endif
 
+#if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+static gchar *
+data_credential_write (ServiceDenialEnv *env, const gchar *token,
+    const gchar *op, const gchar *batch, const gchar *body,
+    guint expected_status)
+{
+  g_autofree gchar *path = g_strdup_printf ("/facts/dc-1475/g1/rows:%s", op);
+  g_autofree gchar *query = g_strdup_printf ("tenant=dc-1475&namespace=owner&"
+          "schema_version=1&batch_id=%s&idempotency_key=%s&guard_timestamp=1&"
+          "guard_loc_class=trusted&guard_risk=0", batch, batch);
+  gchar *response = NULL;
+  guint status = 0;
+  g_assert_cmpint (send_raw_service_principal_bearer (env->session, "POST",
+      env->base_url, path, query, token, body, &status, &response), ==, 0);
+  if (status != expected_status)
+    g_printerr ("data credential write %s %s: status=%u body=%s\n", op, batch,
+        status, response);
+  g_assert_cmpuint (status, ==, expected_status);
+  return response;
+}
+
+typedef struct
+{
+  const gchar *credential_id;
+  guint attributed;
+} DataCredentialWriteAuditScan;
+
+static wyrelog_error_t
+data_credential_write_audit_scan (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) deny_reason;
+  (void) request_id;
+  (void) decision;
+  DataCredentialWriteAuditScan *scan = user_data;
+  if (g_strcmp0 (subject_id, scan->credential_id) == 0
+      && g_strcmp0 (action, "fact_append") == 0
+      && g_strcmp0 (resource_id, "dc-1475/g1/owner/rows") == 0
+      && g_strcmp0 (deny_origin, "inserted issuer=dc-alice") == 0)
+    scan->attributed++;
+  return WYRELOG_E_OK;
+}
+
+/* #1475: writing through a data credential.  Each operation is isolated to
+ * the credentials that carry it, writes count against the tenant's quota
+ * and are audited with the credential and its issuer. */
+static void
+check_data_credential_write_contract (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *admin = data_credential_graph_fixture (&env);
+  static const gchar *const operations[] = {
+    "insert", "delete", "update", "query", "infer",
+  };
+  gchar *tokens[G_N_ELEMENTS (operations)];
+  g_autofree gchar *insert_id = NULL;
+  for (gsize i = 0; i < G_N_ELEMENTS (operations); i++) {
+    g_autofree gchar *secret = NULL;
+    g_autofree gchar *id = data_credential_issue_for_use (&env, alice,
+            "dc-1475", operations[i], "*", "3600", &secret);
+    tokens[i] = data_credential_bearer (&env, id, secret);
+    if (i == 0)
+      insert_id = g_strdup (id);
+  }
+  const gchar *insert = tokens[0], *delete = tokens[1], *update = tokens[2];
+  const gchar *query = tokens[3], *infer = tokens[4];
+  static const gchar denied[] =
+      "{\"error\":\"data_credential_operation_denied\"}";
+  const gchar *row2 = "row_id\tamount\nrow-2\t7\n";
+  const gchar *change = "op\trow_id\tamount\nretract\trow-1\t42\n"
+      "assert\trow-1\t43\n";
+
+  WylPolicyFactLogicalQuotaStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "dc-1475", &before), ==, WYRELOG_E_OK);
+
+  /* insert appends, and only appends. */
+  g_autofree gchar *appended = data_credential_write (&env, insert, "append",
+          "dc-w1", row2, 200);
+  g_assert_nonnull (strstr (appended, "\"inserted\":true"));
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "dc-1475", &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.committed_rows, ==, before.committed_rows + 1);
+  g_assert_cmpuint (after.committed_bytes, >, before.committed_bytes);
+  g_autofree gchar *insert_retract = data_credential_write (&env, insert,
+          "retract", "dc-w2", row2, 403);
+  g_assert_cmpstr (insert_retract, ==, denied);
+  g_free (data_credential_write (&env, insert, "update", "dc-w3", change,
+      403));
+  g_autofree gchar *insert_query = data_credential_query (&env, insert,
+          "dc-1475", "g1", 403);
+  g_assert_cmpstr (insert_query, ==, denied);
+
+  /* A write outside the credential's graphs is refused. */
+  g_autofree gchar *narrow_secret = NULL;
+  g_autofree gchar *narrow_id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "insert", "g2", "3600", &narrow_secret);
+  g_autofree gchar *narrow = data_credential_bearer (&env, narrow_id,
+          narrow_secret);
+  g_autofree gchar *outside = data_credential_write (&env, narrow, "append",
+          "dc-w0", "row_id\tamount\nrow-9\t9\n", 403);
+  g_assert_cmpstr (outside, ==,
+      "{\"error\":\"data_credential_graph_denied\"}");
+  /* ... and one inside them is allowed. */
+  g_autofree gchar *g1_secret = NULL;
+  g_autofree gchar *g1_id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "insert,update", "g1", "3600", &g1_secret);
+  g_autofree gchar *g1_only = data_credential_bearer (&env, g1_id,
+          g1_secret);
+  g_free (data_credential_write (&env, g1_only, "append", "dc-w00",
+      "row_id\tamount\nrow-8\t8\n", 200));
+
+  /* delete retracts, and only retracts. */
+  g_free (data_credential_write (&env, delete, "retract", "dc-w4", row2,
+      200));
+  g_free (data_credential_write (&env, delete, "append", "dc-w5", row2, 403));
+  g_free (data_credential_write (&env, delete, "update", "dc-w6", change,
+      403));
+  g_free (data_credential_query (&env, delete, "dc-1475", "g1", 403));
+
+  /* update updates, and only updates. */
+  g_free (data_credential_write (&env, update, "update", "dc-w7", change,
+      200));
+  g_free (data_credential_write (&env, update, "append", "dc-w8", row2, 403));
+  g_free (data_credential_write (&env, update, "retract", "dc-w9", row2,
+      403));
+  g_free (data_credential_query (&env, update, "dc-1475", "g1", 403));
+
+  /* The graph-wide update is the same operation on the same checks. */
+  const gchar *graph_update_query = "tenant=dc-1475&namespace=owner&"
+      "batch_id=dc-g1&idempotency_key=dc-g1&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0";
+  const gchar *graph_update = "assert\trows\t1\trow-5\t5\n";
+  static const struct
+  {
+    gsize token;
+    guint status;
+    const gchar *body;
+  } graph_updates[] = {
+    { 0, 403, "{\"error\":\"data_credential_operation_denied\"}" },
+    { 2, 200, NULL },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_updates); i++) {
+    guint status = 0;
+    g_autofree gchar *response = NULL;
+    g_assert_cmpint (send_raw_service_principal_bearer (env.session, "POST",
+        env.base_url, "/facts/dc-1475/g1:update", graph_update_query,
+        tokens[graph_updates[i].token], graph_update, &status, &response),
+        ==, 0);
+    if (status != graph_updates[i].status)
+      g_printerr ("graph update %zu: %u %s\n", i, status, response);
+    g_assert_cmpuint (status, ==, graph_updates[i].status);
+    if (graph_updates[i].body != NULL)
+      g_assert_cmpstr (response, ==, graph_updates[i].body);
+  }
+  guint narrow_status = 0;
+  g_autofree gchar *narrow_update = NULL;
+  g_assert_cmpint (send_raw_service_principal_bearer (env.session, "POST",
+      env.base_url, "/facts/dc-1475/g1:update", graph_update_query, narrow,
+      graph_update, &narrow_status, &narrow_update), ==, 0);
+  g_assert_cmpuint (narrow_status, ==, 403);
+  g_assert_cmpstr (narrow_update, ==,
+      "{\"error\":\"data_credential_graph_denied\"}");
+  guint g1_status = 0;
+  g_autofree gchar *g1_update = NULL;
+  g_assert_cmpint (send_raw_service_principal_bearer (env.session, "POST",
+      env.base_url, "/facts/dc-1475/g1:update", "tenant=dc-1475&"
+      "namespace=owner&batch_id=dc-g2&idempotency_key=dc-g2&"
+      "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", g1_only,
+      "assert\trows\t1\trow-6\t6\n", &g1_status, &g1_update), ==, 0);
+  g_assert_cmpuint (g1_status, ==, 200);
+
+  /* Nor does infer, whose operation no route checks yet. */
+  g_free (data_credential_write (&env, infer, "append", "dc-w16", row2, 403));
+  g_free (data_credential_write (&env, infer, "retract", "dc-w17", row2,
+      403));
+  g_free (data_credential_write (&env, infer, "update", "dc-w18", change,
+      403));
+
+  /* query writes nothing. */
+  g_free (data_credential_write (&env, query, "append", "dc-w10", row2, 403));
+  g_free (data_credential_write (&env, query, "retract", "dc-w11", row2,
+      403));
+  g_free (data_credential_write (&env, query, "update", "dc-w12", change,
+      403));
+  g_autofree gchar *rows = data_credential_query (&env, query, "dc-1475",
+          "g1", 200);
+  g_assert_nonnull (strstr (rows, "{\"R\":\"row-1\",\"A\":43}"));
+
+  /* The issuer's own append permission gates its credential's appends. */
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (store,
+      "dc-alice", "wr.fact.append", "dc-1475"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *issuer_denied = data_credential_write (&env, insert,
+          "append", "dc-w13", "row_id\tamount\nrow-3\t1\n", 403);
+  g_assert_cmpstr (issuer_denied, ==,
+      "{\"error\":\"data_credential_issuer_denied\"}");
+  grant_armed_permission (store, "dc-alice", "wr.fact.append", "dc-1475");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_free (data_credential_write (&env, insert, "append", "dc-w14",
+      "row_id\tamount\nrow-3\t1\n", 200));
+
+  /* Writes are attributed to the credential and its issuer. */
+  DataCredentialWriteAuditScan scan = { .credential_id = insert_id };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (store,
+      data_credential_write_audit_scan, &scan), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (scan.attributed, ==, 2);
+
+  /* A sealed graph refuses a credential's write as anyone's. */
+  data_credential_admin_send (&env, admin, "/graphs/seal",
+      "tenant=dc-1475&graph=g1&guard_timestamp=1&guard_loc_class=trusted&"
+      "guard_risk=0", NULL, FALSE);
+  g_autofree gchar *sealed = data_credential_write (&env, insert, "append",
+          "dc-w15", "row_id\tamount\nrow-4\t1\n", 409);
+  g_assert_cmpstr (sealed, ==, "{\"error\":\"graph_sealed\"}");
+  for (gsize i = 0; i < G_N_ELEMENTS (operations); i++)
+    g_free (tokens[i]);
+  service_denial_env_clear (&env);
+}
+#endif
+
 #if defined(WYL_TEST_VARIANT_REFRESH)
 /*
  * #1030: a client that treats the access token as opaque -- the correct
@@ -26973,6 +27202,7 @@ main (void)
 #endif
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
   check_data_credential_read_contract ();
+  check_data_credential_write_contract ();
 #endif
   gint rc = default_variant_checks ();
   if (rc != 0)
