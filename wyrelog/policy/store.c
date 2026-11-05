@@ -48071,6 +48071,17 @@ wyl_policy_store_user_operation_commit (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (s,10,children != NULL ? children->len : 0) != SQLITE_OK) rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_DONE) rc = WYRELOG_E_IO;
   sqlite3_finalize (s); s = NULL;
+  /* A disabled or deleted user's data credentials end with it, in every
+   * tenant (#1476).  The children then revoke what remains in the tenants
+   * they delete. */
+  if (rc == WYRELOG_E_OK && !g_str_equal (action, "create")) {
+    gboolean deleting = g_str_equal (action, "delete");
+    rc = data_credential_lifecycle_revoke (store, subject, NULL, actor,
+            "system_admin", deleting ? WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DELETED
+            : WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DISABLED,
+            deleting ? "user_delete" : "user_disable", audit_id, request_id,
+            now);
+  }
   /* Child reservation is the tenant journal itself, created before linkage. */
   for (gsize i = 0; rc == WYRELOG_E_OK && children != NULL && i < children->len; i++) {
     WylTenantDeleteRecord *child = g_ptr_array_index (children, i);

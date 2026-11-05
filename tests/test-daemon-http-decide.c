@@ -25992,6 +25992,151 @@ check_data_credential_lifecycle_tenant_delete (void)
   service_denial_env_clear (&env);
 }
 
+static wyrelog_error_t
+lifecycle_user_authorize (gpointer data, const gchar *actor, gboolean *admin)
+{
+  wyrelog_error_t rc = wyl_policy_store_user_require_admin
+        (wyl_handle_get_policy_store (data), actor);
+  *admin = rc == WYRELOG_E_OK;
+  return rc;
+}
+
+static wyrelog_error_t
+lifecycle_user_validate (gpointer data)
+{
+  return wyl_policy_store_user_require_admin (wyl_handle_get_policy_store
+               (data), "dc-root");
+}
+
+/* Disables or deletes a user as dc-root through the handle, as the /users
+ * routes do once they have authorized the request. */
+static wyrelog_error_t
+lifecycle_user_mutate (ServiceDenialEnv *env, const gchar *subject,
+    const gchar *action, const gchar *request)
+{
+  WylTenantDeleteRuntime runtime = {.authorize = lifecycle_user_authorize,
+                                    .validate = lifecycle_user_validate, .data = env->handle};
+  g_auto (WylUserDeletePreview) preview = { 0 };
+  if (g_str_equal (action, "delete")) {
+    g_assert_cmpint (wyl_handle_user_preview (env->handle, subject,
+        "dc-root", &runtime, &preview), ==, WYRELOG_E_OK);
+    /* Credentials are not another subject's permission. */
+    g_assert_cmpstr (preview.blockers, ==, "");
+    g_assert_cmpstr (preview.unsealed, ==, "");
+  }
+  g_auto (WylUserOperation) operation = { 0 };
+  return wyl_handle_user_mutate (env->handle, subject, "dc-root", action,
+             request, preview.fingerprint, &runtime, &operation);
+}
+
+/* #1476: disabling or deleting a user revokes its credentials in every
+ * tenant, atomically with the event. */
+static void
+check_data_credential_lifecycle_user (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *bob = seed_data_credential_human (&env, "dc-bob", TRUE);
+  g_autofree gchar *root = seed_data_credential_human (&env, "dc-root",
+          TRUE);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "dc-root",
+      "wr.system_admin", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+  data_credential_owned_tenant (store, "dc-other", "dc-alice");
+  data_credential_owned_tenant (store, "dc-bobs", "dc-bob");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *s1 = NULL, *s3 = NULL, *s4 = NULL;
+  g_autofree gchar *c1 = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query", "*", "3600", &s1);
+  g_autofree gchar *c3 = data_credential_issue_for_use (&env, alice,
+          "dc-other", "query", "*", "3600", &s3);
+  g_autofree gchar *c4 = data_credential_issue_for_use (&env, bob,
+          "dc-bobs", "query", "*", "3600", &s4);
+  g_autofree gchar *b1 = data_credential_bearer (&env, c1, s1);
+
+  static const gchar *const faults[] = {
+    "data_credential_lifecycle_revoke", "user_disable",
+  };
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  new_test_request (request);
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    data_credential_audit_fault (&env, faults[i], TRUE);
+    g_assert_cmpint (lifecycle_user_mutate (&env, "dc-alice", "disable",
+        request), !=, WYRELOG_E_OK);
+    data_credential_audit_fault (&env, NULL, FALSE);
+    g_assert_cmpint (wyl_policy_store_user_require (store, "dc-alice", TRUE),
+        ==, WYRELOG_E_OK);
+    data_credential_assert_state (store, c1, "active");
+    data_credential_assert_state (store, c3, "active");
+    data_credential_bearer_resolves (&env, b1, TRUE);
+    g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 0);
+  }
+
+  g_assert_cmpint (lifecycle_user_mutate (&env, "dc-alice", "disable",
+      request), ==, WYRELOG_E_OK);
+  data_credential_bearer_resolves (&env, b1, FALSE);
+  g_free (data_credential_exchange (&env, c1, s1, 401));
+  g_free (data_credential_exchange (&env, c3, s3, 401));
+  g_assert_cmpuint (lifecycle_audit_count (&env, c1, request,
+      "user_disable"), ==, 1);
+  g_assert_cmpuint (lifecycle_audit_count (&env, c3, request,
+      "user_disable"), ==, 1);
+  g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 2);
+  g_assert_cmpuint (lifecycle_completed_count (&env), ==, 2);
+  /* The SYSTEM list shows why. */
+  grant_tenant_manage_authority (env.handle, "dc-root");
+  g_autofree gchar *listed = data_credential_request (&env, root, "GET",
+          NULL, "dc-other", NULL, 200);
+  g_assert_nonnull (strstr (listed,
+      "\"revoked_by\":\"dc-root\",\"revoked_reason\":"
+      "\"issuer_disabled\""));
+  g_autofree gchar *b4 = data_credential_bearer (&env, c4, s4);
+
+  /* A credential carol left in a tenant bob took over without a transfer
+   * is still active when bob is deleted; that tenant's delete revokes it,
+   * under its own request. */
+  g_autofree gchar *carol = seed_data_credential_human (&env, "dc-carol",
+          TRUE);
+  data_credential_owned_tenant (store, "dc-carols", "dc-carol");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *s5 = NULL;
+  g_autofree gchar *c5 = data_credential_issue_for_use (&env, carol,
+          "dc-carols", "query", "*", "3600", &s5);
+  policy_exec (store, "DELETE FROM permission_states WHERE "
+      "subject_id='dc-carol' AND scope='dc-carols';DELETE FROM "
+      "direct_permissions WHERE subject_id='dc-carol' AND scope='dc-carols'");
+  raw_owner_change (store, "dc-carols", "dc-carol", "dc-bob");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  tenant_ownership_request_named (&env, bob, "dc-carols", "seal", NULL, NULL,
+      200, NULL);
+
+  /* Deleting bob revokes his credential under the user event, before his
+   * tenant goes. */
+  tenant_ownership_request_named (&env, bob, "dc-bobs", "seal", NULL, NULL,
+      200, NULL);
+  gchar deletion[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (lifecycle_user_mutate (&env, "dc-bob", "delete",
+      new_test_request (deletion)), ==, WYRELOG_E_OK);
+  data_credential_bearer_resolves (&env, b4, FALSE);
+  g_free (data_credential_exchange (&env, c4, s4, 401));
+  g_assert_cmpuint (lifecycle_audit_count (&env, c4, deletion,
+      "user_delete"), ==, 1);
+  g_free (data_credential_exchange (&env, c5, s5, 401));
+  g_assert_cmpuint (lifecycle_audit_count (&env, c5, "*", "tenant_delete"),
+      ==, 1);
+  g_assert_cmpuint (lifecycle_audit_count (&env, c5, deletion, "*"), ==, 0);
+  g_assert_cmpuint (lifecycle_audit_count (&env, "*", "*", "*"), ==, 4);
+  g_assert_cmpuint (lifecycle_completed_count (&env), ==, 4);
+  gboolean exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_tenant_exists (store, "dc-bobs",
+      &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+  service_denial_env_clear (&env);
+}
+
 /* #1476: an ownership transfer revokes the previous owner's credentials in
  * that tenant, atomically with the transfer.  Only audit is needed: the
  * bearer is shown on the list route, which refuses it with 403 while it
@@ -26320,8 +26465,8 @@ check_data_credential_read_contract (void)
   g_free (data_credential_query (&env, query, "dc-1475", "g1", 200));
 
   /* So is the issuer's standing: a locked issuer stops its credentials, a
-   * logged-out one does not.  (A tenant owner cannot be disabled while it
-   * owns the tenant; a disabled issuer is refused by its decision.) */
+   * logged-out one does not.  (Disabling an issuer revokes its credentials,
+   * #1476.) */
   g_assert_cmpint (wyl_policy_store_set_principal_state (store, "dc-alice",
       "locked"), ==, WYRELOG_E_OK);
   g_autofree gchar *locked = data_credential_query (&env, query, "dc-1475",
@@ -27732,6 +27877,7 @@ main (void)
 #ifdef WYL_HAS_AUDIT
   check_data_credential_lifecycle_transfer ();
   check_data_credential_lifecycle_tenant_delete ();
+  check_data_credential_lifecycle_user ();
 #endif
   gint rc = default_variant_checks ();
   if (rc != 0)

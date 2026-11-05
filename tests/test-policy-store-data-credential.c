@@ -1275,8 +1275,9 @@ assert_lifecycle_audit (wyl_policy_store_t *store, const gchar *request,
   g_assert_not_reached ();
 }
 
-/* A user delete deletes the tenants the user owns as children; each child
- * revokes what is still active in its tenant under its own request. */
+/* A user delete revokes the user's credentials in every tenant under its
+ * own request, then deletes the tenants the user owns as children; each
+ * child revokes what is still active in its tenant under its own. */
 static void
 test_lifecycle_user_delete_children (void)
 {
@@ -1306,16 +1307,104 @@ test_lifecycle_user_delete_children (void)
   g_autoptr (GPtrArray) children = NULL;
   delete_alice (store, new_request (deletion), &children);
   g_assert_cmpuint (children->len, ==, 2);
-  assert_lifecycle_audit (store, child_request (children, "tenant-a"),
-      a1.credential_id, "tenant_deleted", "tenant_delete");
+  assert_lifecycle_audit (store, deletion, a1.credential_id, "issuer_deleted",
+      "user_delete");
   assert_lifecycle_audit (store, child_request (children, "tenant-x"),
       bx.credential_id, "tenant_deleted", "tenant_delete");
   g_autoptr (GPtrArray) parent = lifecycle_audits (store, deletion);
-  g_assert_cmpuint (parent->len, ==, 0);
+  g_assert_cmpuint (parent->len, ==, 1);
+  g_autoptr (GPtrArray) first_child = lifecycle_audits (store,
+          child_request (children, "tenant-a"));
+  g_assert_cmpuint (first_child->len, ==, 0);
   /* bob's credential in his own tenant is not alice's to end. */
   g_auto (WylDataCredentialInfo) still = { 0 };
   lookup (store, b1.credential_id, &still);
   g_assert_cmpstr (still.state, ==, "active");
+}
+
+static wyrelog_error_t
+disable_alice (wyl_policy_store_t *store, const gchar *request)
+{
+  g_auto (WylUserOperation) operation = { 0 };
+  begin (store);
+  wyrelog_error_t rc = wyl_policy_store_user_operation_commit (store,
+          "alice", "root", "disable", request, NULL, NULL, &operation);
+  if (rc == WYRELOG_E_OK)
+    commit (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+/* Disabling a user revokes its credentials in every tenant, atomically
+ * with the disable. */
+static void
+test_lifecycle_user_disable (void)
+{
+  g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
+  register_test_human (store, "root");
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "root",
+      "wr.system_admin", "__wr_default"), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-c", "alice",
+      &created), ==, WYRELOG_E_OK);
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_auto (WylDataCredentialInfo) a1 = { 0 };
+  g_auto (WylDataCredentialInfo) c1 = { 0 };
+  g_auto (WylDataCredentialInfo) b1 = { 0 };
+  /* a1 comes from a clock ahead of the store's. */
+  g_assert_cmpint (issue (store, 1, DAY, g_get_real_time () + HOUR, &a1,
+      NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (issue_full (store, "tenant-c", "alice",
+      new_request (request), 1, NULL, 0, DAY, NOW, &c1, NULL), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (issue_full (store, "tenant-b", "bob", new_request (request),
+      1, NULL, 0, DAY, NOW, &b1, NULL), ==, WYRELOG_E_OK);
+
+  /* When a revocation cannot be audited, the disable fails whole. */
+  gchar disable[WYL_REQUEST_ID_STRING_BUF];
+  new_request (disable);
+  exec_ok (store, "CREATE TEMP TRIGGER fail_lifecycle BEFORE INSERT ON "
+      "audit_events WHEN NEW.action='data_credential_lifecycle_revoke' "
+      "BEGIN SELECT RAISE(FAIL,'lifecycle audit refused'); END");
+  g_assert_cmpint (disable_alice (store, disable), !=, WYRELOG_E_OK);
+  exec_ok (store, "DROP TRIGGER fail_lifecycle");
+  g_assert_cmpint (wyl_policy_store_user_require (store, "alice", TRUE), ==,
+      WYRELOG_E_OK);
+  g_auto (WylDataCredentialInfo) kept = { 0 };
+  lookup (store, a1.credential_id, &kept);
+  g_assert_cmpstr (kept.state, ==, "active");
+
+  g_assert_cmpint (disable_alice (store, disable), ==, WYRELOG_E_OK);
+  g_auto (WylDataCredentialInfo) now_a1 = { 0 };
+  lookup (store, a1.credential_id, &now_a1);
+  g_assert_cmpstr (now_a1.revoked_reason, ==, "issuer_disabled");
+  g_assert_cmpstr (now_a1.revoked_by, ==, "root");
+  g_assert_cmpint (now_a1.revoked_at_us, ==, a1.created_at_us);
+  g_auto (WylDataCredentialInfo) now_c1 = { 0 };
+  lookup (store, c1.credential_id, &now_c1);
+  g_assert_cmpstr (now_c1.revoked_reason, ==, "issuer_disabled");
+  g_auto (WylDataCredentialInfo) now_b1 = { 0 };
+  lookup (store, b1.credential_id, &now_b1);
+  g_assert_cmpstr (now_b1.state, ==, "active");
+  g_autoptr (GPtrArray) audits = lifecycle_audits (store, disable);
+  g_assert_cmpuint (audits->len, ==, 2);
+  assert_lifecycle_audit (store, disable, a1.credential_id, "issuer_disabled",
+      "user_disable");
+  assert_lifecycle_audit (store, disable, c1.credential_id, "issuer_disabled",
+      "user_disable");
+  for (guint i = 0; i < audits->len; i++) {
+    WylAuditEvent *audit = g_ptr_array_index (audits, i);
+    g_assert_cmpstr (wyl_audit_event_get_subject_id (audit), ==, "root");
+    g_assert_nonnull (strstr (wyl_audit_event_get_deny_reason (audit),
+        ";capacity=system_admin;"));
+  }
+  /* A replay writes nothing more.  A disabled user cannot issue, so no
+   * credential exists that a wrong replay could revoke: this guards the
+   * audit count only. */
+  g_assert_cmpint (disable_alice (store, disable), ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) again = lifecycle_audits (store, disable);
+  g_assert_cmpuint (again->len, ==, 2);
 }
 
 static void
@@ -1746,6 +1835,8 @@ main (int argc, char **argv)
       test_lifecycle_transfer_atomic);
   g_test_add_func ("/data-credential/lifecycle-user-delete-children",
       test_lifecycle_user_delete_children);
+  g_test_add_func ("/data-credential/lifecycle-user-disable",
+      test_lifecycle_user_disable);
   g_test_add_func ("/data-credential/replay", test_replay);
   g_test_add_func ("/data-credential/secret-not-persisted",
       test_secret_not_persisted);
