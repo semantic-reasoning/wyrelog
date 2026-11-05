@@ -11,6 +11,16 @@ void wyl_decide_req_set_service_bearer_authenticated
   (wyl_decide_req_t *req, gboolean authenticated);
 gboolean wyl_decide_req_get_service_bearer_authenticated
   (const wyl_decide_req_t *req);
+/* #1475: the daemon sets this only when deciding whether the issuer of a
+ * data credential still holds a permission on that credential's behalf.
+ * The issuer need not be logged in for its credential to work, so the
+ * decide treats it as authenticated for this request only; every other
+ * blocker (registry state, frozen, separation of duty, disabled roles,
+ * arming, guards) still applies. */
+void wyl_decide_req_set_data_credential_issuer_authenticated
+  (wyl_decide_req_t *req, gboolean authenticated);
+gboolean wyl_decide_req_get_data_credential_issuer_authenticated
+  (const wyl_decide_req_t *req);
 typedef struct _WylServiceDecisionAuthority WylServiceDecisionAuthority;
 
 /* Creates a request-local service decision capability after the sole bearer
