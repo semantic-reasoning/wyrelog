@@ -45,7 +45,9 @@ edit can regress into echoing a plaintext credential:
       key appear exactly once, each inside the one function allowed to
       hold it (A4_CONFINEMENT).  A copy of any of them anywhere else in the
       daemon fails, and the secret's raw-byte accessor may not appear in the
-      daemon at all (A4_FORBIDDEN).
+      daemon at all (A4_FORBIDDEN).  A file whose test-only conditionals
+      cannot be stripped is checked on its raw text instead, so A4 fails
+      closed rather than skipping it.
 
 The A3(b) allowlist is a deliberate capstone FREEZE.  A future PR that
 legitimately adds a receipt field MUST update BOTH the allowlist below AND
@@ -306,6 +308,14 @@ def a4_violations(name: str, text: str) -> list[str]:
     return problems
 
 
+def a4_source_violations(name: str, text: str) -> list[str]:
+    """A4 over the production view, or over the raw text when no
+    production view can be built: never skip a file."""
+    production = production_view(text)
+    return a4_violations(name, production if production is not None
+                         else text)
+
+
 def check_root(root: Path) -> int:
     daemon = root / "wyrelog" / "daemon"
     sources = sorted(daemon.glob("*.c"))
@@ -314,15 +324,14 @@ def check_root(root: Path) -> int:
         return 1
     for source in sources:
         text = source.read_text(encoding="utf-8")
-        production = production_view(text)
-        if production is not None:
-            problems = a4_violations(source.name, production)
-            if problems:
-                print(f"data-credential secret escapes its owner in {source}:",
-                      *problems, sep="\n  ", file=sys.stderr)
-                return 1
+        problems = a4_source_violations(source.name, text)
+        if problems:
+            print(f"data-credential secret escapes its owner in {source}:",
+                  *problems, sep="\n  ", file=sys.stderr)
+            return 1
         if not a1_violations(text) and not a2_violation(text):
             continue
+        production = production_view(text)
         if production is None:
             print(f"unbalanced or unsupported test conditional in {source}",
                   file=sys.stderr)
@@ -530,6 +539,19 @@ def self_test() -> int:
                          "wyl_policy_store_data_credential_issue (s);"):
         return 1
     if a4_violations("other.c", "wyl_policy_store_data_credential_list (s);"):
+        return 1
+    # A file the production view cannot parse is still checked.
+    unparseable = (
+        "#if !defined(A) && !defined(WYL_TEST_DAEMON_HTTP)\n"
+        "static void f (void) {\n"
+        "  wyl_service_credential_secret_peek_encoded (s, &n);\n}\n"
+        "#endif\n")
+    if production_view(unparseable) is not None:
+        return 1
+    if not a4_source_violations("auth-registry-private.c", unparseable):
+        return 1
+    if a4_source_violations("auth-registry-private.c",
+                            unparseable.replace("peek_encoded", "lookup")):
         return 1
     if not a4_violations("http.c", a4_clean.replace(
             "  wyl_policy_store_data_credential_rotate (s);\n",
