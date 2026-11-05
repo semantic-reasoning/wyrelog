@@ -8845,33 +8845,181 @@ data_credential_audit_use (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
   return wyl_audit_emit (ctx->handle, event) == WYRELOG_E_OK;
 }
 
-/* The per-use checks of a data credential (#1475).  Check 1, that the
- * credential is live, ran when its bearer resolved.  Every refusal is
- * audited. */
+static gboolean tenant_authority_is_sealed (const
+    WylPolicyTenantAuthorityRecord * record);
+/* What each operation requires of its issuer, as the threat model's table
+ * states it: an issuer may hand out only operations it holds itself. */
+static const gchar *const data_credential_operation_permissions[][2] = {
+  { "wr.datalog.query", "wr.fact.read" },
+  { "wr.datalog.infer", NULL },
+  { "wr.fact.append", NULL },
+  { "wr.fact.retract", NULL },
+  { "wr.fact.update", NULL },
+};
+#define WYL_DATA_CREDENTIAL_OPERATION_COUNT \
+  G_N_ELEMENTS (data_credential_operation_permissions)
+
+/* The operation a data credential needs for @action, as a bit, or 0 when
+ * the action is no data operation. */
+static guint32
+data_credential_operation_for_action (const gchar *action)
+{
+  for (guint i = 0; action != NULL && i < WYL_DATA_CREDENTIAL_OPERATION_COUNT;
+      i++)
+    for (guint j = 0; j < 2; j++)
+      if (g_strcmp0 (data_credential_operation_permissions[i][j], action) == 0)
+        return 1u << i;
+  return 0;
+}
+
+/* Check 5: the issuer is still the tenant's owner, an active human, not
+ * locked out, and holds @action in the tenant now.  The issuer need not be
+ * logged in for its credential to work, so its decision treats it as
+ * authenticated; nothing else about the decision is relaxed. */
+static wyrelog_error_t
+data_credential_issuer_holds (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, const WylDataCredentialInfo *info,
+    const WylPolicyTenantAuthorityRecord *record, const gchar *action,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  if (g_strcmp0 (record->owner_subject_id, info->issuer_subject_id) != 0
+      || wyl_policy_store_user_require (store, info->issuer_subject_id, TRUE)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_AUTH;
+  g_autofree gchar *state = NULL;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_state (store, info->issuer_subject_id,
+      &state, &found) != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+  if (found && (g_strcmp0 (state, "locked") == 0
+      || g_strcmp0 (state, "revoked") == 0))
+    return WYRELOG_E_AUTH;
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (req == NULL || resp == NULL)
+    return WYRELOG_E_NOMEM;
+  wyl_decide_req_set_subject_id (req, info->issuer_subject_id);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, info->tenant_id);
+  wyl_decide_req_set_guard_context (req, guard_timestamp, guard_loc_class,
+      guard_risk);
+  wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+  wyl_decide_req_set_data_credential_issuer_authenticated (req, TRUE);
+  wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+      "audit_unavailable") == 0)
+    return WYRELOG_E_BUSY;
+  return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW ?
+         WYRELOG_E_OK : WYRELOG_E_AUTH;
+}
+
+/* The per-use checks of a data credential (#1475), in order:
+ *   1. the credential is active and unexpired (when its bearer resolved);
+ *   2. the request's tenant is the credential's;
+ *   3. a graph-addressed route's graph lies in the credential's narrowing;
+ *   4. the route's operation is in the credential's operation set;
+ *   5. the issuer still owns the tenant, is active and holds the operation;
+ *   6. the tenant is not sealed.
+ * A route that declared no data scope is refused before any of them.  An
+ * issuer decision refused only because the tenant is sealed reports the
+ * seal; nothing a check refused is ever allowed by a later one.  Every
+ * refusal is audited, and so is an allowed use on a route that writes no
+ * audit of its own. */
 static gboolean
 data_credential_authorize_use (SoupServerMessage *msg,
     WylDaemonHttpContext *ctx, const WylDaemonAuthContext *auth,
     const gchar *action, gint64 guard_timestamp, const gchar *guard_loc_class,
     gint64 guard_risk)
 {
-  (void) guard_timestamp;
-  (void) guard_loc_class;
-  (void) guard_risk;
+  const WylDataCredentialInfo *info = auth->data_credential;
   const WylDaemonDataRouteScope *scope =
       g_object_get_data (G_OBJECT (msg), WYL_DAEMON_DATA_ROUTE_SCOPE);
-  /* A route that declared no data scope, or authorizes no data action, is
-   * never reachable with a data credential. */
-  const gchar *refused = scope == NULL || action == NULL ? "scope" : NULL;
-  if (!data_credential_audit_use (msg, ctx, auth, action, scope, refused)) {
+  guint32 operation = data_credential_operation_for_action (action);
+  const gchar *refused = NULL;
+  guint status = 403;
+  const gchar *code = "data_credential_denied";
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  if (scope == NULL || operation == 0) {
+    refused = "scope";
+  } else if (g_strcmp0 (scope->tenant, info->tenant_id) != 0) {
+    refused = "tenant";
+    code = WYL_DAEMON_ERR_TENANT_DENIED;
+  } else if (info->graph_ids != NULL && info->graph_ids->len > 0
+      && (scope->graph == NULL
+      || !g_ptr_array_find_with_equal_func (info->graph_ids, scope->graph,
+      g_str_equal, NULL))) {
+    refused = "graph";
+    code = "data_credential_graph_denied";
+  } else if ((info->operations & operation) == 0) {
+    refused = "operation";
+    code = "data_credential_operation_denied";
+  } else {
+    rc = wyl_policy_store_read_tenant_authority
+          (wyl_handle_get_policy_store (ctx->handle), info->tenant_id,
+            &record);
+    if (rc == WYRELOG_E_OK)
+      rc = data_credential_issuer_holds (msg, ctx, info, record, action,
+              guard_timestamp, guard_loc_class, guard_risk);
+    gboolean sealed = record != NULL && tenant_authority_is_sealed (record);
+    if ((rc == WYRELOG_E_OK || rc == WYRELOG_E_AUTH) && sealed) {
+      rc = WYRELOG_E_OK;
+      refused = "sealed";
+      status = 409;
+      code = WYL_DAEMON_ERR_TENANT_SEALED;
+    } else if (rc == WYRELOG_E_AUTH || rc == WYRELOG_E_NOT_FOUND) {
+      rc = WYRELOG_E_OK;
+      refused = "issuer";
+      code = "data_credential_issuer_denied";
+    }
+    wyl_policy_tenant_authority_record_free (record);
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        "data_credential_failed");
+    return FALSE;
+  }
+  if ((refused != NULL || scope->audit_allowed_use)
+      && !data_credential_audit_use (msg, ctx, auth, action, scope, refused)) {
     set_json_error (msg, 500, "data_credential_failed");
     return FALSE;
   }
   if (refused != NULL) {
-    set_json_error (msg, 403, "data_credential_denied");
+    set_json_error (msg, status, code);
     return FALSE;
   }
   return TRUE;
 }
+
+#ifdef WYL_HAS_FACT_STORE
+/* Authorizes a data route, declaring its scope so that a data credential
+ * may be judged against it.  Everything else is the shared authorizer's. */
+static gboolean
+authorize_data_route (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
+    const gchar *tenant, const gchar *graph, gboolean audit_allowed_use,
+    const gchar *auth_required_code, const gchar *invalid_code,
+    const gchar *denied_code, const gchar *failed_code,
+    gchar **out_actor, gchar **out_issuer)
+{
+  WylDaemonDataRouteScope scope = {
+    .tenant = tenant,.graph = graph,.audit_allowed_use = audit_allowed_use,
+  };
+  g_object_set_data (G_OBJECT (msg), WYL_DAEMON_DATA_ROUTE_SCOPE, &scope);
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  gboolean allowed = authorize_guarded_session_action_extended (server, msg,
+          query, ctx, action, tenant, auth_required_code, invalid_code,
+          denied_code, failed_code, &auth, out_actor, NULL, NULL, NULL, NULL);
+  g_object_set_data (G_OBJECT (msg), WYL_DAEMON_DATA_ROUTE_SCOPE, NULL);
+  if (allowed && out_issuer != NULL)
+    *out_issuer = auth.data_credential != NULL ?
+        g_strdup (auth.data_credential->issuer_subject_id) : NULL;
+  return allowed;
+}
+#endif
 
 static gboolean
 authorize_guarded_session_action_extended (SoupServer *server,
@@ -13428,16 +13576,6 @@ tenant_data_credential_list_handler (SoupServer *server, SoupServerMessage *msg,
       body->str, body->len);
 }
 
-/* What each operation requires of its issuer, as the threat model's table
- * states it: an issuer may hand out only operations it holds itself. */
-static const gchar *const data_credential_operation_permissions[][2] = {
-  { "wr.datalog.query", "wr.fact.read" },
-  { "wr.datalog.infer", NULL },
-  { "wr.fact.append", NULL },
-  { "wr.fact.retract", NULL },
-  { "wr.fact.update", NULL },
-};
-
 typedef enum
 {
   DATA_CREDENTIAL_ISSUE,
@@ -14810,10 +14948,9 @@ facts_verify_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action (server, msg, query, ctx,
-      "wr.fact.read", tenant, "fact_verify_auth_required",
-      "invalid_fact_verify_auth", "fact_verify_denied",
-      "fact_verify_auth_failed", &actor))
+  if (!authorize_data_route (server, msg, query, ctx, "wr.fact.read", tenant,
+      graph, TRUE, "fact_verify_auth_required", "invalid_fact_verify_auth",
+      "fact_verify_denied", "fact_verify_auth_failed", &actor, NULL))
     return;
   (void) actor;
   wyl_policy_store_t *policy = wyl_handle_get_policy_store (ctx->handle);
@@ -16060,16 +16197,18 @@ json_parse_simple_uint_member (const gchar *json, const gchar *member,
 
 static wyrelog_error_t
 emit_datalog_query_audit (WylDaemonHttpContext *ctx, const gchar *actor,
-    const gchar *tenant, const gchar *graph, const gchar *query_name,
-    const gchar *decision, guint row_count, gboolean truncated,
-    const gchar *request_id)
+    const gchar *issuer, const gchar *tenant, const gchar *graph,
+    const gchar *query_name, const gchar *decision, guint row_count,
+    gboolean truncated, const gchar *request_id)
 {
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   g_autofree gchar *resource = g_strdup_printf ("%s/%s/%s", tenant, graph,
           query_name != NULL ? query_name : "unknown");
-  g_autofree gchar *origin = g_strdup_printf ("rows=%u truncated=%s",
-          row_count, truncated ? "true" : "false");
+  /* A use through a data credential names its issuer (#1475). */
+  g_autofree gchar *origin = g_strdup_printf ("rows=%u truncated=%s%s%s",
+          row_count, truncated ? "true" : "false",
+          issuer != NULL ? " issuer=" : "", issuer != NULL ? issuer : "");
   wyl_audit_event_set_subject_id (ev, actor);
   wyl_audit_event_set_action (ev, "datalog_query");
   wyl_audit_event_set_resource_id (ev, resource);
@@ -16083,6 +16222,7 @@ emit_datalog_query_audit (WylDaemonHttpContext *ctx, const gchar *actor,
 #else
   (void) ctx;
   (void) actor;
+  (void) issuer;
   (void) tenant;
   (void) graph;
   (void) query_name;
@@ -16116,11 +16256,10 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylDaemonHttpContext *ctx = user_data;
   g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
-  g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
-      "wr.datalog.query", tenant, "datalog_auth_required",
-      "invalid_datalog_auth", "datalog_denied", "datalog_auth_failed",
-      &actor))
+  g_autofree gchar *actor = NULL, *issuer = NULL;
+  if (!authorize_data_route (server, msg, auth_query, ctx, "wr.datalog.query",
+      tenant, graph, FALSE, "datalog_auth_required", "invalid_datalog_auth",
+      "datalog_denied", "datalog_auth_failed", &actor, &issuer))
     return;
 
   GraphLookupCtx lookup = { 0 };
@@ -16173,24 +16312,24 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
   rc = wyl_fact_datalog_query_json (ctx->handle, &opts, &json, &truncated,
           &row_count, &query_name);
   if (rc == WYRELOG_E_INVALID) {
-    (void) emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+    (void) emit_datalog_query_audit (ctx, actor, issuer, tenant, graph, query_name,
         "invalid", 0, FALSE, request_id);
     set_json_error (msg, 400, "invalid_datalog_request");
     return;
   }
   if (rc == WYRELOG_E_POLICY || rc == WYRELOG_E_NOT_FOUND) {
-    (void) emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+    (void) emit_datalog_query_audit (ctx, actor, issuer, tenant, graph, query_name,
         "deny", 0, FALSE, request_id);
     set_json_error (msg, 403, "datalog_relation_denied");
     return;
   }
   if (rc != WYRELOG_E_OK) {
-    (void) emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+    (void) emit_datalog_query_audit (ctx, actor, issuer, tenant, graph, query_name,
         "failed", 0, FALSE, request_id);
     set_json_error (msg, 500, "datalog_query_failed");
     return;
   }
-  rc = emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+  rc = emit_datalog_query_audit (ctx, actor, issuer, tenant, graph, query_name,
           "allow", row_count, truncated, request_id);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "datalog_query_failed");
