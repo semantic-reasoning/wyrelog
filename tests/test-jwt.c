@@ -511,6 +511,135 @@ static const wyl_jwt_service_issue_input_t valid_service_input = {
   .issued_at = 2000,
 };
 
+static const wyl_jwt_data_credential_issue_input_t valid_data_input = {
+  .key_id = "wyrelogd-test-key",
+  .jti = "01890c10-2e3f-7000-8000-000000000301",
+  .issuer = "wyrelogd",
+  .audience = "wyrelog-client",
+  .tenant = "tenant-a",
+  .session_id = "01890c10-2e3f-7000-8000-000000000302",
+  .credential_id = "wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+  .credential_generation = 7,
+  .issued_at = 3000,
+  .expires_at = 3300,
+};
+
+#define DATA_BASE \
+  "\"jti\":\"01890c10-2e3f-7000-8000-000000000301\"," \
+  "\"sub\":\"wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"iss\":\"wyrelogd\"," \
+  "\"aud\":\"wyrelog-client\",\"iat\":3000,\"nbf\":3000," \
+  "\"exp\":3300,\"tenant\":\"tenant-a\"," \
+  "\"principal_state_at_issue\":\"data_credential\"," \
+  "\"session_id\":\"01890c10-2e3f-7000-8000-000000000302\"," \
+  "\"auth_method\":\"data_credential\"," \
+  "\"credential_id\":\"wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"," \
+  "\"credential_generation\":7"
+
+static wyrelog_error_t parse_claim_text (const gchar * text);
+static gchar *replace_claim_fragment (const gchar * text, const gchar * from,
+    const gchar * to);
+
+/* #1475: a data-credential token is its own shape.  It names the credential
+ * as its subject, claims no authenticated principal, never outlives five
+ * minutes, and borrows nothing from the service shape. */
+static gint
+check_data_credential_claims (void)
+{
+  static const guint8 secret[] = "data-test-secret";
+  g_autofree gchar *token = NULL;
+  if (wyl_jwt_sign_hs256_data_credential (&valid_data_input, secret,
+      sizeof secret - 1, &token) != WYRELOG_E_OK)
+    return 210;
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret - 1,
+      valid_data_input.key_id, valid_data_input.issuer,
+      valid_data_input.audience, 3000, &payload) != WYRELOG_E_OK)
+    return 211;
+  wyl_jwt_access_claims_t claims = { 0 };
+  if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
+    return 212;
+  gboolean exact = g_strcmp0 (claims.subject, valid_data_input.credential_id)
+      == 0 && g_strcmp0 (claims.credential_id, valid_data_input.credential_id)
+      == 0 && g_strcmp0 (claims.auth_method, "data_credential") == 0
+      && g_strcmp0 (claims.principal_state_at_issue, "data_credential") == 0
+      && g_strcmp0 (claims.tenant, "tenant-a") == 0
+      && claims.credential_generation == 7 && claims.issued_at == 3000
+      && claims.not_before == 3000 && claims.expires_at == 3300;
+  wyl_jwt_access_claims_clear (&claims);
+  if (!exact)
+    return 213;
+  /* A token that would outlive its credential is shortened, not refused. */
+  wyl_jwt_data_credential_issue_input_t input = valid_data_input;
+  input.expires_at = 3001;
+  g_clear_pointer (&token, g_free);
+  if (wyl_jwt_sign_hs256_data_credential (&input, secret, sizeof secret - 1,
+      &token) != WYRELOG_E_OK)
+    return 214;
+
+  /* The signer refuses anything the parser would. */
+  static const struct
+  {
+    gint64 expires_at;
+    const gchar *credential_id;
+    const gchar *session_id;
+    guint64 generation;
+  } bad_inputs[] = {
+    { 3301, NULL, NULL, 7 },
+    { 3000, NULL, NULL, 7 },
+    { 3300, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", NULL, 7 },
+    { 3300, NULL, "01890c10-2e3f-7000-8000-000000000301", 7 },
+    { 3300, NULL, NULL, 0 },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_inputs); i++) {
+    input = valid_data_input;
+    input.expires_at = bad_inputs[i].expires_at;
+    input.credential_generation = bad_inputs[i].generation;
+    if (bad_inputs[i].credential_id != NULL)
+      input.credential_id = bad_inputs[i].credential_id;
+    if (bad_inputs[i].session_id != NULL)
+      input.session_id = bad_inputs[i].session_id;
+    g_clear_pointer (&token, g_free);
+    if (wyl_jwt_sign_hs256_data_credential (&input, secret,
+        sizeof secret - 1, &token) != WYRELOG_E_INVALID || token != NULL)
+      return 215 + (gint) i;
+  }
+
+  if (parse_claim_text ("{" DATA_BASE "}") != WYRELOG_E_OK)
+    return 220;
+  static const gchar *const mixed[][2] = {
+    /* the service method on a data credential, and the reverse */
+    { "\"auth_method\":\"data_credential\"",
+      "\"auth_method\":\"service_credential\"" },
+    { "\"sub\":\"wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"",
+      "\"sub\":\"svc:jwt:worker\"" },
+    { "\"principal_state_at_issue\":\"data_credential\"",
+      "\"principal_state_at_issue\":\"authenticated\"" },
+    { "\"exp\":3300", "\"exp\":3301" },
+    { "\"exp\":3300", "\"exp\":3000" },
+    { "\"nbf\":3000", "\"nbf\":2999" },
+    { "\"credential_generation\":7", "\"credential_generation\":0" },
+    { "\"session_id\":\"01890c10-2e3f-7000-8000-000000000302\"",
+      "\"session_id\":\"01890c10-2e3f-7000-8000-000000000301\"" },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (mixed); i++) {
+    g_autofree gchar *text = replace_claim_fragment ("{" DATA_BASE "}",
+            mixed[i][0], mixed[i][1]);
+    if (text == NULL || parse_claim_text (text) != WYRELOG_E_POLICY)
+      return 221 + (gint) i;
+  }
+  /* A service credential id cannot ride the data shape either. */
+  g_autofree gchar *service_id = g_strdup ("{" DATA_BASE "}");
+  g_autofree gchar *swapped = replace_claim_fragment (service_id,
+          "\"credential_id\":\"wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"",
+          "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"");
+  if (swapped == NULL || parse_claim_text (swapped) != WYRELOG_E_POLICY)
+    return 230;
+  if (parse_claim_text ("{" DATA_BASE ",\"authn_epoch\":1}")
+      != WYRELOG_E_POLICY)
+    return 231;
+  return 0;
+}
+
 static gint
 check_service_claim_round_trip (void)
 {
@@ -588,7 +717,7 @@ check_service_claim_round_trip (void)
       valid_service_input.issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS,
       &payload) != WYRELOG_E_POLICY || payload != NULL)
     return 161;
-  return 0;
+  return check_data_credential_claims ();
 }
 
 static wyrelog_error_t

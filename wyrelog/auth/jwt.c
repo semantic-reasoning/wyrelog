@@ -793,7 +793,31 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
   guint service_seen = claims->seen_mask & CLAIM_SERVICE_MASK;
   if (service_seen != 0 && service_seen != CLAIM_SERVICE_MASK)
     return WYRELOG_E_POLICY;
-  if (service_seen == CLAIM_SERVICE_MASK
+  /* Two machine shapes share the claim set: a service-credential token and,
+   * since #1475, a data-credential token.  Each is validated as a whole;
+   * neither may borrow a field the other allows. */
+  gboolean data_shape = service_seen == CLAIM_SERVICE_MASK
+      && g_strcmp0 (claims->claims.auth_method, "data_credential") == 0;
+  if (data_shape
+      && (claims->claims.credential_generation == 0
+      || !canonical_id_text (claims->claims.jti)
+      || !canonical_id_text (claims->claims.session_id)
+      || g_strcmp0 (claims->claims.jti, claims->claims.session_id) == 0
+      || g_strcmp0 (claims->claims.principal_state_at_issue,
+      "data_credential") != 0
+      || g_strcmp0 (claims->claims.subject,
+      claims->claims.credential_id) != 0
+      || !wyl_data_credential_id_is_canonical (claims->claims.credential_id,
+      strlen (claims->claims.credential_id))
+      || !wyl_policy_store_tenant_id_is_valid (claims->claims.tenant)
+      || claims->claims.not_before != claims->claims.issued_at
+      || claims->claims.issued_at >
+      G_MAXINT64 - WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS
+      || claims->claims.expires_at <= claims->claims.issued_at
+      || claims->claims.expires_at - claims->claims.issued_at >
+      WYL_JWT_DATA_CREDENTIAL_ACCESS_TTL_SECONDS))
+    return WYRELOG_E_POLICY;
+  if (service_seen == CLAIM_SERVICE_MASK && !data_shape
       && (g_strcmp0 (claims->claims.auth_method,
       "service_credential") != 0
       || claims->claims.credential_generation == 0
