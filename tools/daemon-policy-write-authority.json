@@ -1,5 +1,5 @@
 {
-  "aggregate": "d867e7712ce1a688e0d1f4b34118323a02730d2a01dffa89048cd6e00dec5240",
+  "aggregate": "9960d8134625aecdb0bb317c23215029e83d9dc35e6aa27e9454fa797e50c680",
   "directives": {
     "count": 590,
     "sha256": "a1da1000b510e7bde9e74d5c56d7c185580ffbb0d77feb905271a5c2458886f5"
@@ -18,7 +18,7 @@
     "mfa_enroll_confirm_handler": "f633de54f079dd8374cc10d84e01563380f2a723b4f1f05b687276ed72bd0c4c",
     "mfa_enroll_subject_exists": "cc77193cff332f0bc837bb6ce33ec3c564c8e7e176986d358e27310e682d42d9",
     "mutate_data_credential_publication": "0dd7b41f6e76097bbf329bd991cca3d2165cf3730f289ac1660df4c2262003eb",
-    "mutate_tenant_lifecycle_publication": "be4c54abb439205de08e2870f3ff6875bb144c484170b7849725e2da45f38c69",
+    "mutate_tenant_lifecycle_publication": "c8d9fc45c5ff8546595a28301026446a66a29a468de2453be5d596bc491355b2",
     "mutate_tenant_transfer": "5f1a706c97f11c47a98d129b7ebce80b3ea6338a1ecca1dc57ca032adeb05054",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
     "policy_permission_revoke_handler": "9b67475d2adc3a6006559ea5fc3e66b65508bb5cb0abbdba1e85e1266fd9e736",
@@ -54,7 +54,7 @@
     "tenant_delete_execute": "fe4d419b80b4618f31f6b8dccd523549b0354c4e2646676fe9b9b20f88ca8915",
     "tenant_delete_handler": "3322ba825e54b5e9a9711aceccb0f089162fd496df668a6bc8037161dc1c8783",
     "tenant_delete_validate": "86c4b12dfab7d45b4653fa893be0765ffaed86e530d9cacc55e8a1b73b8c3cf6",
-    "tenant_mutation_handler": "5f03f16f4fc76b6956fb6a345d494218edc1ce674aec50ca021487f813d8038b",
+    "tenant_mutation_handler": "59e1cb47d9ba9d59291d105997419b12f03f1a7c3e71e01a3e2a4af01bb5a35d",
     "tenant_recovery_attempt_before_authorization": "c9e12fa28b50ad75040e4465e83b330662caef11f5f12653873add3b2ac02483",
     "tenant_recovery_finish_claim": "fa04e2d1c3164dbf1a6a89ad56f0aa0961b73077f4e33e2732cf0ce09c479429",
     "tenant_recovery_install": "6ed6d5761708ffdd4356d5c78d1b295a1337ac519379f8796bc05614770ec138",

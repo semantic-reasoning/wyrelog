@@ -7788,7 +7788,8 @@ create_tenant_client (const WyctlOptions *global_opts,
 
 static const gchar *const tenant_exit_codes =
     "Tenant management runs as the __wr_default session and needs\n"
-    "wr.tenant.manage there for list/create. Owners may show, transfer and seal.\n"
+    "wr.tenant.manage there for list. Create needs armed wr.tenant.create\n"
+    "or wr.tenant.manage and human MFA. Owners may show, transfer and seal.\n"
     "\n"
     "Exit codes:\n"
     "  0: the request succeeded.\n"

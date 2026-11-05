@@ -6282,6 +6282,20 @@ seed_human_tokens_with_assurance (SoupServer *server, const gchar *session_id,
          == WYRELOG_E_OK;
 }
 
+static gchar *
+seed_tenant_creator_mfa_token (SoupServer *server, const gchar *actor)
+{
+  wyl_id_t id = WYL_ID_NIL;
+  gchar text[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_new (&id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&id, text, sizeof text), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_daemon_http_seed_mfa_human_session_for_test (server,
+      text, actor, WYL_TENANT_DEFAULT));
+  gchar *token = wyl_daemon_http_new_session_token_for_test (server, text);
+  g_assert_nonnull (token);
+  return token;
+}
+
 static gint
 send_raw_logout_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, guint *out_status,
@@ -7892,6 +7906,8 @@ check_policy_write_actual_route_finalize_fault
   const gchar *expected_owner = NULL;
   guint expected_primary_status = 0;
   if (route_case == POLICY_WRITE_FAULT_ROUTE_SUCCESS) {
+    g_clear_pointer (&session_token, g_free);
+    session_token = seed_tenant_creator_mfa_token (http.server, actor);
     if (grant_tenant_manage_authority (handle, actor) != WYRELOG_E_OK)
       goto cleanup;
     path = "/tenants/create";
@@ -9824,6 +9840,8 @@ policy_lifecycle_audit_count (WylHandle *handle, const gchar *subject,
     .check_decision = TRUE,
     .decision = WYL_DECISION_ALLOW,
   };
+  if (g_strcmp0 (action, "tenant_create") == 0)
+    probe.deny_reason = "system_admin";
   if (g_strcmp0 (action, "tenant_seal") == 0)
     probe.deny_origin = "system_admin";
   if (g_strcmp0 (action, "tenant_unseal") == 0) {
@@ -11239,16 +11257,20 @@ check_policy_permission_mutation_contract (SoupServer *server,
   }
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *create_token = seed_tenant_creator_mfa_token (server,
+          "http-policy-admin");
+  g_autofree gchar *competing_create_token = seed_tenant_creator_mfa_token (server,
+          "http-policy-racer");
   g_autofree gchar *tenant_create_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
           "&creator=spoofed-creator&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, session_token);
+          WYL_TENANT_DEFAULT, create_token);
   g_autofree gchar *tenant_create_competing_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
           "&creator=spoofed-creator&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
-          competing_session_token);
+          competing_create_token);
   static const gchar *const tenant_delete_aliases[] = {
     "/tenants/delete/x",
     "/tenants/deletex",
@@ -11290,7 +11312,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     "http-policy-admin", "http-policy-racer",
   };
   const gchar *const concurrent_tokens[] = {
-    session_token, competing_session_token,
+    create_token, competing_create_token,
   };
   gint concurrent_tenant_rc = check_concurrent_tenant_creates_serialize
         (handle, base_url, concurrent_actors, concurrent_tokens);
@@ -11298,17 +11320,17 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return concurrent_tenant_rc;
 
   gint creator_fault_rc = check_tenant_create_anchor_rollback_fault (server,
-          handle, session, base_url, session_token, "tenant-grant-rollback",
+          handle, session, base_url, create_token, "tenant-grant-rollback",
           wyl_daemon_http_fail_next_tenant_creator_grant_for_test, 2253);
   if (creator_fault_rc != 0)
     return creator_fault_rc;
   creator_fault_rc = check_tenant_create_anchor_rollback_fault (server,
-          handle, session, base_url, session_token, "tenant-event-rollback",
+          handle, session, base_url, create_token, "tenant-event-rollback",
           wyl_daemon_http_fail_next_tenant_creator_event_for_test, 2255);
   if (creator_fault_rc != 0)
     return creator_fault_rc;
   creator_fault_rc = check_tenant_create_anchor_rollback_fault (server,
-          handle, session, base_url, session_token, "tenant-append-rollback",
+          handle, session, base_url, create_token, "tenant-append-rollback",
           wyl_daemon_http_fail_next_tenant_lifecycle_audit_append_for_test, 2269);
   if (creator_fault_rc != 0)
     return creator_fault_rc;
@@ -11352,7 +11374,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_autofree gchar *outcome_absent_query =
         g_strdup_printf ("name=tenant-outcome-absent&tenant=%s"
             "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-            "&guard_risk=49", WYL_TENANT_DEFAULT, competing_session_token);
+            "&guard_risk=49", WYL_TENANT_DEFAULT, competing_create_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
             "/tenants/create", outcome_absent_query, &status, &body);
     if (rc != 0)
@@ -11373,7 +11395,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_autofree gchar *outcome_present_initial_query =
         g_strdup_printf ("name=tenant-outcome-present&tenant=%s"
             "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-            "&guard_risk=49", WYL_TENANT_DEFAULT, session_token);
+            "&guard_risk=49", WYL_TENANT_DEFAULT, create_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
             "/tenants/create", outcome_present_initial_query, &status, &body);
     if (rc != 0)
@@ -11415,7 +11437,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_autofree gchar *outcome_present_query =
         g_strdup_printf ("name=tenant-outcome-present&tenant=%s"
             "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
-            "&guard_risk=49", WYL_TENANT_DEFAULT, competing_session_token);
+            "&guard_risk=49", WYL_TENANT_DEFAULT, competing_create_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
             "/tenants/create", outcome_present_query, &status, &body);
     if (rc != 0)
@@ -11451,7 +11473,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *rollback_tenant_query =
       g_strdup_printf ("name=tenant-rollback&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, session_token);
+          WYL_TENANT_DEFAULT, create_token);
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
       "tenant_create", "tenant-rollback", &lifecycle_audit_before))
     return 2230;
@@ -11484,7 +11506,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *postcommit_tenant_query =
       g_strdup_printf ("name=tenant-postcommit&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, session_token);
+          WYL_TENANT_DEFAULT, create_token);
   if (!policy_lifecycle_audit_count (handle, "http-policy-admin",
       "tenant_create", "tenant-postcommit", &lifecycle_audit_before))
     return 2230;
@@ -11511,7 +11533,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *postcommit_competing_query =
       g_strdup_printf ("name=tenant-postcommit&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, competing_session_token);
+          WYL_TENANT_DEFAULT, competing_create_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/tenants/create", postcommit_competing_query, &status, &body);
   if (rc != 0)
@@ -11574,7 +11596,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *noop_followup_query =
       g_strdup_printf ("name=tenant-noop-followup&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, competing_session_token);
+          WYL_TENANT_DEFAULT, competing_create_token);
   guint followup_audit_count = 0;
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/tenants/create", noop_followup_query, &status, &body);
@@ -11610,7 +11632,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *legacy_create_query =
       g_strdup_printf ("name=tenant-legacy&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, competing_session_token);
+          WYL_TENANT_DEFAULT, competing_create_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/tenants/create", legacy_create_query, &status, &body);
   if (rc != 0)
@@ -11630,7 +11652,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *default_create_query =
       g_strdup_printf ("name=%s&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, competing_session_token);
+          WYL_TENANT_DEFAULT, WYL_TENANT_DEFAULT, competing_create_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/tenants/create", default_create_query, &status, &body);
   if (rc != 0)
@@ -11839,7 +11861,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *revoked_tenant_create_query = g_strdup_printf
         ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
-          session_token);
+          create_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/tenants/create", revoked_tenant_create_query, &status, &body);
   if (rc != 0)
@@ -23974,6 +23996,11 @@ check_session_token_authn_contract (void)
     goto cleanup;
   }
 
+  /* Creation now additionally requires MFA (#1485). Model assurance on the
+   * epoch-winning session; pending/skip-MFA attached sessions below keep
+   * their own unassured state and cannot inherit this capability. */
+  g_clear_pointer (&winner_session, g_free);
+  winner_session = seed_tenant_creator_mfa_token (http.server, "st-admin");
   /* P1, the positive control: the session that won the epoch creates. */
   {
     g_autofree gchar *query = ST_CREATE (winner_session, "st-p1");
@@ -24018,7 +24045,8 @@ check_session_token_authn_contract (void)
 
   /* R5: an authorized skip-MFA login onto the authenticated principal also
    * attaches, and is minted a bearer.  Its session token and its bearer must
-   * answer alike: both establish the principal's current authentication. */
+   * answer alike: both establish current authentication but neither has
+   * the MFA assurance now required to create a tenant. */
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   rc = send_raw_login (session, "POST", base_url,
           "username=st-admin&skip_mfa=true", &status, &body);
@@ -24055,8 +24083,9 @@ check_session_token_authn_contract (void)
   {
     g_autofree gchar *query = ST_CREATE (skip_attach_session, "st-r5a");
     if (send_raw_policy_mutation (session, "POST", base_url,
-        "/tenants/create", query, &status, &body) != 0 || status != 200
-        || !tenant_state_matches (store, "st-r5a", TRUE, TRUE)) {
+        "/tenants/create", query, &status, &body) != 0 || status != 403
+        || strstr (body, "\"tenant_denied\"") == NULL
+        || !tenant_state_matches (store, "st-r5a", FALSE, FALSE)) {
       g_printerr ("R5 session: %u %s\n", status, body != NULL ? body : "");
       result = 23213;
       goto cleanup;
@@ -24066,8 +24095,9 @@ check_session_token_authn_contract (void)
             WYL_TENANT_DEFAULT);
     if (send_raw_policy_mutation_bearer (session, "POST", base_url,
         "/tenants/create", bearer_query, skip_attach_token, &status,
-        &body) != 0 || status != 200
-        || !tenant_state_matches (store, "st-r5b", TRUE, TRUE)) {
+        &body) != 0 || status != 403
+        || strstr (body, "\"tenant_denied\"") == NULL
+        || !tenant_state_matches (store, "st-r5b", FALSE, FALSE)) {
       g_printerr ("R5 bearer: %u %s\n", status, body != NULL ? body : "");
       result = 23214;
       goto cleanup;
@@ -24088,6 +24118,8 @@ check_session_token_authn_contract (void)
     result = 23215;
     goto cleanup;
   }
+  g_clear_pointer (&superseded_session, g_free);
+  superseded_session = seed_tenant_creator_mfa_token (http.server, "st-erin");
   {
     g_autofree gchar *query = ST_CREATE (superseded_session, "st-r3ok");
     if (send_raw_policy_mutation (session, "POST", base_url,
@@ -24305,6 +24337,170 @@ tenant_ownership_close_before_write (WylHandle *handle, const gchar *actor,
   if (rc == WYRELOG_E_OK)
     wyl_daemon_http_revoke_human_session_for_test (probe->server, session_id);
   return rc;
+}
+
+/* #1485: creation is a separate capability, checked under WRITE even for
+ * idempotent retries. The fixture has no global tenant-management grant. */
+static void
+tenant_create_expect (ServiceDenialEnv *env, const gchar *name, guint expected)
+{
+  g_autofree gchar *query = g_strdup_printf (
+    "tenant=__wr_default&name=%s&guard_timestamp=123&guard_loc_class=trusted&guard_risk=0", name);
+  g_autofree gchar *body = NULL;
+  guint status = 0;
+  g_assert_cmpint (send_raw_service_principal_bearer (env->session, "POST",
+      env->base_url, "/tenants/create", query, env->access_token, NULL,
+      &status, &body), ==, 0);
+  if (status != expected)
+    g_printerr ("create %s: %u %s\n", name, status, body);
+  g_assert_cmpuint (status, ==, expected);
+  if (expected == 403)
+    g_assert_cmpstr (body, ==, "{\"error\":\"tenant_denied\"}");
+}
+
+static void
+tenant_create_assert_absent (ServiceDenialEnv *env, const gchar *name)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  gboolean exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_tenant_exists (store, name, &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+  g_assert_cmpint (wyl_policy_store_role_membership_exists (store,
+      "human-principal-admin", "wr.system_admin", name, &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+#ifdef WYL_HAS_AUDIT
+  sqlite3_stmt *statement = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM audit_events WHERE action='tenant_create' AND resource_id=?",
+      -1, &statement, NULL), ==, SQLITE_OK);
+  sqlite3_bind_text (statement, 1, name, -1, SQLITE_TRANSIENT);
+  g_assert_cmpint (sqlite3_step (statement), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (statement, 0), ==, 0);
+  sqlite3_finalize (statement);
+#endif
+}
+
+static wyrelog_error_t
+tenant_create_revoke_before_write (WylHandle *handle, const gchar *actor,
+    const gchar *action, const gchar *session_id, const gchar *target, gpointer data)
+{
+  (void) action;
+  (void) session_id;
+  (void) target;
+  guint *calls = data;
+  (*calls)++;
+  wyrelog_error_t rc = wyl_policy_store_revoke_direct_permission (
+    wyl_handle_get_policy_store (handle), actor, "wr.tenant.create", WYL_TENANT_DEFAULT);
+  return rc == WYRELOG_E_OK ? wyl_handle_reload_engine_pair (handle) : rc;
+}
+
+static void
+check_tenant_create_capability (void)
+{
+  ServiceDenialEnv env = {0};
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  const gchar *actor = "human-principal-admin";
+  tenant_create_expect (&env, "create-ungranted", 403);
+  tenant_create_assert_absent (&env, "create-ungranted");
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store, actor,
+      "wr.tenant.create", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  tenant_create_expect (&env, "create-dormant", 403);
+  tenant_create_assert_absent (&env, "create-dormant");
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store, actor,
+      "wr.tenant.create", WYL_TENANT_DEFAULT, "armed"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  /* An authenticated but unassured bearer is not sufficient. */
+  {
+    wyl_id_t id = WYL_ID_NIL;
+    gchar id_text[WYL_ID_STRING_BUF];
+    g_autofree gchar *original_access = g_steal_pointer (&env.access_token);
+    g_autofree gchar *refresh = NULL;
+    g_assert_cmpint (wyl_id_new (&id), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_format (&id, id_text, sizeof id_text), ==, WYRELOG_E_OK);
+    g_assert_true (seed_human_tokens_with_assurance (env.http.server, id_text,
+        actor, WYL_TENANT_DEFAULT, FALSE, &env.access_token, &refresh));
+    tenant_create_expect (&env, "create-without-mfa", 403);
+    tenant_create_assert_absent (&env, "create-without-mfa");
+    g_clear_pointer (&env.access_token, g_free);
+    env.access_token = g_steal_pointer (&original_access);
+  }
+  tenant_create_expect (&env, "create-own", 200);
+  tenant_create_expect (&env, "create-own", 200);
+  tenant_create_expect (&env, "tenant-a", 403);
+  gboolean membership = TRUE;
+  g_assert_cmpint (wyl_policy_store_role_membership_exists (store, actor,
+      "wr.system_admin", "tenant-a", &membership), ==, WYRELOG_E_OK);
+  g_assert_false (membership);
+#ifdef WYL_HAS_AUDIT
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *statement = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT deny_reason,deny_origin FROM audit_events WHERE action='tenant_create' AND resource_id='create-own'",
+      -1, &statement, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (statement), ==, SQLITE_ROW);
+  g_assert_cmpstr ((const gchar *) sqlite3_column_text (statement, 0), ==, "creator");
+  g_assert_cmpint (sqlite3_column_type (statement, 1), ==, SQLITE_NULL);
+  g_assert_cmpint (sqlite3_step (statement), ==, SQLITE_DONE);
+  sqlite3_finalize (statement);
+  /* An audit failure of the first decision cannot enable create fallback. */
+  g_assert_cmpint (sqlite3_exec (db,
+      "CREATE TEMP TRIGGER fail_create_authorization BEFORE INSERT ON audit_events "
+      "WHEN NEW.action='wr.tenant.manage' BEGIN SELECT RAISE(FAIL,'audit unavailable'); END;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  tenant_create_expect (&env, "create-audit-failed", 403);
+  tenant_create_assert_absent (&env, "create-audit-failed");
+  g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER fail_create_authorization;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+#endif
+  guint calls = 0;
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (env.http.server, tenant_create_revoke_before_write, &calls);
+  tenant_create_expect (&env, "create-race", 403);
+  g_assert_cmpuint (calls, ==, 1);
+  tenant_create_assert_absent (&env, "create-race");
+  tenant_create_expect (&env, "create-own", 403);
+  /* Existing explicit global management still creates without create. */
+  g_assert_cmpint (grant_tenant_manage_authority (env.handle, actor), ==, WYRELOG_E_OK);
+#ifdef WYL_HAS_AUDIT
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store, actor,
+      "wr.tenant.create", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store, actor,
+      "wr.tenant.create", WYL_TENANT_DEFAULT, "armed"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "CREATE TEMP TRIGGER fail_dual_create_authorization BEFORE INSERT ON audit_events "
+      "WHEN NEW.action='wr.tenant.manage' BEGIN SELECT RAISE(FAIL,'audit unavailable'); END;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  tenant_create_expect (&env, "create-dual-audit-failed", 403);
+  tenant_create_assert_absent (&env, "create-dual-audit-failed");
+  g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER fail_dual_create_authorization;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+#endif
+  tenant_create_expect (&env, "create-admin", 200);
+  tenant_create_expect (&env, "tenant-a", 200);
+#ifdef WYL_HAS_AUDIT
+  statement = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT deny_reason FROM audit_events WHERE action='tenant_create' AND resource_id='create-admin'",
+      -1, &statement, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (statement), ==, SQLITE_ROW);
+  g_assert_cmpstr ((const gchar *) sqlite3_column_text (statement, 0), ==, "system_admin");
+  sqlite3_finalize (statement);
+#endif
+
+  g_autoptr (WylSession) live = wyl_daemon_http_ref_session_by_id (
+    env.http.server, env.session_token);
+  PermissionTransitionMfaRevocationProbe probe = {
+    .server = env.http.server, .session = live,
+  };
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (env.http.server, tenant_ownership_close_before_write, &probe);
+  tenant_create_expect (&env, "create-logout", 403);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  tenant_create_assert_absent (&env, "create-logout");
+  service_denial_env_clear (&env);
 }
 
 static void
@@ -27192,6 +27388,7 @@ default_variant_checks (void)
 int
 main (void)
 {
+  check_tenant_create_capability ();
   check_tenant_ownership_contract ();
   check_tenant_delete_contract ();
   check_tenant_data_credential_list_contract ();

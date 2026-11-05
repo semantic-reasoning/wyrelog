@@ -859,7 +859,8 @@ wyrelog_error_t wyl_client_graph_seal (WylClient * client,
 void wyl_client_tenant_clear (WylClientTenant * value);
 void wyl_client_tenant_list_clear (WylClientTenantList * value);
 /* Tenant management.  Every call needs a client whose credentials are bound
- * to __wr_default. Listing and creation need wr.tenant.manage there;
+ * to __wr_default. Listing needs wr.tenant.manage there. Creation needs
+ * active wr.tenant.create or wr.tenant.manage and a live human MFA session;
  * show, transfer and seal also accept the current owner. Show, transfer, seal and
  * unseal require a live MFA session. Owners may unseal only owner-sealed tenants.
  * out_tenants must be
