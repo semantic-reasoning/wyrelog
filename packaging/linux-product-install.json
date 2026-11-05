@@ -27,7 +27,7 @@
     "xxhash": "0.8.4"
   },
   "wrap_revisions": {
-    "wirelog.wrap": "c353350232c35356b34085abf5780a2fcb81e80f",
+    "wirelog.wrap": "9cb295ad49280c2562e29148796d1ac7ec69c2ef",
     "libchronoid.wrap": "v1.2.0"
   },
   "nested_wrap_pins": {
