@@ -230,6 +230,10 @@ MUTATORS = {
     "wyl_policy_store_data_credential_issue",
     "wyl_policy_store_data_credential_rotate",
     "wyl_policy_store_data_credential_revoke",
+    # Lifecycle revocation (#1476) runs inside the store's lifecycle events;
+    # the daemon never calls the bulk revocations itself.
+    "wyl_policy_store_data_credential_revoke_tenant",
+    "wyl_policy_store_data_credential_revoke_issuer",
 }
 DAEMON_HTTP_OUTPUT = {
     "posix": "wyrelog/wyrelogd.p/daemon_http.c.o",

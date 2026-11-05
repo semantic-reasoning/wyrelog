@@ -197,6 +197,12 @@ if audit_target_contract is None:
         "target-list append, and test registration"
     )
 if re.search(
+    r"test\('daemon-http-decide',\s*"
+    r"test_daemon_http_decide,\s*timeout\s*:\s*600\s*\)",
+    source,
+) is None:
+    fail("daemon-http-decide must keep its 600s sanitizer deadline")
+if re.search(
     r"test\('daemon-http-decide-service',\s*"
     r"test_daemon_http_decide_service,\s*timeout\s*:\s*600,\s*\)",
     source,

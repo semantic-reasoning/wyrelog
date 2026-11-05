@@ -28745,6 +28745,12 @@ wyl_policy_store_read_tenant_transfer_audit (wyl_policy_store_t *store,
   return rc;
 }
 
+static wyrelog_error_t data_credential_lifecycle_revoke (wyl_policy_store_t
+    *store, const gchar *issuer, const gchar *tenant, const gchar *actor,
+    const gchar *capacity, WylDataCredentialLifecycleReason reason,
+    const gchar *event_action, const gchar *event_audit_id,
+    const gchar *request_id, gint64 now_us);
+
 /* Caller holds the authority WRITE lease and an active policy transaction.
  * Receipt lookup precedes current ownership: a former owner may retry its
  * own committed request, but can never apply it again. */
@@ -28843,6 +28849,14 @@ wyl_policy_store_transfer_tenant_owner (wyl_policy_store_t *store,
     rc = WYRELOG_E_IO;
   sqlite3_finalize (stmt);
   stmt = NULL;
+  /* The previous owner's data credentials end with its ownership, in this
+   * transaction (#1476).  A tenant without an owner has none to revoke. */
+  if (rc == WYRELOG_E_OK && transition
+      && record->owner_subject_id != NULL && *record->owner_subject_id != '\0')
+    rc = data_credential_lifecycle_revoke (store, record->owner_subject_id,
+            tenant, actor, system_admin ? "system_admin" : "owner",
+            WYL_DATA_CREDENTIAL_REVOKE_OWNERSHIP_TRANSFER,
+            "tenant_transfer_owner", audit_id, request_id, now);
   gboolean inserted = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_audit_event_full (store, audit_id, now,
@@ -48999,6 +49013,135 @@ wyl_policy_store_data_credential_revoke_issuer (wyl_policy_store_t *store,
       ? "issuer_subject_id=?1 AND tenant_id=?2" : "issuer_subject_id=?1",
              issuer_subject_id, tenant_id, actor_subject_id, reason, now_us,
              out_revoked);
+}
+
+/* Indexed by the bit position of WYL_DATA_CREDENTIAL_OP_*. */
+static const gchar *const data_credential_operation_names[] = {
+  "query", "infer", "insert", "delete", "update",
+};
+
+G_STATIC_ASSERT (G_N_ELEMENTS (data_credential_operation_names) == 5);
+G_STATIC_ASSERT (WYL_DATA_CREDENTIAL_OPS_ALL == 0x1Fu);
+
+gchar *
+wyl_policy_store_data_credential_audit_scope (const WylDataCredentialInfo *info)
+{
+  g_return_val_if_fail (info != NULL, NULL);
+  GString *scope = g_string_new ("credential=");
+  g_string_append (scope, info->credential_id);
+  g_string_append (scope, ";issuer=");
+  g_string_append (scope, info->issuer_subject_id);
+  g_string_append (scope, ";operations=");
+  gboolean first = TRUE;
+  for (guint i = 0; i < G_N_ELEMENTS (data_credential_operation_names); i++) {
+    if ((info->operations & (1u << i)) == 0)
+      continue;
+    if (!first)
+      g_string_append_c (scope, ',');
+    g_string_append (scope, data_credential_operation_names[i]);
+    first = FALSE;
+  }
+  g_string_append (scope, ";graphs=");
+  if (info->graph_ids == NULL || info->graph_ids->len == 0)
+    g_string_append_c (scope, '*');
+  for (guint i = 0; info->graph_ids != NULL && i < info->graph_ids->len; i++) {
+    if (i > 0)
+      g_string_append_c (scope, ',');
+    g_string_append (scope, g_ptr_array_index (info->graph_ids, i));
+  }
+  g_string_append_printf (scope, ";expires_at_us=%" G_GINT64_FORMAT,
+      info->expires_at_us);
+  return g_string_free (scope, FALSE);
+}
+
+#define DATA_CREDENTIAL_LIFECYCLE_ACTION "data_credential_lifecycle_revoke"
+
+/* Revokes the active credentials an event ends and writes one audit row
+ * per credential, in the caller's transaction.  issuer NULL revokes every
+ * credential of tenant; tenant NULL revokes the issuer's credentials in
+ * every tenant.  The rows carry the event's request id, which is unique
+ * among lifecycle events, so wyl_policy_store_data_credential_lifecycle_audits
+ * reads exactly them back. */
+static wyrelog_error_t
+data_credential_lifecycle_revoke (wyl_policy_store_t *store,
+    const gchar *issuer, const gchar *tenant, const gchar *actor,
+    const gchar *capacity, WylDataCredentialLifecycleReason reason,
+    const gchar *event_action, const gchar *event_audit_id,
+    const gchar *request_id, gint64 now_us)
+{
+  if (!wyl_policy_store_transaction_owned_by_caller (store))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GPtrArray) revoked = NULL;
+  wyrelog_error_t rc = issuer != NULL
+      ? wyl_policy_store_data_credential_revoke_issuer (store, issuer, tenant,
+          actor, reason, now_us, &revoked)
+      : wyl_policy_store_data_credential_revoke_tenant (store, tenant, actor,
+          reason, now_us, &revoked);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < revoked->len; i++) {
+    const WylDataCredentialInfo *info = g_ptr_array_index (revoked, i);
+    g_autofree gchar *scope = wyl_policy_store_data_credential_audit_scope
+          (info);
+    g_autofree gchar *summary = g_strdup_printf ("%s;capacity=%s;reason=%s;"
+            "event=%s;event_audit=%s", scope, capacity,
+            data_credential_lifecycle_reasons[reason], event_action,
+            event_audit_id);
+    gchar audit_id[WYL_ID_STRING_BUF] = { 0 };
+    gboolean inserted = FALSE;
+    rc = service_domain_new_audit_id (audit_id);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_append_audit_event_full (store, audit_id, now_us,
+              actor, DATA_CREDENTIAL_LIFECYCLE_ACTION, info->tenant_id, summary,
+              info->credential_id, request_id, WYL_DECISION_ALLOW, &inserted);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_record_audit_intention_full (store, audit_id,
+              now_us, actor, DATA_CREDENTIAL_LIFECYCLE_ACTION, info->tenant_id,
+              summary, info->credential_id, request_id, WYL_DECISION_ALLOW,
+              &inserted);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_data_credential_lifecycle_audits (wyl_policy_store_t *store,
+    const gchar *request_id, GPtrArray **out)
+{
+  if (out != NULL)
+    *out = NULL;
+  if (store == NULL || store->db == NULL || out == NULL
+      || !wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  GPtrArray *events = g_ptr_array_new_with_free_func (g_object_unref);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT id,created_at_us,subject_id,resource_id,deny_reason,"
+          "deny_origin FROM audit_events WHERE action='"
+          DATA_CREDENTIAL_LIFECYCLE_ACTION "' AND request_id=?1 AND "
+          "decision=1 ORDER BY deny_origin", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, request_id);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylAuditEvent *event = NULL;
+    rc = wyl_audit_event_new_from_fields ((const gchar *)
+            sqlite3_column_text (stmt, 0), sqlite3_column_int64 (stmt, 1),
+            (const gchar *) sqlite3_column_text (stmt, 2),
+            DATA_CREDENTIAL_LIFECYCLE_ACTION,
+            (const gchar *) sqlite3_column_text (stmt, 3),
+            (const gchar *) sqlite3_column_text (stmt, 4),
+            (const gchar *) sqlite3_column_text (stmt, 5), request_id,
+            WYL_DECISION_ALLOW, &event);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (events, event);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (events);
+    return rc;
+  }
+  *out = events;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
