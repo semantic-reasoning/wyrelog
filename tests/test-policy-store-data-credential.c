@@ -979,6 +979,27 @@ test_revoke_and_bulk (void)
       ==, WYRELOG_E_OK);
   commit (store);
   g_assert_cmpuint (again->len, ==, 0);
+
+  /* A lifecycle revocation never fails on a clock that reads earlier than
+   * a credential's creation: its revocation time is clamped to it.  The
+   * single revoke of the routes stays exact. */
+  g_auto (WylDataCredentialInfo) later = { 0 };
+  g_assert_cmpint (issue (store, 1, DAY, NOW + 6 * HOUR, &later, NULL), ==,
+      WYRELOG_E_OK);
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_data_credential_revoke (store, "tenant-a",
+      later.credential_id, "admin", NOW + 5 * HOUR, NULL, &changed), ==,
+      WYRELOG_E_IO);
+  wyl_policy_store_rollback_mutation (store);
+  begin (store);
+  g_autoptr (GPtrArray) clamped = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_revoke_issuer (store,
+      "alice", NULL, "admin", WYL_DATA_CREDENTIAL_REVOKE_ISSUER_DISABLED,
+      NOW + 5 * HOUR, &clamped), ==, WYRELOG_E_OK);
+  commit (store);
+  g_assert_cmpuint (clamped->len, ==, 1);
+  WylDataCredentialInfo *c0 = g_ptr_array_index (clamped, 0);
+  g_assert_cmpint (c0->revoked_at_us, ==, NOW + 6 * HOUR);
 }
 
 static void

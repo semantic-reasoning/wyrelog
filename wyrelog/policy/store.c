@@ -48900,10 +48900,11 @@ data_credential_revoke_matching (wyl_policy_store_t *store,
     const gchar *actor_subject_id, WylDataCredentialLifecycleReason reason,
     gint64 now_us, GPtrArray **out_revoked)
 {
-  g_autofree gchar *sql = g_strdup_printf ("SELECT credential_id FROM "
-          "data_credentials WHERE state='active' AND %s ORDER BY credential_id",
-          where);
+  g_autofree gchar *sql = g_strdup_printf ("SELECT credential_id, "
+          "created_at_us FROM data_credentials WHERE state='active' AND %s "
+          "ORDER BY credential_id", where);
   g_autoptr (GPtrArray) ids = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GArray) created = g_array_new (FALSE, FALSE, sizeof (gint64));
   GPtrArray *revoked =
       g_ptr_array_new_with_free_func (wyl_data_credential_info_free);
   g_rec_mutex_lock (&store->graph_authority_mutex);
@@ -48917,16 +48918,23 @@ data_credential_revoke_matching (wyl_policy_store_t *store,
       && bind_text (stmt, 2, second) != WYRELOG_E_OK)
     rc = WYRELOG_E_IO;
   int step = SQLITE_ERROR;
-  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW)
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    gint64 created_at_us = sqlite3_column_int64 (stmt, 1);
     g_ptr_array_add (ids, data_credential_column_dup (stmt, 0));
+    g_array_append_val (created, created_at_us);
+  }
   if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
     rc = WYRELOG_E_IO;
   sqlite3_finalize (stmt);
   for (guint i = 0; rc == WYRELOG_E_OK && i < ids->len; i++) {
     gboolean changed = FALSE;
+    /* A lifecycle event must revoke whatever the daemon clock reads; a
+     * credential created by a clock that ran ahead is revoked at its own
+     * creation instead of failing the event. */
+    gint64 revoked_at_us = MAX (now_us, g_array_index (created, gint64, i));
     rc = data_credential_revoke_one (store->db, g_ptr_array_index (ids, i),
-            actor_subject_id, data_credential_lifecycle_reasons[reason], now_us,
-            &changed);
+            actor_subject_id, data_credential_lifecycle_reasons[reason],
+            revoked_at_us, &changed);
     if (rc == WYRELOG_E_OK && !changed)
       rc = WYRELOG_E_INTERNAL;
     WylDataCredentialInfo *info = g_new0 (WylDataCredentialInfo, 1);
