@@ -92,15 +92,15 @@ confinement, not on a network security layer:
 **Status: partly implemented.** This section records the boundary that the
 implementation units must build: #1473 (storage), #1474 (management routes),
 #1475 (exchange and per-use checks), #1476 (lifecycle revocation) and #1477
-(`wyctl` and runbook). Storage, the management routes, the exchange and the
-per-use checks have landed: a tenant owner can issue, list, rotate and revoke
-data credentials, and a program can exchange one at `/auth/service-token` and
-use its bearer on the data routes. A credential's last-used time is the time
+(`wyctl` and runbook). Storage, the management routes, the exchange, the
+per-use checks and lifecycle revocation have landed: a tenant owner can issue,
+list, rotate and revoke data credentials, a program can exchange one at
+`/auth/service-token` and use its bearer on the data routes, and the lifecycle
+events below revoke them. A credential's last-used time is the time
 of its last exchange. An exchange of an unknown credential id is refused
 sooner than one with a wrong secret, so its timing can tell whether an id
-exists; ids are not secrets, and the exchange limiter applies. Until #1476
-lands, lifecycle events do not revoke data credentials. Where the shipped
-behaviour differs from this section, #1477 corrects this document.
+exists; ids are not secrets, and the exchange limiter applies. Where the
+shipped behaviour differs from this section, #1477 corrects this document.
 
 ### Why the boundary moves
 
@@ -225,7 +225,13 @@ whatever its operations. In particular:
   owner's credentials in the tenant. Disabling or deleting a user revokes every
   credential that user issued. Deleting a tenant revokes every credential in
   it. Each revocation commits in the same transaction as the event, and the
-  event fails if the revocation fails.
+  event fails if the revocation fails. A replay of an event that already
+  committed revokes nothing, so a former owner replaying an old transfer
+  cannot end credentials issued since. A revoked credential's bearer is
+  refused at its next request, because every request looks the credential up.
+  Credentials that have expired but are still active are revoked too, so the
+  list shows why they ended. The per-use owner check stays as defence in depth
+  against any owner change that does not go through a transfer.
 
 ### Use
 
@@ -310,9 +316,21 @@ The fact quotas stay per tenant, configured as they are today.
 ### Audit
 
 Issue, rotate and revoke are audited with the actor, issuer, tenant,
-operations, graphs and credential id. A lifecycle revocation names the event
-that caused it. Every data operation made through a credential is attributed
-to the credential id and its issuer.
+operations, graphs and credential id. A lifecycle revocation writes one audit
+row per credential, with action `data_credential_lifecycle_revoke`: the event's
+actor as subject, the credential's tenant as resource, the credential id as
+origin and the event's request id. Its summary carries the credential's scope
+as the route audits render it, then the acting capacity, the reason
+(`ownership_transfer`, `issuer_disabled`, `issuer_deleted` or
+`tenant_deleted`), the event's action and the event's audit id. A user delete
+revokes the user's credentials under its own request first; each tenant it
+deletes then revokes whatever else is still active there under that tenant
+delete's request. A tenant delete revokes before it purges, so these audit rows
+are the record of credentials the purge removed. A lifecycle revocation is
+recorded at the event's time, or at the credential's creation if that is later,
+so a clock that stepped back cannot make the event fail. Every data operation
+made through a credential is attributed to the credential id and its
+issuer.
 
 ### Interaction with tenant deletion
 
