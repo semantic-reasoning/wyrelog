@@ -29,6 +29,9 @@ test_render_without_rules (void)
       ".decl " SHOP_ORDERS "_observed(" ORDER_ID ": symbol, " AMOUNT
       ": int64)\n"
       SHOP_ORDERS "_observed(V0, V1) :- " SHOP_ORDERS "(V0, V1).\n");
+  g_autofree gchar *empty = wyl_fact_graph_program_render (relations,
+          G_N_ELEMENTS (relations), "");
+  g_assert_cmpstr (empty, ==, program);
 }
 
 static void
@@ -48,9 +51,13 @@ test_render_appends_rules_after_declarations (void)
   g_assert_cmpstr (program, ==,
       ".decl w_61_w_62(w_66: int64, w_63: int64, w_73: symbol)\n"
       ".decl w_61_w_62_observed(w_66: int64, w_63: int64, w_73: symbol)\n"
+      ".decl w_61_w_62_input(w_66: int64, w_63: int64, w_73: symbol)\n"
+      "w_61_w_62(V0, V1, V2) :- w_61_w_62_input(V0, V1, V2).\n"
       "w_61_w_62_observed(V0, V1, V2) :- w_61_w_62(V0, V1, V2).\n"
       ".decl w_61_w_63(w_66: int64)\n"
       ".decl w_61_w_63_observed(w_66: int64)\n"
+      ".decl w_61_w_63_input(w_66: int64)\n"
+      "w_61_w_63(V0) :- w_61_w_63_input(V0).\n"
       "w_61_w_63_observed(V0) :- w_61_w_63(V0).\n" "RULES\n");
 }
 

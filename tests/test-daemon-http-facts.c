@@ -244,6 +244,7 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
     "wr.fact.repair",
     "wr.fact.read",
     "wr.datalog.query",
+    "wr.datalog.infer",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   register_test_human (store, subject);
@@ -1404,7 +1405,7 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
   };
   for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
     g_autofree gchar *schema_query = g_strdup_printf ("%s&namespace=shop&"
-            "relation=%s&schema_version=1", RULE_PACK_QUERY, relations[i]);
+            "relation=%s&schema_version=1&max_rows=10", RULE_PACK_QUERY, relations[i]);
     rc = send_raw (session, "POST", base_url, "/facts/schema/register",
             schema_query, admin_token, columns[i], &status, &body);
     if (rc != 0 || status != 200)
@@ -1456,6 +1457,53 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
     return 4505;
 #endif
 
+  g_assert_nonnull (strstr (body, "\"mutation_class\":\"committed_ready\""));
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/rule-packs/orders:append",
+          "tenant=__wr_default&namespace=shop&schema_version=1&batch_id=pack-seed&"
+          "idempotency_key=pack-seed&" FACT_GUARD, admin_token,
+          "order_id\tamount\nlarge\t1000\nsmall\t22\n", &status, &body);
+  g_assert_cmpint (rc, ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  const gchar *query_path = "/datalog/__wr_default/rule-packs/query";
+  const gchar *derived_query = "{\"query\":\"big(O)\",\"limit\":10}";
+  rc = send_raw (session, "POST", base_url, query_path,
+          "tenant=__wr_default&" FACT_GUARD, admin_token, derived_query,
+          &status, &body);
+  g_assert_cmpint (rc, ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (body, "\"row_count\":1"));
+  g_assert_nonnull (strstr (body, "large"));
+
+  /* Query-only and infer-only subjects cannot evaluate a packed graph.
+   * Base relation snapshots also evaluate the whole program. */
+  const gchar *permissions[] = { "wr.datalog.query", "wr.datalog.infer" };
+  for (guint i = 0; i < G_N_ELEMENTS (permissions); i++) {
+    g_autofree gchar *subject = g_strdup_printf ("pack-only-%u", i);
+    register_test_human (policy, subject);
+    g_assert_cmpint (wyl_policy_store_grant_direct_permission (policy,
+        subject, permissions[i], WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_set_permission_state (policy,
+        subject, permissions[i], WYL_TENANT_DEFAULT, "armed"), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+    g_autoptr (WylClient) client = NULL;
+    g_assert_cmpint (wyl_client_new (base_url, &client), ==, WYRELOG_E_OK);
+    wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+    g_assert_cmpint (wyl_client_login_skip_mfa (client, subject), ==,
+        WYRELOG_E_OK);
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    g_autofree gchar *token = wyl_client_dup_access_token (client);
+    const gchar *queries[] = { derived_query, "{\"query\":\"orders(O,A)\"}" };
+    for (guint q = 0; q < G_N_ELEMENTS (queries); q++) {
+      g_assert_cmpint (send_raw (session, "POST", base_url, query_path,
+          "tenant=__wr_default&" FACT_GUARD, token, queries[q], &status,
+          &body), ==, 0);
+      g_assert_cmpuint (status, ==, 403);
+      g_assert_null (strstr (body, "rows"));
+    }
+  }
+
   /* Refused: the reason, the rule and the atom; nothing is stored. */
   rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
           RULE_PACK_QUERY, admin_token,
@@ -1499,6 +1547,30 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
   if (rc != 0 || status != 200 || replaced_identity == NULL
       || strstr (body, replaced_identity) == NULL)
     return 4510;
+
+  rc = send_raw (session, "POST", base_url, query_path,
+          "tenant=__wr_default&" FACT_GUARD, admin_token, derived_query,
+          &status, &body);
+  g_assert_cmpint (rc, ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (body, "\"row_count\":2"));
+#ifdef WYL_TEST_HANDLE_SEAMS
+  /* The pack is durable even if publication fails; report that distinction
+   * and continue to serve the old generation. */
+  wyl_fact_replay_set_test_fault (WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE);
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token, "big(O):-orders(O,999).", &status, &body);
+  g_assert_cmpint (rc, ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (body, "committed_degraded"));
+  g_assert_nonnull (strstr (body, "\"queryable\":true"));
+  rc = send_raw (session, "POST", base_url, query_path,
+          "tenant=__wr_default&" FACT_GUARD, admin_token, derived_query,
+          &status, &body);
+  g_assert_cmpint (rc, ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (body, "\"row_count\":2"));
+#endif
 
   /* Request shape, authority and graph state. */
   rc = send_raw (session, "GET", base_url, "/facts/rule-pack/register",

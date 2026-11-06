@@ -339,6 +339,7 @@ wyrelog/fact/provisioning-run-private.h
 wyrelog/fact/publication-lock-event-private.c
 wyrelog/fact/publication-lock-event-private.h
 wyrelog/fact/query-private.h
+wyrelog/fact/query.c
 wyrelog/fact/reconcile-private.h
 wyrelog/fact/recovery-mac-private.c
 wyrelog/fact/recovery-mac-private.h

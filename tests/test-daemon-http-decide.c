@@ -26416,8 +26416,8 @@ check_data_credential_read_contract (void)
   gint64 exchanged = info.last_used_at_us;
   wyl_data_credential_info_clear (&info);
 
-  /* A query credential queries and verifies; an infer credential, whose
-   * operation no route checks yet, does neither. */
+  /* A query credential queries a graph without a pack and verifies;
+   * infer alone does neither. */
   g_autofree gchar *rows = data_credential_query (&env, query, "dc-1475",
           "g1", 200);
   g_assert_nonnull (strstr (rows, "\"row_count\":1"));
@@ -26500,6 +26500,36 @@ check_data_credential_read_contract (void)
   g_assert_cmpuint (scan.query_rows, >=, 4);
   g_assert_cmpuint (scan.allowed_uses, ==, 2);
   g_assert_cmpuint (scan.tenant_refusals, ==, 1);
+
+  /* Once this graph has rules, even its base-relation query evaluates the
+   * pack. Both operation bits and the issuer's inference permission apply. */
+  data_credential_admin_send (&env, admin, "/facts/schema/register",
+      "tenant=dc-1475&graph=g1&namespace=owner&relation=derived&"
+      "schema_version=1&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+      "column_name\tcolumn_type\tnullable\tvisible\n"
+      "row_id\tsymbol\tfalse\ttrue\n", TRUE);
+  data_credential_admin_send (&env, admin, "/facts/rule-pack/register",
+      "tenant=dc-1475&graph=g1&guard_timestamp=1&guard_loc_class=trusted&"
+      "guard_risk=0", "derived(R):-rows(R,_).", TRUE);
+  g_autofree gchar *both_secret = NULL;
+  g_autofree gchar *both_id = data_credential_issue_for_use (&env, alice,
+          "dc-1475", "query,infer", "g1", "3600", &both_secret);
+  g_autofree gchar *both = data_credential_bearer (&env, both_id, both_secret);
+  g_free (data_credential_query (&env, query, "dc-1475", "g1", 403));
+  g_free (data_credential_query (&env, infer, "dc-1475", "g1", 403));
+  g_free (data_credential_query (&env, both, "dc-1475", "g1", 200));
+  g_free (data_credential_query (&env, both, "dc-1475", "g2", 403));
+  g_free (data_credential_query (&env, both, "dc-other", "g1", 403));
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (store,
+      "dc-alice", "wr.datalog.infer", "dc-1475"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_autofree gchar *infer_denied = data_credential_query (&env, both,
+          "dc-1475", "g1", 403);
+  g_assert_cmpstr (infer_denied, ==,
+      "{\"error\":\"data_credential_issuer_denied\"}");
+  grant_armed_permission (store, "dc-alice", "wr.datalog.infer", "dc-1475");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_free (data_credential_query (&env, both, "dc-1475", "g1", 200));
 
   /* A sealed graph refuses a read through a credential as for anyone. */
   data_credential_admin_send (&env, admin, "/graphs/seal",

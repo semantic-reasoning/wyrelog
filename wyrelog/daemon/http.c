@@ -15641,7 +15641,7 @@ rule_pack_digest_hex (const wyl_policy_fact_rule_pack_info_t *info)
 static void
 set_rule_pack_ok_json (SoupServerMessage *msg, const gchar *tenant,
     const gchar *graph, const wyl_policy_fact_rule_pack_info_t *info,
-    const gchar *digest_hex)
+    const gchar *digest_hex, const wyl_fact_mutation_outcome_t *outcome)
 {
   if (!wyl_daemon_policy_write_prepare_success_response (msg))
     return;
@@ -15650,8 +15650,29 @@ set_rule_pack_ok_json (SoupServerMessage *msg, const gchar *tenant,
   g_string_append (body, ",\"graph_id\":");
   append_json_string (body, graph);
   g_string_append_printf (body, ",\"pack_version\":%u,\"rule_count\":%"
-      G_GSIZE_FORMAT ",\"pack_digest\":\"%s\"}", info->pack_version,
+      G_GSIZE_FORMAT ",\"pack_digest\":\"%s\"", info->pack_version,
       info->n_rules, digest_hex);
+  if (outcome != NULL) {
+    const gchar *class_name =
+        wyl_fact_mutation_class_name (outcome->mutation_class);
+    g_string_append (body, ",\"committed\":true,\"mutation_class\":");
+    append_json_string (body, class_name);
+    g_string_append (body, ",\"queryable\":");
+    g_string_append (body, outcome->engine_queryable ? "true" : "false");
+    g_string_append (body, ",\"reconcile\":");
+    g_string_append (body,
+        outcome->needs_runtime_reconcile ? "true" : "false");
+    if (outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED) {
+      g_string_append (body, ",\"degraded_class\":");
+      append_json_string (body,
+          wyl_fact_graph_replay_class_name (outcome->degraded_class));
+    }
+    g_string_append_printf (body, ",\"engine_generation\":%" G_GUINT64_FORMAT,
+        outcome->engine_generation);
+    soup_message_headers_replace (soup_server_message_get_response_headers
+          (msg), "X-Wyrelog-Mutation", class_name);
+  }
+  g_string_append_c (body, '}');
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
@@ -15660,8 +15681,7 @@ set_rule_pack_ok_json (SoupServerMessage *msg, const gchar *tenant,
 
 /* #1213: registers a graph's rule pack.  The body is the pack text; it is
  * checked against the relations the graph's program declares and stored as
- * the graph's next pack version.  A stored pack is not yet evaluated: replay
- * does not read it until wirelog can bound a query's evaluation. */
+ * the graph's next pack version, then published by targeted replay. */
 static void
 rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -15688,8 +15708,18 @@ rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
       &actor))
     return;
 
+  g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
+  wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire (ctx->handle,
+          tenant, graph, NULL, &replay_admission);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        "fact_replay_admission_failed");
+    return;
+  }
   g_auto (WylDaemonPolicyWrite) write = { 0 };
-  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+  write.parent_cancellable =
+      wyl_handle_fact_replay_admission_get_cancellable (replay_admission);
+  rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_RULE_PACK_REGISTER, &write);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "rule_pack_register_failed");
@@ -15712,6 +15742,11 @@ rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 409, "graph_sealed");
     return;
   }
+  const wyl_policy_fact_graph_info_t graph_info = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .schema_version = lookup.info.schema_version,
+  };
   graph_lookup_clear (&lookup);
 
   g_autofree gchar *body = NULL;
@@ -15720,10 +15755,6 @@ rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  const wyl_policy_fact_graph_info_t graph_info = {
-    .tenant_id = tenant,
-    .graph_id = graph,
-  };
   wyl_policy_fact_rule_pack_info_t info = { 0 };
   wyl_fact_rule_pack_rejection_t rejection = { 0 };
   rc = wyl_fact_replay_register_rule_pack (write.store, &graph_info, body,
@@ -15763,7 +15794,26 @@ rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
   (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "", tenant,
       graph, "rule_pack_register", pack_identity, "registered",
       ensure_request_id_header (msg));
-  set_rule_pack_ok_json (msg, tenant, graph, &info, digest_hex);
+  WylFactGraphRuntimeStatus status = { 0 };
+  rc = wyl_handle_refresh_fact_graph_admitted (ctx->handle, replay_admission,
+          &graph_info, &status);
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  outcome.engine_queryable = status.queryable;
+  outcome.engine_generation = status.engine_generation;
+  if (rc == WYRELOG_E_OK) {
+    outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+  } else if (status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+    outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_BARRIER;
+    outcome.needs_runtime_reconcile = TRUE;
+  } else {
+    outcome.mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+    outcome.degraded_class = status.last_replay_class;
+    outcome.needs_runtime_reconcile = TRUE;
+    outcome.needs_durable_reconcile = TRUE;
+  }
+  wyl_fact_graph_runtime_status_clear (&status);
+  set_rule_pack_ok_json (msg, tenant, graph, &info, digest_hex, &outcome);
   wyl_policy_fact_rule_pack_info_clear (&info);
 }
 
@@ -16366,15 +16416,29 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
   g_autofree gchar *query_name = NULL;
   gboolean truncated = FALSE;
   guint row_count = 0;
+  gboolean inference_required = FALSE;
   wyl_fact_datalog_query_options_t opts = {
     .tenant_id = tenant,
     .graph_id = graph,
     .query = query_atom,
     .limit = limit,
     .query_id = request_id,
+    .out_inference_required = &inference_required,
   };
   rc = wyl_fact_datalog_query_json (ctx->handle, &opts, &json, &truncated,
           &row_count, &query_name);
+  if (inference_required) {
+    g_auto (WylDaemonAuthContext) infer_auth = { 0 };
+    g_autofree gchar *infer_actor = NULL;
+    if (!authorize_data_route (server, msg, auth_query, ctx, "wr.datalog.infer",
+        tenant, graph, FALSE, "datalog_auth_required", "invalid_datalog_auth",
+        "datalog_inference_denied", "datalog_auth_failed", &infer_auth,
+        &infer_actor))
+      return;
+    opts.allow_inference = TRUE;
+    rc = wyl_fact_datalog_query_json (ctx->handle, &opts, &json, &truncated,
+            &row_count, &query_name);
+  }
   if (rc == WYRELOG_E_INVALID) {
     (void) emit_datalog_query_audit (ctx, actor, issuer, tenant, graph, query_name,
         "invalid", 0, FALSE, request_id);

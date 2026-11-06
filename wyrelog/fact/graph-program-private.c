@@ -94,6 +94,21 @@ wyl_fact_graph_program_render (const wyl_fact_graph_program_relation_t *
         || !append_declaration (program, observed, rel))
       return NULL;
 
+    /* Wirelog forbids EDB insertion into an IDB head. Packed programs
+     * therefore keep all durable inputs separate and union them into the
+     * customer relations before applying the customer rules. */
+    if (rules != NULL && rules[0] != '\0') {
+      g_autofree gchar *input = g_strdup_printf ("%s_input", relation);
+      if (!append_declaration (program, input, rel))
+        return NULL;
+      g_string_append (program, relation);
+      append_variables (program, rel->n_columns);
+      g_string_append (program, " :- ");
+      g_string_append (program, input);
+      append_variables (program, rel->n_columns);
+      g_string_append (program, ".\n");
+    }
+
     g_string_append (program, observed);
     append_variables (program, rel->n_columns);
     g_string_append (program, " :- ");

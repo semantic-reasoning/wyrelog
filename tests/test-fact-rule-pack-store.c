@@ -438,6 +438,15 @@ check_load_refuses_inconsistent_rows (void)
       &info) != WYRELOG_E_INTERNAL || info.rules != NULL)
     rc = 69;
 
+  /* A digest of a C-string prefix must not authenticate bytes after NUL. */
+  g_assert_true (exec_sql (store, "INSERT INTO fact_rule_packs VALUES "
+      "('tenant-a','graph-main',4,3,X'" RULES_DIGEST_HEX "',0);"
+      "INSERT INTO fact_rule_pack_rules SELECT tenant_id,graph_id,4,rule_index,"
+      "CASE WHEN rule_index=1 THEN rule_text||char(0)||'ignored' ELSE rule_text END "
+      "FROM fact_rule_pack_rules WHERE pack_version=2;"));
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (store, "tenant-a", "graph-main",
+      &info), ==, WYRELOG_E_INTERNAL);
+
 out:
   wyl_policy_fact_rule_pack_info_clear (&info);
   cleanup_fact_root (root);

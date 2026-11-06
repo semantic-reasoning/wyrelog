@@ -426,6 +426,14 @@ wyrelog_error_t wyl_handle_snapshot_fact_graph_relations (WylHandle * self,
     const gchar * tenant_id, const gchar * graph_id,
     const gchar * const *relations, gsize n_relations,
     wyl_fact_graph_tuple_cb cb, gpointer user_data);
+/* Refuses before any evaluator call when the pinned generation has a pack
+ * and inference was not authorized. No policy authorization runs under the
+ * snapshot lock: the HTTP caller authorizes and retries after this returns. */
+wyrelog_error_t wyl_handle_snapshot_fact_graph_relations_guarded (
+  WylHandle *self, const gchar *tenant_id, const gchar *graph_id,
+  const gchar *const *relations, gsize n_relations,
+  wyl_fact_graph_tuple_cb cb, gpointer user_data,
+  gboolean allow_inference, gboolean *out_inference_required);
 typedef wyrelog_error_t (*wyl_fact_graph_status_cb) (const
     wyl_fact_graph_status_t * status, gpointer user_data);
 wyrelog_error_t wyl_handle_foreach_fact_graph_status (WylHandle * self,

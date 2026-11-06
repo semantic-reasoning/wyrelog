@@ -1795,7 +1795,7 @@ permissions: a service principal cannot hold them.
 | `wr.fact.forget` | `fact forget` (the `:forget` route), which erases a batch irreversibly |
 | `wr.fact.repair` | the `:repair` route for orphaned rows |
 | `wr.datalog.query` | `datalog query` (`POST /datalog/...`) over stored relations |
-| `wr.datalog.infer` | queries that evaluate rules; no route uses it yet, because rule packs are stored but not evaluated |
+| `wr.datalog.infer` | every Datalog query against a graph whose published engine contains a rule pack, in addition to `wr.datalog.query` |
 | `wr.schema.manage` | schema and rule-pack registration and schema status |
 
 `wr.system_admin` and `wr.service_admin` hold all of them, `wr.svc_agent` holds
@@ -1905,18 +1905,35 @@ target option, `4` when the daemon denies the caller (`403 schema_denied`),
 
 ### Rule packs
 
-A rule pack is a set of non-recursive rules that will derive a graph's
-relations from its other relations. **Rules are stored but not evaluated
-yet:** registering a pack changes nothing a query answers. Replay will read
-packs only once wirelog can bound the work a query does (#1213,
-semantic-reasoning/wirelog#1817). Registering one now lets you check a pack
-against a graph and record it.
+A rule pack is a set of non-recursive rules that derive a graph's relations
+from its other relations. Registration stores a new version and immediately
+refreshes that graph's engine. Startup replay and restore also load the latest
+pack from their policy snapshot, rechecking it against the schemas selected
+for that engine. An invalid stored pack prevents that graph from rebuilding;
+other graphs remain available.
+
+Rules execute when a Datalog query snapshots the engine. Derived rows are
+query results, not new durable fact batches. Appends and retractions rebuild
+the engine so subsequent queries derive from the current facts. A query still
+accepts one allowlisted relation atom; it cannot supply inline rules. Both
+`wr.datalog.query` and `wr.datalog.infer` are required for a packed graph,
+including queries of base relations, because Wirelog evaluates the whole
+program on each snapshot. Data credentials need both `query` and `infer`
+operations and their issuer's corresponding permissions. Graphs without a
+pack retain the existing query-only permission behavior.
+
+**Evaluation has no hard work, memory or cancellation budget yet**
+(semantic-reasoning/wirelog#1817). Acyclic rules, pack-size limits and response
+row limits do not bound join work or intermediate tuples. Expensive queries
+can consume substantial resources and delay tenant sealing while their
+admission lease remains held. This limitation is accepted for #1213;
+operators should control who can register packs and authorize inference.
 
 A pack is plain text, with one rule per line in the form `head :- body.` and
 `#` starting a comment:
 
 ```
-# orders worth at least 1000
+# orders worth exactly 1000
 big(O) :- shop.orders(O, Amount), shop.orders(O, 1000).
 quiet(O) :- shop.orders(O, _), !flagged(O).
 ```
@@ -1937,7 +1954,8 @@ at most 256 rules and 64 KiB, and a rule at most 16 body atoms. These limits
 bound the check, not what evaluating the pack will cost.
 
 `fact rule-pack register` checks the pack and stores it as the graph's next
-pack version. It needs `wr.schema.manage` and the guard options:
+pack version, then publishes a replacement engine. It needs `wr.schema.manage`
+and the guard options:
 
 ```sh
 wyctl --daemon-url "$BASE_URL" fact rule-pack register \
@@ -1957,6 +1975,15 @@ spaces or comments. The digest is computed over those stored rules. The audit
 stream records a stored pack as action `rule_pack_register`, with the resource
 `<tenant>/<graph>` and the identity `<version>:<digest>`. Registering again
 stores a new version and leaves earlier versions unchanged.
+
+The HTTP response also reports `committed`, `mutation_class`, `queryable`,
+`engine_generation` and `reconcile`. `committed_ready` means the replacement
+is published. `committed_degraded` or `committed_barrier` means the pack is
+durable but publication did not finish; reconcile before relying on the new
+rules. A previous queryable generation can continue serving its previous pack.
+The CLI currently prints only the stored identity, so that output alone does
+not prove publication. Replay admission failure occurs before the pack is
+stored and returns 503.
 
 A refused pack stores nothing. The command prints the reason and where it
 failed:

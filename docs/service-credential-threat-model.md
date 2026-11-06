@@ -156,7 +156,7 @@ permission the existing route already checks:
 | Operation | Permission | Routes |
 |---|---|---|
 | `query` | `wr.datalog.query`, `wr.fact.read` | `POST /datalog/...`; `GET /facts/verify` |
-| `infer` | `wr.datalog.infer` | none yet; rule packs are stored but not evaluated |
+| `infer` | `wr.datalog.infer` | Datalog queries on graphs with a published rule pack (including base relations); also requires `query` |
 | `insert` | `wr.fact.append` | the facts `:append` route |
 | `delete` | `wr.fact.retract` | the facts `:retract` route |
 | `update` | `wr.fact.update` | the facts `:update` routes |

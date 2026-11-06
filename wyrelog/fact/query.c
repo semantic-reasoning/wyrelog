@@ -271,7 +271,7 @@ schema_value_matches (WylEngine *engine,
     if (arg->kind != QUERY_ARG_STRING)
       return FALSE;
     g_autofree gchar *value = wyl_engine_owned_dup_interned_symbol (engine,
-        cell);
+            cell);
     return g_strcmp0 (value, arg->text) == 0;
   }
   if (g_strcmp0 (column->column_type, "int64") == 0)
@@ -313,7 +313,7 @@ append_cell_json (GString *json, WylEngine *engine,
   if (g_strcmp0 (column->column_type, "symbol") == 0 ||
       g_strcmp0 (column->column_type, "string") == 0) {
     g_autofree gchar *value = wyl_engine_owned_dup_interned_symbol (engine,
-        cell);
+            cell);
     append_json_string_local (json, value != NULL ? value : "");
   } else if (g_strcmp0 (column->column_type, "bool") == 0) {
     g_string_append (json, cell != 0 ? "true" : "false");
@@ -397,6 +397,8 @@ wyl_fact_datalog_query_json (WylHandle *handle,
       opts->tenant_id == NULL || opts->graph_id == NULL || opts->query == NULL)
     return WYRELOG_E_INVALID;
 
+  if (opts->out_inference_required != NULL)
+    *opts->out_inference_required = FALSE;
   ParsedQuery parsed = { 0 };
   if (!parse_relation_atom (opts->query, &parsed))
     return WYRELOG_E_INVALID;
@@ -404,7 +406,7 @@ wyl_fact_datalog_query_json (WylHandle *handle,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_policy_fact_relation_query_info_t query_info = { 0 };
   wyrelog_error_t rc = wyl_policy_store_load_fact_relation_query (store,
-      opts->tenant_id, opts->graph_id, parsed.name, &query_info);
+          opts->tenant_id, opts->graph_id, parsed.name, &query_info);
   if (rc != WYRELOG_E_OK) {
     parsed_query_clear (&parsed);
     return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
@@ -419,9 +421,9 @@ wyl_fact_datalog_query_json (WylHandle *handle,
   wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
   gsize n_columns = 0;
   rc = wyl_policy_store_load_fact_relation_schema_columns (store,
-      opts->tenant_id, opts->graph_id, query_info.namespace_id,
-      query_info.relation_name, query_info.schema_version, &relation_visible,
-      &columns, &n_columns);
+          opts->tenant_id, opts->graph_id, query_info.namespace_id,
+          query_info.relation_name, query_info.schema_version, &relation_visible,
+          &columns, &n_columns);
   if (rc != WYRELOG_E_OK) {
     wyl_policy_fact_relation_query_info_clear (&query_info);
     parsed_query_clear (&parsed);
@@ -450,15 +452,17 @@ wyl_fact_datalog_query_json (WylHandle *handle,
     .rows_json = rows,
   };
   g_autofree gchar *wire_relation = wyl_fact_replay_wirelog_relation_name
-      (query_info.namespace_id, query_info.relation_name);
+        (query_info.namespace_id, query_info.relation_name);
   g_autofree gchar *snapshot_relation =
       wire_relation != NULL ? g_strdup_printf ("%s_observed", wire_relation) :
       NULL;
   if (wire_relation == NULL)
     rc = WYRELOG_E_NOMEM;
   else
-    rc = wyl_handle_snapshot_fact_graph_relation (handle, opts->tenant_id,
-        opts->graph_id, snapshot_relation, collect_tuple, &ctx);
+    rc = wyl_handle_snapshot_fact_graph_relations_guarded (handle,
+            opts->tenant_id, opts->graph_id,
+            (const gchar *const *) &snapshot_relation, 1, collect_tuple, &ctx,
+            opts->allow_inference, opts->out_inference_required);
 
   if (rc == WYRELOG_E_OK) {
     g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
