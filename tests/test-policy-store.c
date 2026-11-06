@@ -591,7 +591,7 @@ check_store_reads_fact_logical_operation_status (void)
     return 272;
 
   WylPolicyFactLogicalQuotaOperation wrong_identity = operation;
-  wrong_identity.graph_id = "other-graph";
+  wrong_identity.batch_id = "other-batch";
   status = (WylPolicyFactLogicalOperationStatus) {
     .state = WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED,
     .requested_rows = 99,

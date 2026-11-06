@@ -534,7 +534,7 @@ CREATE TABLE IF NOT EXISTS fact_tenant_logical_quota_usage (
 -- One row per cross-store mutation operation. request_id is the idempotency
 -- identity; the remaining columns bind it to one tenant/graph/batch/payload.
 CREATE TABLE IF NOT EXISTS fact_logical_quota_operations (
-    request_id    TEXT PRIMARY KEY,
+    request_id    TEXT NOT NULL,
     tenant_id     TEXT NOT NULL,
     graph_id      TEXT NOT NULL,
     batch_id      TEXT NOT NULL,
@@ -554,6 +554,7 @@ CREATE TABLE IF NOT EXISTS fact_logical_quota_operations (
         'cancelled')),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, graph_id, request_id),
     UNIQUE (tenant_id, graph_id, batch_id, request_id, payload_digest),
     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
 );

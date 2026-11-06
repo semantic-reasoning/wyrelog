@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Exercise human management through the real daemon, client and wyctl."""
 import json
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import os
 from pathlib import Path
 import socket
@@ -14,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 
-def check_self_service(root, base, admin, cli, http, arm):
+def check_self_service(root, base, admin, cli, http, arm, restart):
     """Create-only humans keep their grant while exercising isolated tenants."""
     helper = Path(__file__).with_name('human-user-auth-fixture.py')
     users, tenants = {}, {}
@@ -28,10 +30,22 @@ def check_self_service(root, base, admin, cli, http, arm):
                         str(root / f'{subject}.seed'), tenant], check=True, timeout=100)
         return token
 
-    def read(tenant, token, status=200):
-        return http(f'/datalog/{tenant}/orders/query', token=token,
+    def read(tenant, token, status=200, graph='orders'):
+        return http(f'/datalog/{tenant}/{graph}/query', token=token,
                     query={**guard, 'tenant': tenant},
                     body={'query': 'orders(O,A)', 'output': 'json', 'limit': 10}, status=status)
+
+    def append(tenant, token, graph='orders', key='shared-key', batch='batch-1', marker=None, status=200):
+        return http(f'/facts/{tenant}/{graph}/orders:append', token=token,
+                    query={**guard, 'tenant': tenant, 'namespace': 'shop', 'schema_version': 1,
+                           'batch_id': batch, 'idempotency_key': key},
+                    body=f'order_id\tamount\n{marker or tenant}\t42\n', status=status)
+
+    def usage(tenant, token):
+        value = http('/facts/quota', method='GET', token=token,
+                     query={**guard, 'tenant': tenant, 'dimension': 'logical_bytes'})
+        assert value['pending_rows'] == value['pending_bytes'] == 0, value
+        return value['committed_rows'], value['committed_bytes']
 
     for subject in ('creator-a', 'creator-b'):
         cli('user', 'create', '--subject', subject, token=admin)
@@ -61,14 +75,33 @@ def check_self_service(root, base, admin, cli, http, arm):
             cli('fact', 'schema', 'register', '--tenant', tenant, '--graph', 'orders',
                 '--namespace', 'shop', '--relation', 'orders', '--schema-version', '1',
                 '--columns', 'order_id:symbol,amount:int64', token=scoped)
-            http(f'/facts/{tenant}/orders/orders:append', token=scoped,
-                 query={**guard, 'tenant': tenant, 'namespace': 'shop', 'schema_version': 1,
-                        'batch_id': tenant, 'idempotency_key': tenant},
-                 body=f'order_id\tamount\n{tenant}\t42\n')
-            assert read(tenant, scoped)['rows'] == [{'O': tenant, 'A': 42}]
             # A non-default bearer cannot create, even for its own human.
             http('/tenants/create', token=scoped,
                  query={**guard, 'tenant': tenant, 'name': tenant + '-nested'}, status=403)
+
+    # A denied cross-tenant request arrives before any owner uses the key.
+    for tenant, (_, token) in tenants.items():
+        for victim in tenants:
+            if victim != tenant:
+                append(victim, token, marker='unauthorized', status=403)
+    barrier = threading.Barrier(2 * len(tenants))
+    def concurrent_append(tenant):
+        barrier.wait(timeout=30)
+        return tenant, append(tenant, tenants[tenant][1])['inserted']
+    with ThreadPoolExecutor(max_workers=2 * len(tenants)) as pool:
+        receipts = list(pool.map(concurrent_append, list(tenants) * 2))
+    for tenant, (_, token) in tenants.items():
+        assert sum(inserted for target, inserted in receipts if target == tenant) == 1
+        assert read(tenant, token)['rows'] == [{'O': tenant, 'A': 42}]
+        assert usage(tenant, token)[0] == 1
+        append(tenant, token, marker='changed', status=409)
+        append(tenant, token, batch='changed-batch', status=409)
+        cli('graph', 'create', '--tenant', tenant, '--graph', 'archive', token=token)
+        cli('fact', 'schema', 'register', '--tenant', tenant, '--graph', 'archive',
+            '--namespace', 'shop', '--relation', 'orders', '--schema-version', '1',
+            '--columns', 'order_id:symbol,amount:int64', token=token)
+        assert append(tenant, token, graph='archive', marker=tenant + '-archive')['inserted']
+        assert usage(tenant, token)[0] == 2
 
     for tenant, (subject, scoped) in tenants.items():
         for foreign in tenants:
@@ -81,7 +114,7 @@ def check_self_service(root, base, admin, cli, http, arm):
                  body='order_id\tamount\nforeign\t99\n', status=403)
             http(f'/facts/{foreign}/orders/orders:forget', method='DELETE', token=scoped,
                  query={**guard, 'tenant': foreign, 'namespace': 'shop', 'schema_version': 1},
-                 body={'batch_id': foreign, 'operator': subject, 'reason': 'test'}, status=403)
+                 body={'batch_id': 'batch-1', 'operator': subject, 'reason': 'test'}, status=403)
         foreign = 'creator-b-1' if subject == 'creator-a' else 'creator-a-1'
         for action in ('create', 'show', 'seal', 'unseal', 'delete', 'transfer-owner'):
             extra = ['--confirm'] if action == 'seal' else ['--to', subject] if action == 'transfer-owner' else []
@@ -89,6 +122,27 @@ def check_self_service(root, base, admin, cli, http, arm):
             expected = 'tenant_transfer_denied' if action == 'transfer-owner' else 'tenant_denied'
             assert expected in refused.stderr, (action, refused.returncode, refused.stderr)
         assert read(tenant, scoped)['rows'] == [{'O': tenant, 'A': 42}]
+
+    before = {tenant: usage(tenant, token) for tenant, (_, token) in tenants.items()}
+    restart()
+    for subject in users:
+        users[subject] = login(subject)
+    for tenant, (subject, _) in list(tenants.items()):
+        token = login(subject, tenant)
+        tenants[tenant] = subject, token
+        assert not append(tenant, token)['inserted']
+        assert not append(tenant, token, graph='archive', marker=tenant + '-archive')['inserted']
+        assert read(tenant, token)['rows'] == [{'O': tenant, 'A': 42}]
+        assert usage(tenant, token) == before[tenant]
+        append(tenant, token, marker='changed-after-restart', status=409)
+
+    first, second = list(tenants)[:2]
+    http('/facts/quota', token=tenants[first][1],
+         query={**guard, 'tenant': first, 'dimension': 'logical_bytes', 'row_limit': 2, 'limit': 10000})
+    append(first, tenants[first][1], key='quota-probe', batch='quota-probe', status=429)
+    assert append(second, tenants[second][1], key='quota-probe', batch='quota-probe', marker='extra')['inserted']
+    assert usage(first, tenants[first][1]) == before[first]
+    assert usage(second, tenants[second][1])[0] == 3
 
     # Revoke the grant without replacing the live bearer. Existing-name no-ops
     # must reauthorize too; ownership still permits the separate lifecycle.
@@ -98,13 +152,25 @@ def check_self_service(root, base, admin, cli, http, arm):
         for name in (subject + '-revoked', subject + '-1'):
             assert 'tenant_denied' in cli('tenant', 'create', '--name', name,
                                          token=token, success=False).stderr
+    remaining = set(tenants)
     for tenant, (subject, scoped) in tenants.items():
         http(f'/facts/{tenant}/orders/orders:forget', method='DELETE', token=scoped,
              query={**guard, 'tenant': tenant, 'namespace': 'shop', 'schema_version': 1},
-             body={'batch_id': tenant, 'operator': subject, 'reason': 'test cleanup'})
+             body={'batch_id': 'batch-1', 'operator': subject, 'reason': 'test cleanup'})
+        if tenant == second:
+            http(f'/facts/{tenant}/orders/orders:forget', method='DELETE', token=scoped,
+                 query={**guard, 'tenant': tenant, 'namespace': 'shop', 'schema_version': 1},
+                 body={'batch_id': 'quota-probe', 'operator': subject, 'reason': 'test cleanup'})
         assert read(tenant, scoped)['row_count'] == 0
         cli('tenant', 'seal', '--name', tenant, '--confirm', token=users[subject])
         cli('tenant', 'delete', '--name', tenant, token=users[subject])
+        remaining.remove(tenant)
+        for survivor in remaining:
+            survivor_token = tenants[survivor][1]
+            prior = usage(survivor, survivor_token)
+            assert not append(survivor, survivor_token, graph='archive', marker=survivor + '-archive')['inserted']
+            assert read(survivor, survivor_token, graph='archive')['rows'] == [{'O': survivor + '-archive', 'A': 42}]
+            assert usage(survivor, survivor_token) == prior
     assert not list((root / 'facts').rglob('facts.duckdb'))
 
 
@@ -184,7 +250,12 @@ def run(daemon, wyctl, templates, inspector):
             cli('user', 'create', '--subject', 'alice', token=admin, success=False)
             auth_helper = Path(__file__).with_name('human-user-auth-fixture.py')
             subprocess.run([sys.executable, str(auth_helper), base, str(admin), 'admin', str(root / 'admin.seed')], check=True, timeout=60)
-            check_self_service(root, base, admin, cli, http, arm)
+            def restart():
+                process.terminate()
+                process.wait(timeout=30)
+                start_daemon()
+                subprocess.run([sys.executable, str(auth_helper), base, str(admin), 'admin', str(root / 'admin.seed')], check=True, timeout=60)
+            check_self_service(root, base, admin, cli, http, arm, restart)
             for action in ('disable', 'delete'):
                 args = ['user', action, '--subject', 'admin'] + (['--yes'] if action == 'delete' else [])
                 refused = cli(*args, token=admin, success=False)

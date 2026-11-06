@@ -1892,7 +1892,11 @@ check_fact_graph_update_route (WylHandle *handle, SoupSession *session,
 
   /* Rows of the two relations interleaved, the assert of kv first: each
    * relation's retracts are still ordered before its asserts. */
-  g_autofree gchar *u1_query = gupd_graph_query ("g1");
+  /* Reuse the ordinary orders append key in another graph. Multipart
+   * updates share the same graph-scoped quota identity contract. */
+  g_autofree gchar *u1_query = g_strdup_printf (
+    "tenant=%s&namespace=shop&batch_id=g1&idempotency_key=key-1&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
   const gchar *u1 = "assert\tkv\t1\ta\t10\nretract\tkv\t1\ta\t1\n"
       "retract\tst\t1\ta\tx\nassert\tst\t1\ta\ty\n";
   tsv_post (session, base_url, token, update, u1_query, u1, strlen (u1),
@@ -1928,7 +1932,9 @@ check_fact_graph_update_route (WylHandle *handle, SoupSession *session,
       strlen (u1_short), 409, "fact_batch_conflict");
   /* A part's own name replayed as a single-relation update is not it
    * (the '#' of the name travels URL-escaped). */
-  g_autofree gchar *part_query = gupd_relation_query ("g1%23kv");
+  g_autofree gchar *part_query = g_strdup_printf (
+    "tenant=%s&namespace=shop&schema_version=1&batch_id=g1%%23kv&"
+    "idempotency_key=key-1%%23kv&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   tsv_post (session, base_url, token, "/facts/__wr_default/gupd/kv:update",
       part_query, "retract\ta\t1\nassert\ta\t10\n",
       strlen ("retract\ta\t1\nassert\ta\t10\n"), 409, "fact_batch_conflict");
@@ -3273,6 +3279,17 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = send_raw (session, "GET", base_url,
           "/facts/quota/operation-status", operation_conflict_query, admin_token,
           NULL, &status, &body);
+  if (rc != 0 || status != 404
+      || strstr (body, "\"error\":\"fact_quota_operation_not_found\"") == NULL)
+    return 282;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *same_scope_conflict_query = g_strdup_printf (
+    "tenant=%s&graph=orders&batch_id=changed-batch&"
+    "operation_id=status-operation&payload_digest=%s&%s",
+    WYL_TENANT_DEFAULT, status_operation.payload_digest, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", same_scope_conflict_query,
+          admin_token, NULL, &status, &body);
   if (rc != 0 || status != 409
       || strstr (body, "\"error\":\"fact_quota_operation_conflict\"") == NULL)
     return 282;

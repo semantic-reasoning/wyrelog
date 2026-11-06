@@ -1394,6 +1394,12 @@ main (void)
     NULL,
   };
   assert_wyctl_failed (fact_quota_operation_conflict_argv, 5,
+      "wyctl: fact quota operation-status failed: fact_quota_operation_not_found\n");
+  /* An existing key in another graph is absent here. A changed batch in
+   * the original graph still conflicts with that scoped operation. */
+  fact_quota_operation_conflict_argv[9] = "orders";
+  fact_quota_operation_conflict_argv[11] = "changed-batch";
+  assert_wyctl_failed (fact_quota_operation_conflict_argv, 5,
       "wyctl: fact quota operation-status failed: fact_quota_operation_conflict\n");
   /* The digest is validated locally before any request is sent. */
   gchar *fact_quota_operation_bad_digest_argv[] = {

@@ -2940,8 +2940,8 @@ wyrelog_error_t wyl_policy_store_reserve_fact_logical_quota
     guint64 requested_rows, guint64 requested_bytes,
     WylPolicyFactLogicalOperationStatus *out_status);
 /* Read one durable logical-quota operation without changing its state.  The
- * complete operation identity is required so a reused request id cannot
- * disclose another operation's status. */
+ * request key is scoped to tenant and graph. Batch and payload identify the
+ * intent within that scope; mismatches conflict without disclosing status. */
 wyrelog_error_t wyl_policy_store_get_fact_logical_quota_operation_status
   (wyl_policy_store_t *store,
     const WylPolicyFactLogicalQuotaOperation *operation,
