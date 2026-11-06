@@ -7859,6 +7859,233 @@ test_fact_physical_quota_ledger (void)
   cleanup_store_path (store_root, store_path);
 }
 
+static const gchar logical_quota_legacy_fixture_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_logical_quota_operations ("
+    "  request_id TEXT PRIMARY KEY,"
+    "  tenant_id TEXT NOT NULL,"
+    "  graph_id TEXT NOT NULL,"
+    "  batch_id TEXT NOT NULL,"
+    "  payload_digest TEXT NOT NULL CHECK ("
+    "    typeof(payload_digest) = 'text' AND length(payload_digest) = 64 AND "
+    "    payload_digest = lower(payload_digest) AND "
+    "    payload_digest NOT GLOB '*[^0-9a-f]*'),"
+    "  requested_rows INTEGER NOT NULL CHECK ("
+    "    typeof(requested_rows) = 'integer' AND requested_rows >= 0),"
+    "  requested_bytes INTEGER NOT NULL CHECK ("
+    "    typeof(requested_bytes) = 'integer' AND requested_bytes >= 0),"
+    "  applied_rows INTEGER NOT NULL DEFAULT 0 CHECK ("
+    "    typeof(applied_rows) = 'integer' AND applied_rows >= 0),"
+    "  applied_bytes INTEGER NOT NULL DEFAULT -1 CHECK ("
+    "    typeof(applied_bytes) = 'integer' AND applied_bytes >= -1),"
+    "  state TEXT NOT NULL CHECK (state IN "
+    "    ('pending', 'reconciling', 'settled', 'cancelled')),"
+    "  created_at INTEGER NOT NULL,"
+    "  updated_at INTEGER NOT NULL,"
+    "  UNIQUE (tenant_id, graph_id, batch_id, request_id, payload_digest),"
+    "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_fact_logical_quota_operations_state "
+    "  ON fact_logical_quota_operations (tenant_id, state);";
+
+static gchar *
+logical_quota_rows_snapshot (sqlite3 *db)
+{
+  return scalar_text (db,
+             "SELECT group_concat(quote(request_id)||quote(tenant_id)||quote(graph_id)"
+             "||quote(batch_id)||quote(payload_digest)||quote(requested_rows)"
+             "||quote(requested_bytes)||quote(applied_rows)||quote(applied_bytes)"
+             "||quote(state)||quote(created_at)||quote(updated_at),'|') FROM "
+             "(SELECT * FROM fact_logical_quota_operations ORDER BY request_id);");
+}
+
+static void
+test_fact_logical_quota_scope_migration (void)
+{
+  for (guint predecessor = 0; predecessor < 2; predecessor++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    wyl_policy_store_open_options_t opts = { .path = path };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    register_test_human (store, "migration-owner");
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, "migration-tenant",
+        "migration-owner", &created), ==, WYRELOG_E_OK);
+    exec_ok (db, "DROP TABLE fact_logical_quota_operations;");
+    exec_ok (db, logical_quota_legacy_fixture_sql);
+    const gchar *states[] = { "pending", "reconciling", "settled", "cancelled" };
+    for (guint i = 0; i < 4; i++) {
+      g_autofree gchar *sql = g_strdup_printf (
+        "INSERT INTO fact_logical_quota_operations VALUES "
+        "('%s','migration-tenant','orders','batch',"
+        "'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',"
+        "1,4,%u,%d,'%s',123,456)", states[i],
+        i == 1 || i == 2 ? 1 : 0, i == 2 ? 4 : -1, states[i]);
+      exec_ok (db, sql);
+    }
+    exec_ok (db, "INSERT INTO fact_tenant_logical_quota_usage VALUES "
+        "('migration-tenant',2,4,1,8);");
+    if (predecessor)
+      install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
+          fixture_pre_windows_immutable_trigger_sql);
+    g_autofree gchar *before = logical_quota_rows_snapshot (db);
+    g_autofree gchar *schema = scalar_text (db,
+            "SELECT sql FROM sqlite_master WHERE name='fact_logical_quota_operations'");
+    wyl_policy_store_graph_authority_migration_fail_once (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), !=, WYRELOG_E_OK);
+    g_autofree gchar *after_failure = logical_quota_rows_snapshot (db);
+    g_autofree gchar *schema_failure = scalar_text (db,
+            "SELECT sql FROM sqlite_master WHERE name='fact_logical_quota_operations'");
+    g_assert_cmpstr (before, ==, after_failure);
+    g_assert_cmpstr (schema, ==, schema_failure);
+    g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM sqlite_master "
+        "WHERE name='fact_logical_quota_operations_legacy_1486'"), ==, 0);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    for (guint reopen = 0; reopen < 2; reopen++) {
+      wyl_policy_store_close (store);
+      store = NULL;
+      g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+      db = wyl_policy_store_get_db (store);
+      g_autofree gchar *after = logical_quota_rows_snapshot (db);
+      g_assert_cmpstr (before, ==, after);
+    }
+    WylPolicyFactLogicalQuotaStatus usage = { 0 };
+    g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+        "migration-tenant", &usage), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (usage.committed_rows, ==, 2);
+    g_assert_cmpuint (usage.committed_bytes, ==, 4);
+    g_assert_cmpuint (usage.pending_rows, ==, 1);
+    g_assert_cmpuint (usage.pending_bytes, ==, 8);
+    WylPolicyFactLogicalQuotaOperation op = {
+      .tenant_id = "migration-tenant", .graph_id = "orders", .batch_id = "batch",
+      .payload_digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+    WylPolicyFactLogicalOperationStatus status = { 0 };
+    for (guint i = 0; i < 4; i++) {
+      op.request_id = states[i];
+      g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+          &op, 1, 4, &status), ==, WYRELOG_E_OK);
+      g_assert_cmpint (status.replay, ==, i != 3);
+      g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+          &op, 1, 4, &status), ==, WYRELOG_E_OK);
+    }
+    op.graph_id = "independent";
+    g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+        &op, 1, 4, &status), ==, WYRELOG_E_OK);
+    g_assert_false (status.replay);
+    wyl_policy_store_close (store);
+    cleanup_store_path (root, path);
+  }
+}
+
+static void
+test_fact_logical_quota_scope_rejects_unknown (void)
+{
+  const gchar *mutations[] = {
+    "INSERT INTO fact_logical_quota_operations VALUES (NULL,'__wr_default','g','b',"
+    "'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',1,4,0,-1,'pending',1,1)",
+    "CREATE UNIQUE INDEX unexpected_global_key ON fact_logical_quota_operations(request_id)",
+    "CREATE TABLE fact_logical_quota_operations_legacy_1486 (evidence TEXT)",
+    "CREATE TRIGGER unexpected_journal_trigger AFTER INSERT ON fact_logical_quota_operations BEGIN SELECT 1; END",
+    "PRAGMA foreign_keys=OFF; INSERT INTO fact_logical_quota_operations VALUES "
+    "('orphan','missing-tenant','g','b',"
+    "'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',"
+    "1,4,0,-1,'pending',1,1); PRAGMA foreign_keys=ON;",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (mutations); i++) {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    if (i == 0 || i == 4) {
+      exec_ok (db, "DROP TABLE fact_logical_quota_operations");
+      exec_ok (db, logical_quota_legacy_fixture_sql);
+    }
+    exec_ok (db, mutations[i]);
+    g_autofree gchar *before = scalar_text (db,
+            "SELECT sql FROM sqlite_master WHERE name='fact_logical_quota_operations'");
+    g_assert_cmpint (wyl_policy_store_create_schema (store), !=, WYRELOG_E_OK);
+    g_autofree gchar *after = scalar_text (db,
+            "SELECT sql FROM sqlite_master WHERE name='fact_logical_quota_operations'");
+    g_assert_cmpstr (before, ==, after);
+    if (i == 0)
+      g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM fact_logical_quota_operations WHERE request_id IS NULL"), ==, 1);
+  }
+}
+
+static void
+test_fact_logical_quota_scoped_keys (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "scope-owner");
+  gboolean created = FALSE;
+  const gchar *tenants[] = { "scope-a", "scope-a", "scope-b" };
+  const gchar *graphs[] = { "one", "two", "one" };
+  WylPolicyFactLogicalQuotaOperation ops[3];
+  WylPolicyFactLogicalOperationStatus status = { 0 };
+  for (guint i = 0; i < 3; i++) {
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, tenants[i],
+        "scope-owner", &created), ==, WYRELOG_E_OK);
+    ops[i] = (WylPolicyFactLogicalQuotaOperation) {
+      .tenant_id = tenants[i], .graph_id = graphs[i], .batch_id = "batch",
+      .request_id = "shared-key",
+      .payload_digest =
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+    g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+        &ops[i], 1, 4, &status), ==, WYRELOG_E_OK);
+    g_assert_false (status.replay);
+  }
+  WylPolicyFactLogicalQuotaOperation missing = ops[0];
+  missing.graph_id = "absent";
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_operation_status
+        (store, &missing, &status), ==, WYRELOG_E_NOT_FOUND);
+  WylPolicyFactLogicalQuotaOperation conflict = ops[0];
+  conflict.batch_id = "changed";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &conflict, 1, 4, &status), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &ops[0], 1, 4, &status), ==, WYRELOG_E_OK);
+  g_assert_true (status.replay);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &ops[0], 1, -1, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota (store,
+      &ops[1], TRUE, &status), ==, WYRELOG_E_OK);
+  for (guint i = 0; i < 3; i++) {
+    g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_operation_status
+          (store, &ops[i], &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==, i == 0 ?
+        WYL_POLICY_FACT_LOGICAL_OPERATION_RECONCILING : i == 1 ?
+        WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED :
+        WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING);
+  }
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &ops[1], 1, 4, &status), ==, WYRELOG_E_OK);
+  g_assert_false (status.replay);
+  for (guint i = 0; i < 3; i++) {
+    g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+        &ops[i], 1, 4, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+        &ops[i], 1, 4, &status), ==, WYRELOG_E_OK);
+    g_assert_true (status.replay);
+  }
+  for (guint i = 0; i < 3; i += 2) {
+    WylPolicyFactLogicalQuotaStatus usage = { 0 };
+    g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+        tenants[i], &usage), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (usage.committed_rows, ==, i == 0 ? 2 : 1);
+    g_assert_cmpuint (usage.committed_bytes, ==, i == 0 ? 8 : 4);
+    g_assert_cmpuint (usage.pending_rows, ==, 0);
+    g_assert_cmpuint (usage.pending_bytes, ==, 0);
+  }
+}
+
 static void
 test_fact_logical_quota_ledger (void)
 {
@@ -8497,6 +8724,12 @@ main (int argc, char **argv)
       test_fact_write_rate_admission_persists_and_bounds);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-admission-clock",
       test_fact_write_rate_admission_clock_remainder);
+  g_test_add_func ("/policy/graph-authority/fact-logical-quota-scope-migration",
+      test_fact_logical_quota_scope_migration);
+  g_test_add_func ("/policy/graph-authority/fact-logical-quota-scope-rejects-unknown",
+      test_fact_logical_quota_scope_rejects_unknown);
+  g_test_add_func ("/policy/graph-authority/fact-logical-quota-scoped-keys",
+      test_fact_logical_quota_scoped_keys);
   g_test_add_func ("/policy/graph-authority/fact-logical-quota-ledger",
       test_fact_logical_quota_ledger);
   g_test_add_func
