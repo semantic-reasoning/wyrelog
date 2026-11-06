@@ -585,7 +585,7 @@ CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_usage (
 );
 
 CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations (
-    request_id           TEXT PRIMARY KEY,
+    request_id           TEXT NOT NULL,
     tenant_id            TEXT NOT NULL,
     graph_id             TEXT NOT NULL,
     inventory_generation TEXT NOT NULL,
@@ -601,6 +601,7 @@ CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations (
         'reconciling', 'settled', 'cancelled')),
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, graph_id, request_id),
     UNIQUE (tenant_id, graph_id, request_id, inventory_generation,
         inventory_digest),
     FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs (tenant_id, graph_id)

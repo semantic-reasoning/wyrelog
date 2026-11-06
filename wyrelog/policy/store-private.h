@@ -2944,6 +2944,8 @@ wyrelog_error_t wyl_policy_store_cancel_fact_logical_quota
 wyrelog_error_t wyl_policy_store_get_fact_physical_quota_status
   (wyl_policy_store_t *store, const gchar *tenant_id,
     WylPolicyFactPhysicalQuotaStatus *out_status);
+/* Physical reservation keys are scoped to tenant and graph. Inventory
+ * evidence and requested bytes must still match for a same-scope replay. */
 wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota
   (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,

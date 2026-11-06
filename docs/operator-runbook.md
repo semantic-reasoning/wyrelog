@@ -1686,11 +1686,12 @@ tenants owned by the same human. Within a graph, the key is shared across
 relations and mutation operations: an exact retry replays, while changed
 batch identity, payload, or intent conflicts. A tenant-bound bearer must still
 be authorized for the target; a denied request cannot reserve its key.
-Logical quota accounting and operation-status lookup use this same scope.
+Logical and physical quota accounting use this same scope, including the
+secure DuckDB backend. Logical operation-status lookup is scoped identically.
 A key that exists only in another scope is not found in the requested scope.
 
 On upgrade, the policy store transactionally migrates the former global-key
-logical quota journal. Existing keys, states, timestamps, reservations and
+logical and physical quota journals. Existing keys, states, timestamps, reservations and
 usage are preserved; callers do not need to rename keys. The graph-owned fact
 files do not change format. Unrecognized journal schemas, extra indexes or
 triggers, and invalid legacy rows abort the upgrade without publishing a
@@ -1699,7 +1700,7 @@ partial migration.
 Stop all writers and take a complete pre-upgrade backup before upgrading.
 Do not run old and new binaries against the same upgraded storage, or open it
 with an old binary: old code uses global-key lookups and is not compatible
-with the new journal. To roll back, stop writers and restore the complete
+with the new journals. To roll back, stop writers and restore the complete
 pre-upgrade backup together with the old binary. Merely replacing the binary
 is unsafe; after scoped duplicate keys are written, the old global index
 cannot represent the journal.
