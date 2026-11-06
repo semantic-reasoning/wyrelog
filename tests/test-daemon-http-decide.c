@@ -25082,6 +25082,87 @@ check_data_credential_revoke_clock_ahead (void)
   service_denial_env_clear (&env);
 }
 
+/* #1494: the route rotation is never refused by its clock either.  A
+ * credential created ahead of the route's clock is revoked, as the
+ * predecessor, at its creation; the successor is created at the rotation. */
+static void
+check_data_credential_rotate_clock_ahead (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *alice = seed_data_credential_human (&env, "dc-alice",
+          TRUE);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-1474",
+      "dc-alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, "dc-1474",
+      "active"), ==, WYRELOG_E_OK);
+  /* Rotation re-checks that the issuer holds the credential's operations. */
+  grant_armed_permission (store, "dc-alice", "wr.datalog.query", "dc-1474");
+  grant_armed_permission (store, "dc-alice", "wr.fact.read", "dc-1474");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  WylDataCredentialInfo ahead = { 0 };
+  seed_data_credential_at (store, "dc-1474", "dc-alice",
+      WYL_DATA_CREDENTIAL_OP_QUERY, g_get_real_time () + G_TIME_SPAN_HOUR,
+      &ahead);
+  g_autoptr (GPtrArray) secrets = g_ptr_array_new_with_free_func (g_free);
+  guint wipes = 0;
+  guint rows_before = data_credential_audit_rows (store, secrets, NULL, NULL);
+
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *rotated = data_credential_rotate (&env, alice,
+          ahead.credential_id, request, 200);
+  g_assert_nonnull (strstr (rotated, "\"replayed\":false"));
+  g_ptr_array_add (secrets, take_data_credential_secret (&env, rotated,
+      &wipes));
+  g_autofree gchar *successor_id = extract_json_string (rotated,
+          "credential_id");
+  g_assert_nonnull (successor_id);
+
+  WylDataCredentialInfo predecessor = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &predecessor), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (predecessor.state, ==, "revoked");
+  g_assert_cmpstr (predecessor.revoked_reason, ==, "rotated");
+  g_assert_cmpstr (predecessor.revoked_by, ==, "dc-alice");
+  g_assert_cmpint (predecessor.revoked_at_us, ==, ahead.created_at_us);
+  g_assert_cmpint (predecessor.updated_at_us, ==, ahead.created_at_us);
+  WylDataCredentialInfo successor = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      successor_id, &successor), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (successor.state, ==, "active");
+  g_assert_cmpstr (successor.rotated_from_id, ==, ahead.credential_id);
+  g_assert_cmpuint (successor.generation, ==, ahead.generation + 1);
+  g_assert_cmpint (successor.expires_at_us, ==, ahead.expires_at_us);
+  g_assert_cmpint (successor.created_at_us, <, ahead.created_at_us);
+  /* The rotation was published: one audit row, carrying no secret, and
+   * completed once the publication verified. */
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, NULL, NULL),
+      ==, rows_before + 1);
+  gint64 completed = -1;
+  g_assert_true (policy_count_rows (env.handle, "SELECT count(*) FROM "
+      "audit_intentions WHERE action='data_credential_rotate' AND "
+      "state='committed'", &completed));
+  g_assert_cmpint (completed, ==, 1);
+
+  /* A replay returns the stored successor and writes nothing. */
+  g_autofree gchar *again = data_credential_rotate (&env, alice,
+          ahead.credential_id, request, 200);
+  g_assert_nonnull (strstr (again, "\"replayed\":true"));
+  g_autofree gchar *again_id = extract_json_string (again, "credential_id");
+  g_assert_cmpstr (again_id, ==, successor_id);
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, NULL, NULL),
+      ==, rows_before + 1);
+  wyl_data_credential_info_clear (&successor);
+  wyl_data_credential_info_clear (&predecessor);
+  wyl_data_credential_info_clear (&ahead);
+  service_denial_env_clear (&env);
+}
+
 static void
 check_tenant_data_credential_mutation_contract (void)
 {
@@ -27967,6 +28048,7 @@ main (void)
   check_tenant_data_credential_list_contract ();
   check_tenant_data_credential_mutation_contract ();
   check_data_credential_revoke_clock_ahead ();
+  check_data_credential_rotate_clock_ahead ();
 #ifdef WYL_HAS_AUDIT
   check_data_credential_exchange_contract ();
   check_data_credential_never_routes ();

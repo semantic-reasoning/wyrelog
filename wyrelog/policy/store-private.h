@@ -2453,10 +2453,10 @@ wyrelog_error_t wyl_policy_store_foreach_service_credential_event
  *
  * now_us is the caller's clock and must not run backwards.  A write with a
  * now_us earlier than the credential's created_at_us is refused by a CHECK
- * constraint and returns WYRELOG_E_IO, except in
- * wyl_policy_store_data_credential_revoke and the lifecycle revocations
- * below, which clamp to it; rotate is still refused.  No other ordering
- * against stored timestamps is enforced.
+ * constraint and returns WYRELOG_E_IO, except in the revocations below:
+ * wyl_policy_store_data_credential_revoke, the predecessor of a rotation
+ * and the lifecycle revocations clamp to it.  No other ordering against
+ * stored timestamps is enforced.
  *
  * Every WylDataCredentialInfo *out must be zero-initialized or previously
  * cleared: it is cleared before it is filled.
@@ -2562,7 +2562,10 @@ wyrelog_error_t wyl_policy_store_data_credential_issue
     wyl_service_credential_secret_t ** out_secret, gboolean * out_replayed);
 /* Revokes the active, unexpired old credential and issues its successor with
  * the same scope and original expiry.  The actor must be both the tenant's
- * owner and the credential's issuer. */
+ * owner and the credential's issuer.  The predecessor is revoked at now_us,
+ * or at its created_at_us if that is later.  The successor is created at
+ * now_us and keeps the predecessor's lifetime and absolute expiry, so after
+ * the clock steps back it can be created before its predecessor. */
 wyrelog_error_t wyl_policy_store_data_credential_rotate
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * old_credential_id, const gchar * actor_subject_id,
@@ -2612,7 +2615,9 @@ wyrelog_error_t wyl_policy_store_data_credential_verify
 wyrelog_error_t wyl_policy_store_data_credential_lookup
   (wyl_policy_store_t * store, const gchar * credential_id,
     WylDataCredentialInfo * out);
-/* Ordered by creation time, then id. */
+/* Ordered by creation time, then id.  After a backward clock step a
+ * rotation's successor lists before its predecessor; generation and
+ * rotated_from_id give the lineage. */
 wyrelog_error_t wyl_policy_store_data_credential_list
   (wyl_policy_store_t * store, const gchar * tenant_id, GPtrArray ** out);
 

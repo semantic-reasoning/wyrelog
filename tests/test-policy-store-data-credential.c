@@ -798,6 +798,13 @@ test_rotate (void)
   g_assert_cmpint (rotate (store, first.credential_id, "alice", NOW + DAY,
       &second, NULL), ==, WYRELOG_E_OK);
   g_assert_cmpstr (second.rotated_from_id, ==, first.credential_id);
+  /* A clock later than the predecessor's creation is recorded exactly. */
+  g_auto (WylDataCredentialInfo) revoked_first = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      first.credential_id, &revoked_first), ==, WYRELOG_E_OK);
+  g_assert_cmpint (revoked_first.revoked_at_us, ==, NOW + DAY);
+  g_assert_cmpint (revoked_first.updated_at_us, ==, NOW + DAY);
+  g_assert_cmpint (second.created_at_us, ==, NOW + DAY);
 
   /* After the maximum is lowered, rotation keeps the original expiry. */
   set_settings (store, 30 * DAY, 1, 1);
@@ -838,6 +845,78 @@ test_rotate (void)
   set_settings (store, 90 * DAY, 8, 1);
   g_assert_cmpint (issue (store, WYL_DATA_CREDENTIAL_OP_QUERY, DAY, NOW, NULL,
       NULL), ==, WYRELOG_E_SUBJECT_NOT_REGISTERED);
+}
+
+/* #1494: a rotation is never refused by a clock that reads earlier than
+ * the credential's creation.  The predecessor is revoked at its creation;
+ * the successor is created at the rotation's time, keeps the
+ * predecessor's absolute expiry and can be used at once. */
+static void
+test_rotate_clock_behind (void)
+{
+  g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
+  g_auto (WylDataCredentialInfo) ahead = { 0 };
+  g_assert_cmpint (issue (store, WYL_DATA_CREDENTIAL_OP_QUERY, DAY,
+      NOW + 6 * HOUR, &ahead, NULL), ==, WYRELOG_E_OK);
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  new_request (request);
+  g_auto (WylDataCredentialInfo) successor = { 0 };
+  wyl_service_credential_secret_t *secret = NULL;
+  gboolean replayed = TRUE;
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_data_credential_rotate (store,
+      "tenant-a", ahead.credential_id, "alice", request, NOW + 5 * HOUR,
+      &successor, &secret, &replayed), ==, WYRELOG_E_OK);
+  commit (store);
+  g_assert_false (replayed);
+  g_assert_nonnull (secret);
+
+  g_auto (WylDataCredentialInfo) predecessor = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &predecessor), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (predecessor.state, ==, "revoked");
+  g_assert_cmpstr (predecessor.revoked_reason, ==, "rotated");
+  g_assert_cmpstr (predecessor.revoked_by, ==, "alice");
+  g_assert_cmpint (predecessor.revoked_at_us, ==, NOW + 6 * HOUR);
+  g_assert_cmpint (predecessor.updated_at_us, ==, NOW + 6 * HOUR);
+
+  g_assert_cmpstr (successor.rotated_from_id, ==, ahead.credential_id);
+  g_assert_cmpuint (successor.generation, ==, ahead.generation + 1);
+  g_assert_cmpint (successor.created_at_us, ==, NOW + 5 * HOUR);
+  g_assert_cmpint (successor.updated_at_us, ==, NOW + 5 * HOUR);
+  g_assert_cmpint (successor.expires_at_us, ==, ahead.expires_at_us);
+  g_assert_cmpint (successor.expires_in_us, ==, ahead.expires_in_us);
+  g_assert_cmpint (verify (store, successor.credential_id, encoded (secret),
+      NOW + 5 * HOUR + 10, NULL), ==, WYRELOG_E_OK);
+  wyl_service_credential_secret_clear (&secret);
+
+  /* The successor lists before its predecessor: the lineage is in the
+   * generation and the predecessor id, not in the times. */
+  g_autoptr (GPtrArray) listed = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_list (store, "tenant-a",
+      &listed), ==, WYRELOG_E_OK);
+  gint successor_at = -1, predecessor_at = -1;
+  for (guint i = 0; i < listed->len; i++) {
+    const WylDataCredentialInfo *info = g_ptr_array_index (listed, i);
+    if (g_str_equal (info->credential_id, successor.credential_id))
+      successor_at = (gint) i;
+    if (g_str_equal (info->credential_id, ahead.credential_id))
+      predecessor_at = (gint) i;
+  }
+  g_assert_cmpint (successor_at, >=, 0);
+  g_assert_cmpint (predecessor_at, >, successor_at);
+
+  /* A replay at an even earlier clock returns the stored successor. */
+  g_auto (WylDataCredentialInfo) again = { 0 };
+  wyl_service_credential_secret_t *no_secret = NULL;
+  begin (store);
+  g_assert_cmpint (wyl_policy_store_data_credential_rotate (store,
+      "tenant-a", ahead.credential_id, "alice", request, NOW + 4 * HOUR,
+      &again, &no_secret, &replayed), ==, WYRELOG_E_OK);
+  commit (store);
+  g_assert_true (replayed);
+  g_assert_null (no_secret);
+  g_assert_cmpstr (again.credential_id, ==, successor.credential_id);
 }
 
 static void
@@ -1843,6 +1922,8 @@ main (int argc, char **argv)
       test_caps_exclude_inactive);
   g_test_add_func ("/data-credential/settings", test_settings);
   g_test_add_func ("/data-credential/rotate", test_rotate);
+  g_test_add_func ("/data-credential/rotate-clock-behind",
+      test_rotate_clock_behind);
   g_test_add_func ("/data-credential/verify", test_verify);
   g_test_add_func ("/data-credential/revoke-and-bulk", test_revoke_and_bulk);
   g_test_add_func ("/data-credential/lifecycle-transfer",
