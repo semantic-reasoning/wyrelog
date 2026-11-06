@@ -327,12 +327,16 @@ revokes the user's credentials under its own request first; each tenant it
 deletes then revokes whatever else is still active there under that tenant
 delete's request. A tenant delete revokes before it purges, so these audit rows
 are the record of credentials the purge removed. A revocation, by a lifecycle
-event or through the revoke route, is recorded at the event's time, or at the
-credential's creation if that is later, so a clock that stepped back can make
-neither the event nor the revoke fail. Such a revocation shows a time later
-than its audit row and than the clock that made it. Every data operation
-made through a credential is attributed to the credential id and its
-issuer.
+event, through the revoke route or of a rotated credential, is recorded at the
+event's time, or at the credential's creation if that is later, so a clock that
+stepped back can make neither the event, the revoke nor the rotation fail. Such
+a revocation shows a time later than its audit row and than the clock that made
+it. A rotation's successor is created at the rotation's time and keeps its
+predecessor's absolute expiry, not its creation plus its lifetime, so after
+such a step it can show a creation earlier than its predecessor's and a span to
+its expiry longer than the lifetime; its generation and predecessor id, not its
+times, order the lineage. Every data operation made through a credential is
+attributed to the credential id and its issuer.
 
 ### Interaction with tenant deletion
 
