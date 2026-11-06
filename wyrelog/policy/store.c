@@ -49028,8 +49028,13 @@ wyl_policy_store_data_credential_rotate (wyl_policy_store_t *store,
       || old.expires_at_us <= now_us))
     rc = WYRELOG_E_CONFLICT;
 
-  /* The predecessor is revoked first, so rotation never needs cap room. */
+  /* The predecessor is revoked first, so rotation never needs cap room.
+   * As for the other revocations, a predecessor created by a clock that ran
+   * ahead is revoked at its own creation instead of failing (#1494).  The
+   * successor is created at now_us: it keeps the predecessor's expiry, which
+   * the CONFLICT check above puts after now_us, so it is usable at once. */
   if (rc == WYRELOG_E_OK) {
+    gint64 revoked_at_us = MAX (now_us, old.created_at_us);
     sqlite3_stmt *stmt = NULL;
     rc = prepare_stmt (store->db,
             "UPDATE data_credentials SET state='revoked',revoked_by=?2,"
@@ -49039,7 +49044,7 @@ wyl_policy_store_data_credential_rotate (wyl_policy_store_t *store,
     if (rc == WYRELOG_E_OK
         && (bind_text (stmt, 1, old_credential_id) != WYRELOG_E_OK
         || bind_text (stmt, 2, actor_subject_id) != WYRELOG_E_OK
-        || sqlite3_bind_int64 (stmt, 3, now_us) != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 3, revoked_at_us) != SQLITE_OK
         || sqlite3_step (stmt) != SQLITE_DONE
         || sqlite3_changes (store->db) != 1))
       rc = WYRELOG_E_IO;
