@@ -326,9 +326,11 @@ as the route audits render it, then the acting capacity, the reason
 revokes the user's credentials under its own request first; each tenant it
 deletes then revokes whatever else is still active there under that tenant
 delete's request. A tenant delete revokes before it purges, so these audit rows
-are the record of credentials the purge removed. A lifecycle revocation is
-recorded at the event's time, or at the credential's creation if that is later,
-so a clock that stepped back cannot make the event fail. Every data operation
+are the record of credentials the purge removed. A revocation, by a lifecycle
+event or through the revoke route, is recorded at the event's time, or at the
+credential's creation if that is later, so a clock that stepped back can make
+neither the event nor the revoke fail. Such a revocation shows a time later
+than its audit row and than the clock that made it. Every data operation
 made through a credential is attributed to the credential id and its
 issuer.
 
