@@ -13877,7 +13877,11 @@ verify_data_credential_publication (WylEngineVerification *verification,
 }
 
 /* Whether a publication whose COMMIT reported an error applied anyway: the
- * durable credential shows the change only if the transaction did. */
+ * durable credential shows the change only if the transaction did.  For a
+ * revoke that is the revocation this transaction wrote, read back into
+ * publication->info.  Its time may have been clamped to the credential's
+ * creation (#1489), and a lifecycle revocation is clamped the same way, so
+ * the route's reason and actor tell the two apart. */
 static gboolean
 data_credential_publication_committed (wyl_policy_store_t *store,
     const DataCredentialPublication *publication)
@@ -13889,7 +13893,9 @@ data_credential_publication_committed (wyl_policy_store_t *store,
           publication->info.credential_id, &durable) == WYRELOG_E_OK
       && (publication->action != DATA_CREDENTIAL_REVOKE
       || (g_strcmp0 (durable.state, "revoked") == 0
-      && durable.revoked_at_us == publication->now_us));
+      && g_strcmp0 (durable.revoked_reason, "revoked") == 0
+      && g_strcmp0 (durable.revoked_by, publication->info.revoked_by) == 0
+      && durable.revoked_at_us == publication->info.revoked_at_us));
   wyl_data_credential_info_clear (&durable);
   return committed;
 }

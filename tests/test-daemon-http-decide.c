@@ -24693,8 +24693,9 @@ data_credential_request (ServiceDenialEnv *env, const gchar *token,
 /* Issues straight through the store, as the storage unit does, so the list
  * route can be exercised before any issue route exists. */
 static void
-seed_data_credential (wyl_policy_store_t *store, const gchar *tenant,
-    const gchar *issuer, guint32 operations, WylDataCredentialInfo *out)
+seed_data_credential_at (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *issuer, guint32 operations, gint64 now_us,
+    WylDataCredentialInfo *out)
 {
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
@@ -24708,9 +24709,17 @@ seed_data_credential (wyl_policy_store_t *store, const gchar *tenant,
   g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_data_credential_issue (store, tenant,
       issuer, request, operations, NULL, 0, G_TIME_SPAN_DAY,
-      g_get_real_time (), out, &secret, &replayed), ==, WYRELOG_E_OK);
+      now_us, out, &secret, &replayed), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
   wyl_service_credential_secret_clear (&secret);
+}
+
+static void
+seed_data_credential (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *issuer, guint32 operations, WylDataCredentialInfo *out)
+{
+  seed_data_credential_at (store, tenant, issuer, operations,
+      g_get_real_time (), out);
 }
 
 static gchar *
@@ -25010,6 +25019,67 @@ take_data_credential_secret (ServiceDenialEnv *env, const gchar *body,
   g_assert_true (zero);
   *wipes = count;
   return secret;
+}
+
+/* #1489: the route revoke is never refused by its clock.  A credential
+ * created by a clock ahead of the route's is revoked, at its creation. */
+static void
+check_data_credential_revoke_clock_ahead (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *alice = seed_data_credential_human (&env, "dc-alice",
+          TRUE);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-1474",
+      "dc-alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, "dc-1474",
+      "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  WylDataCredentialInfo ahead = { 0 };
+  seed_data_credential_at (store, "dc-1474", "dc-alice",
+      WYL_DATA_CREDENTIAL_OP_QUERY, g_get_real_time () + G_TIME_SPAN_HOUR,
+      &ahead);
+  g_autoptr (GPtrArray) none = g_ptr_array_new_with_free_func (g_free);
+  guint rows_before = data_credential_audit_rows (store, none, NULL, NULL);
+
+  g_autofree gchar *revoked = data_credential_revoke (&env, alice, "dc-1474",
+          ahead.credential_id, 200);
+  g_assert_nonnull (strstr (revoked, "\"state\":\"revoked\",\"changed\":true"));
+  WylDataCredentialInfo durable = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &durable), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (durable.state, ==, "revoked");
+  g_assert_cmpstr (durable.revoked_reason, ==, "revoked");
+  g_assert_cmpstr (durable.revoked_by, ==, "dc-alice");
+  g_assert_cmpint (durable.revoked_at_us, ==, ahead.created_at_us);
+  g_assert_cmpint (durable.updated_at_us, ==, ahead.created_at_us);
+  /* The revocation was published: its audit row was written and, once the
+   * publication verified, completed. */
+  g_assert_cmpuint (data_credential_audit_rows (store, none, NULL, NULL), ==,
+      rows_before + 1);
+  gint64 completed = -1;
+  g_assert_true (policy_count_rows (env.handle, "SELECT count(*) FROM "
+      "audit_intentions WHERE action='data_credential_revoke' AND "
+      "state='committed'", &completed));
+  g_assert_cmpint (completed, ==, 1);
+
+  /* A repeat changes nothing, the recorded time included. */
+  g_autofree gchar *again = data_credential_revoke (&env, alice, "dc-1474",
+          ahead.credential_id, 200);
+  g_assert_nonnull (strstr (again, "\"changed\":false"));
+  WylDataCredentialInfo repeat = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &repeat), ==, WYRELOG_E_OK);
+  g_assert_cmpint (repeat.revoked_at_us, ==, ahead.created_at_us);
+  g_assert_cmpuint (data_credential_audit_rows (store, none, NULL, NULL), ==,
+      rows_before + 1);
+  wyl_data_credential_info_clear (&repeat);
+  wyl_data_credential_info_clear (&durable);
+  wyl_data_credential_info_clear (&ahead);
+  service_denial_env_clear (&env);
 }
 
 static void
@@ -27866,6 +27936,7 @@ main (void)
   check_tenant_delete_contract ();
   check_tenant_data_credential_list_contract ();
   check_tenant_data_credential_mutation_contract ();
+  check_data_credential_revoke_clock_ahead ();
 #ifdef WYL_HAS_AUDIT
   check_data_credential_exchange_contract ();
   check_data_credential_never_routes ();
