@@ -2469,7 +2469,7 @@ if get_option('enable_fact_store').allowed()
     # Keep this consumer audit-macro-unaware to cover cross-TU layout stability.
     c_args : test_fact_replay_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep]
+    dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, duckdb_dep, sqlite_dep]
         + fact_test_support_deps,
   )
 
