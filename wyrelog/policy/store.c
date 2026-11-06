@@ -49126,9 +49126,12 @@ wyl_policy_store_data_credential_revoke (wyl_policy_store_t *store,
             &current);
   if (rc == WYRELOG_E_OK && !g_str_equal (current.tenant_id, tenant_id))
     rc = WYRELOG_E_NOT_FOUND;
+  /* As for the lifecycle revocations: a credential created by a clock that
+   * ran ahead is revoked at its own creation instead of failing (#1489). */
   if (rc == WYRELOG_E_OK)
     rc = data_credential_revoke_one (store->db, credential_id,
-            actor_subject_id, "revoked", now_us, &changed);
+            actor_subject_id, "revoked", MAX (now_us, current.created_at_us),
+            &changed);
   if (rc == WYRELOG_E_OK && out != NULL)
     rc = data_credential_read (store->db, "credential_id=?1", credential_id,
             out);

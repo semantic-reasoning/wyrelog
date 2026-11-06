@@ -2453,8 +2453,10 @@ wyrelog_error_t wyl_policy_store_foreach_service_credential_event
  *
  * now_us is the caller's clock and must not run backwards.  A write with a
  * now_us earlier than the credential's created_at_us is refused by a CHECK
- * constraint and returns WYRELOG_E_IO, except in the bulk revocations
- * below; no other ordering against stored timestamps is enforced.
+ * constraint and returns WYRELOG_E_IO, except in
+ * wyl_policy_store_data_credential_revoke and the lifecycle revocations
+ * below, which clamp to it; rotate is still refused.  No other ordering
+ * against stored timestamps is enforced.
  *
  * Every WylDataCredentialInfo *out must be zero-initialized or previously
  * cleared: it is cleared before it is filled.
@@ -2566,16 +2568,18 @@ wyrelog_error_t wyl_policy_store_data_credential_rotate
     const gchar * old_credential_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 now_us, WylDataCredentialInfo * out,
     wyl_service_credential_secret_t ** out_secret, gboolean * out_replayed);
-/* Revoking an already revoked credential succeeds with *out_changed FALSE. */
+/* Revoking an already revoked credential succeeds with *out_changed FALSE.
+ * The clock cannot refuse a revocation: a credential created after now_us
+ * is revoked at its created_at_us, and out carries the time written. */
 wyrelog_error_t wyl_policy_store_data_credential_revoke
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * credential_id, const gchar * actor_subject_id,
     gint64 now_us, WylDataCredentialInfo * out, gboolean * out_changed);
 /* Bulk revocation for lifecycle events.  *out_revoked receives the
  * credentials this call revoked, as WylDataCredentialInfo ordered by id, so
- * the caller can audit each one in the same transaction.  A lifecycle event
- * cannot be refused by the clock: a credential created after now_us is
- * revoked at its created_at_us. */
+ * the caller can audit each one in the same transaction.  Like the single
+ * revoke, a lifecycle event cannot be refused by the clock: a credential
+ * created after now_us is revoked at its created_at_us. */
 wyrelog_error_t wyl_policy_store_data_credential_revoke_tenant
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, WylDataCredentialLifecycleReason reason,

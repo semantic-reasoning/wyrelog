@@ -981,17 +981,32 @@ test_revoke_and_bulk (void)
   commit (store);
   g_assert_cmpuint (again->len, ==, 0);
 
-  /* A lifecycle revocation never fails on a clock that reads earlier than
-   * a credential's creation: its revocation time is clamped to it.  The
-   * single revoke of the routes stays exact. */
+  /* Neither revocation fails on a clock that reads earlier than a
+   * credential's creation: both are recorded at the creation instead.  The
+   * exact NOW + 1 above shows a later clock is kept as it is. */
   g_auto (WylDataCredentialInfo) later = { 0 };
   g_assert_cmpint (issue (store, 1, DAY, NOW + 6 * HOUR, &later, NULL), ==,
       WYRELOG_E_OK);
   begin (store);
+  g_auto (WylDataCredentialInfo) clamped_one = { 0 };
   g_assert_cmpint (wyl_policy_store_data_credential_revoke (store, "tenant-a",
-      later.credential_id, "admin", NOW + 5 * HOUR, NULL, &changed), ==,
-      WYRELOG_E_IO);
-  wyl_policy_store_rollback_mutation (store);
+      later.credential_id, "admin", NOW + 5 * HOUR, &clamped_one, &changed),
+      ==, WYRELOG_E_OK);
+  commit (store);
+  g_assert_true (changed);
+  g_assert_cmpint (clamped_one.revoked_at_us, ==, NOW + 6 * HOUR);
+  g_auto (WylDataCredentialInfo) durable = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      later.credential_id, &durable), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (durable.state, ==, "revoked");
+  g_assert_cmpstr (durable.revoked_reason, ==, "revoked");
+  g_assert_cmpstr (durable.revoked_by, ==, "admin");
+  g_assert_cmpint (durable.revoked_at_us, ==, NOW + 6 * HOUR);
+  g_assert_cmpint (durable.updated_at_us, ==, NOW + 6 * HOUR);
+
+  g_auto (WylDataCredentialInfo) bulk_later = { 0 };
+  g_assert_cmpint (issue (store, 1, DAY, NOW + 7 * HOUR, &bulk_later, NULL),
+      ==, WYRELOG_E_OK);
   begin (store);
   g_autoptr (GPtrArray) clamped = NULL;
   g_assert_cmpint (wyl_policy_store_data_credential_revoke_issuer (store,
@@ -1000,7 +1015,8 @@ test_revoke_and_bulk (void)
   commit (store);
   g_assert_cmpuint (clamped->len, ==, 1);
   WylDataCredentialInfo *c0 = g_ptr_array_index (clamped, 0);
-  g_assert_cmpint (c0->revoked_at_us, ==, NOW + 6 * HOUR);
+  g_assert_cmpstr (c0->credential_id, ==, bulk_later.credential_id);
+  g_assert_cmpint (c0->revoked_at_us, ==, NOW + 7 * HOUR);
 }
 
 static void
