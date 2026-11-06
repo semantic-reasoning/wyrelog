@@ -126,6 +126,8 @@ typedef struct
 {
   wyl_policy_fact_graph_info_t info;
   gboolean info_valid;
+  wyl_policy_fact_rule_pack_info_t rule_pack;
+  wyrelog_error_t rule_pack_status;
   GPtrArray *schemas;
   GPtrArray *active;
   gchar *active_schema_digest;
@@ -148,6 +150,7 @@ replay_policy_graph_snapshot_clear (ReplayPolicyGraphSnapshot *snapshot)
 {
   if (snapshot == NULL)
     return;
+  wyl_policy_fact_rule_pack_info_clear (&snapshot->rule_pack);
   g_free ((gchar *) snapshot->info.tenant_id);
   g_free ((gchar *) snapshot->info.graph_id);
   g_free ((gchar *) snapshot->info.storage_uri);
@@ -756,6 +759,40 @@ build_graph_program (GPtrArray *relations)
   return wyl_fact_graph_program_render (program_relations, n_relations, NULL);
 }
 
+/* Stored text is untrusted even when its digest matches. Recompile against
+ * the exact schemas captured for this generation and require canonical rows. */
+static wyrelog_error_t
+build_graph_program_with_rule_pack (GPtrArray *relations,
+    const ReplayPolicyGraphSnapshot *snapshot, gchar **out_program)
+{
+  *out_program = NULL;
+  if (snapshot->rule_pack_status == WYRELOG_E_NOT_FOUND) {
+    *out_program = build_graph_program (relations);
+    return *out_program != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+  }
+  if (snapshot->rule_pack_status != WYRELOG_E_OK)
+    return snapshot->rule_pack_status;
+  const wyl_policy_fact_rule_pack_info_t *pack = &snapshot->rule_pack;
+  g_autofree gchar *text = g_strjoinv ("\n", pack->rules);
+  g_autofree wyl_fact_graph_program_relation_t *schemas =
+      graph_program_relations (relations);
+  g_autofree gchar *rules = NULL;
+  g_auto (GStrv) canonical = NULL;
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  wyrelog_error_t rc = wyl_fact_rule_pack_compile_canonical (text,
+          strlen (text), schemas, relations->len, &rules, &canonical, &rejection);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_strv_length (canonical) != pack->n_rules)
+    return WYRELOG_E_POLICY;
+  for (gsize i = 0; i < pack->n_rules; i++)
+    if (g_strcmp0 (canonical[i], pack->rules[i]) != 0)
+      return WYRELOG_E_POLICY;
+  *out_program = wyl_fact_graph_program_render (schemas, relations->len, rules);
+  return *out_program != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
 wyrelog_error_t
 wyl_fact_replay_register_rule_pack (wyl_policy_store_t *policy,
     const wyl_policy_fact_graph_info_t *graph_info, const gchar *text,
@@ -1012,6 +1049,9 @@ replay_relation_into_engine (WylFactReplayStore *store,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  g_autofree gchar *input_relation = wyl_engine_has_fact_rule_pack (engine)
+      ? g_strdup_printf ("%s_input", rel->wirelog_relation)
+      : g_strdup (rel->wirelog_relation);
   GHashTableIter iter;
   gpointer key = NULL;
   gpointer value = NULL;
@@ -1023,7 +1063,7 @@ replay_relation_into_engine (WylFactReplayStore *store,
       if (rc != WYRELOG_E_OK)
         return rc;
     }
-    rc = wyl_engine_owned_insert (engine, rel->wirelog_relation,
+    rc = wyl_engine_owned_insert (engine, input_relation,
             (const gint64 *) value, rel->n_columns);
     if (rc != WYRELOG_E_OK)
       return rc;
@@ -1174,6 +1214,17 @@ replay_with_replay_store_and_snapshot (wyl_policy_store_t *policy,
   if (policy == NULL || graph_info == NULL || out_engine == NULL)
     return WYRELOG_E_INVALID;
 
+  if (policy_snapshot == NULL) {
+    ReplayPolicyGraphSnapshot captured;
+    wyrelog_error_t captured_rc = capture_replay_policy_graph_snapshot
+          (policy, graph_info, job_context, &captured);
+    if (captured_rc == WYRELOG_E_OK)
+      captured_rc = replay_with_replay_store_and_snapshot (policy,
+              replay_store, &captured.info, &captured, job_context, out_engine);
+    replay_policy_graph_snapshot_clear (&captured);
+    return captured_rc;
+  }
+
   /* The caller controls the store lifetime. Normal replay may still have no
    * store for an empty graph; restore replay supplies an already validated
    * fixed-operation store. */
@@ -1186,13 +1237,16 @@ replay_with_replay_store_and_snapshot (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK && relations->len == 0)
     rc = WYRELOG_E_NOT_FOUND;
   if (rc == WYRELOG_E_OK) {
-    g_autofree gchar *program = build_graph_program (relations);
-    if (program == NULL)
-      rc = WYRELOG_E_NOMEM;
-    else
+    g_autofree gchar *program = NULL;
+    rc = build_graph_program_with_rule_pack (relations, policy_snapshot,
+            &program);
+    if (rc == WYRELOG_E_OK)
       rc = wyl_engine_open_source (program, 1, &engine);
   }
   if (rc == WYRELOG_E_OK) {
+    wyl_engine_set_fact_rule_pack (engine,
+        policy_snapshot->rule_pack.pack_version,
+        policy_snapshot->rule_pack.digest);
     wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
     if (replay_store != NULL)
       rc = replay_relations_into_engine (replay_store, graph_info, relations,
@@ -1637,6 +1691,11 @@ capture_replay_policy_graph_snapshot_locked (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK && !snapshot->info_valid)
     rc = WYRELOG_E_NOT_FOUND;
   const wyl_policy_fact_graph_info_t *owned_info = &snapshot->info;
+  if (rc == WYRELOG_E_OK)
+    snapshot->rule_pack_status = wyl_policy_store_load_fact_rule_pack
+          (policy, owned_info->tenant_id, owned_info->graph_id,
+            &snapshot->rule_pack);
+
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
           (policy, owned_info->tenant_id, owned_info->graph_id,

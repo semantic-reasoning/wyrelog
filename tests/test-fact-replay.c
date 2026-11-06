@@ -17,6 +17,7 @@
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-engine-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
@@ -581,6 +582,13 @@ test_restore_replay_uses_one_sealed_policy_snapshot (void)
   g_assert_nonnull (empty_engine);
   g_clear_pointer (&empty_engine, wyl_engine_close);
 
+  const gchar *restore_rule = "shipment-audit(R):-shipment-route(R).";
+  wyl_policy_fact_rule_pack_info_t restore_pack = { 0 };
+  wyl_fact_rule_pack_rejection_t restore_rejection = { 0 };
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy,
+      &unmaterialized_info, restore_rule, strlen (restore_rule),
+      &restore_pack, &restore_rejection), ==, WYRELOG_E_OK);
+  wyl_policy_fact_rule_pack_info_clear (&restore_pack);
   append_compound_route_batches (policy, tenant_id, graph_id);
   g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, tenant_id,
       graph_id), ==, WYRELOG_E_OK);
@@ -7030,6 +7038,82 @@ assert_stored_rule_pack (wyl_policy_store_t *policy, const gchar *graph_id,
  * stored as its canonical rules; a refused pack stores nothing and names the
  * rule that failed. */
 static void
+rule_result_count (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  (void) relation;
+  (void) row;
+  g_assert_cmpuint (ncols, ==, 1);
+  (*(guint *) user_data)++;
+}
+
+static void
+assert_rule_result_count (WylEngine *engine, const gchar *relation, guint expected)
+{
+  g_autofree gchar *wire = wyl_fact_replay_wirelog_relation_name ("shop.ns", relation);
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", wire);
+  guint count = 0;
+  g_assert_cmpint (wyl_engine_snapshot (engine, observed, rule_result_count, &count), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (count, ==, expected);
+}
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  gboolean replaced;
+} RulePackReplacement;
+
+static void
+replace_pack_during_replay (duckdb_connection connection,
+    WylFactReplayStoreOperation operation, WylFactReplayStoreTestPhase phase,
+    duckdb_state state, gpointer data)
+{
+  (void) connection; (void) operation; (void) state;
+  RulePackReplacement *replacement = data;
+  if (phase != WYL_FACT_REPLAY_STORE_TEST_BEFORE_EXECUTE
+      || replacement->replaced)
+    return;
+  replacement->replaced = TRUE;
+  const gchar *rule = "big(O):-orders-rel(O,999,false).";
+  guint32 version = 0;
+  g_assert_cmpint (wyl_policy_store_register_fact_rule_pack
+        (replacement->policy, "tenant-a", "orders", &rule, 1, &version), ==,
+      WYRELOG_E_OK);
+}
+
+static wyrelog_error_t
+assert_pinned_rule_count (WylEngine *engine, gpointer data)
+{
+  g_assert_true (wyl_engine_has_fact_rule_pack (engine));
+  assert_rule_result_count (engine, "big", GPOINTER_TO_UINT (data));
+  return WYRELOG_E_OK;
+}
+
+static void
+handle_rule_result_count (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer data)
+{
+  (void) engine;
+  rule_result_count (relation, row, ncols, data);
+}
+
+static void
+assert_guarded_rule_count (WylHandle *handle, gboolean allowed,
+    guint expected)
+{
+  g_autofree gchar *wire = wyl_fact_replay_wirelog_relation_name ("shop.ns", "big");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", wire);
+  const gchar *relations[] = { observed };
+  gboolean required = FALSE;
+  guint count = 0;
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relations_guarded (handle,
+      "tenant-a", "orders", relations, 1, handle_rule_result_count, &count,
+      allowed, &required), ==, allowed ? WYRELOG_E_OK : WYRELOG_E_POLICY);
+  g_assert_cmpint (required, ==, !allowed);
+  g_assert_cmpuint (count, ==, allowed ? expected : 0);
+}
+
+static void
 test_register_rule_pack_checks_then_stores (void)
 {
   TEST ("a rule pack is checked against the graph, then stored canonically");
@@ -7059,10 +7143,10 @@ test_register_rule_pack_checks_then_stores (void)
   };
   const gchar *pack = "# large orders\n"
       "big(O) :- orders-rel(O, Amount, true).  # expedited\n"
-      "  big(O) :- orders-rel(O, 1000, false).\r\n";
+      "  big(O) :- orders-rel(O, 22, false).\r\n";
   const gchar *const stored[] = {
     "big(O):-orders-rel(O,Amount,true).",
-    "big(O):-orders-rel(O,1000,false).",
+    "big(O):-orders-rel(O,22,false).",
     NULL,
   };
   wyl_policy_fact_rule_pack_info_t info = { 0 };
@@ -7079,6 +7163,12 @@ test_register_rule_pack_checks_then_stores (void)
   g_assert_cmpmem (info.digest, sizeof info.digest, digest, sizeof digest);
   wyl_policy_fact_rule_pack_info_clear (&info);
   assert_stored_rule_pack (policy, "orders", 1, stored);
+  append_order_batches (policy, root, "tenant-a", "orders");
+  /* The head has no batches. Its only row is derived by the stored rules. */
+  g_autoptr (WylEngine) derived_engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &graph,
+      &derived_engine), ==, WYRELOG_E_OK);
+  assert_rule_result_count (derived_engine, "big", 1);
 
   /* The second rule reads a relation the graph does not have. */
   const gchar *unknown = "big(O) :- orders-rel(O, _, _).\n"
@@ -7125,7 +7215,110 @@ test_register_rule_pack_checks_then_stores (void)
   g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph, NULL,
       0, &info, &rejection), ==, WYRELOG_E_INVALID);
 
+  /* An acyclic chain, safe negation and escaped constants execute together.
+   * Neither intermediate nor excluded has any durable batch. */
+  big.relation_name = "intermediate";
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &big), ==, WYRELOG_E_OK);
+  big.relation_name = "excluded";
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &big), ==, WYRELOG_E_OK);
+  const gchar *chain =
+      "intermediate(O):-orders-rel(O,_,_).\n"
+      "big(\"quote\\\"slash\\\\\"):-intermediate(O),!excluded(O).";
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph,
+      chain, strlen (chain), &info, &rejection), ==, WYRELOG_E_OK);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+  create_graph_with_schema (policy, root, "tenant-b", "orders");
+  append_order_batches (policy, root, "tenant-b", "orders");
   g_clear_pointer (&policy, wyl_policy_store_close);
+  const WylHandleOpenOptions options = {
+    .policy_store_path = policy_path, .fact_root = root,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  assert_guarded_rule_count (handle, FALSE, 0);
+  assert_guarded_rule_count (handle, TRUE, 1);
+  assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
+
+  /* Invalid but correctly digested stored packs fail graph-locally. A failed
+   * replacement keeps the previous engine and its inference requirement. */
+  wyl_policy_store_t *live = wyl_handle_get_policy_store (handle);
+  const gchar *invalid[] = {
+    "big(O):-missing(O).", "big(O):-big(O).",
+    "big(O) :- orders-rel(O,_,_).", "big(O):-orders-rel(O,_).",
+    "big(O):-orders-rel(O,true,_).",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    guint32 version = 0;
+    g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (live,
+        "tenant-a", "orders", &invalid[i], 1, &version), ==, WYRELOG_E_OK);
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &graph, &status),
+        !=, WYRELOG_E_OK);
+    g_assert_true (status.queryable);
+    wyl_fact_graph_runtime_status_clear (&status);
+    assert_guarded_rule_count (handle, FALSE, 0);
+    assert_guarded_rule_count (handle, TRUE, 1);
+    assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
+  }
+  g_clear_object (&handle);
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  GraphGenerations bad = capture_generations (handle, "tenant-a", "orders");
+  g_assert_false (bad.queryable);
+  assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
+  live = wyl_handle_get_policy_store (handle);
+  const gchar *no_match = "big(O):-orders-rel(O,999,false).";
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (live, &graph,
+      no_match, strlen (no_match), &info, &rejection), ==, WYRELOG_E_OK);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+  WylFactGraphRuntimeStatus recovered = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &graph, &recovered),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_status_clear (&recovered);
+  assert_guarded_rule_count (handle, TRUE, 0);
+  g_autoptr (WylFactGraphRuntimeManager) manager =
+      wyl_handle_fact_graph_runtime_ref (handle);
+  WylFactGraphKey pin_key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&pin_key, "tenant-a", "orders"),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) pinned = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &pin_key, &pinned), ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&pin_key);
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (live, &graph,
+      chain, strlen (chain), &info, &rejection), ==, WYRELOG_E_OK);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &graph, &recovered),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_status_clear (&recovered);
+  assert_guarded_rule_count (handle, TRUE, 1);
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (pinned,
+      assert_pinned_rule_count, GUINT_TO_POINTER (0)), ==, WYRELOG_E_OK);
+  g_clear_pointer (&pinned, wyl_fact_graph_snapshot_unref);
+  g_clear_pointer (&manager, wyl_fact_graph_runtime_manager_unref);
+  /* Replacing durable policy after replay captured its SQL snapshot cannot
+   * mix new rules with the old captured schemas. The next replay sees it. */
+  RulePackReplacement replacement_during_replay = { .policy = live };
+  wyl_fact_replay_store_set_before_execute_test_hook (replace_pack_during_replay,
+      &replacement_during_replay);
+  g_autoptr (WylEngine) captured_engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (live, root, &graph,
+      &captured_engine), ==, WYRELOG_E_OK);
+  wyl_fact_replay_store_set_before_execute_test_hook (NULL, NULL);
+  g_assert_true (replacement_during_replay.replaced);
+  assert_rule_result_count (captured_engine, "big", 1);
+  g_clear_object (&captured_engine);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (live, root, &graph,
+      &captured_engine), ==, WYRELOG_E_OK);
+  assert_rule_result_count (captured_engine, "big", 0);
+  g_clear_object (&captured_engine);
+  /* A previously opened engine remains a coherent, independent generation. */
+  assert_rule_result_count (derived_engine, "big", 1);
+  g_clear_object (&handle);
+  g_clear_object (&derived_engine);
   remove_tree (root);
 }
 

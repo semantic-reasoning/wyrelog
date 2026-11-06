@@ -3559,6 +3559,8 @@ typedef struct
   gsize n_relations;
   wyl_fact_graph_tuple_cb cb;
   gpointer user_data;
+  gboolean allow_inference;
+  gboolean *out_inference_required;
 } FactGraphSnapshotCtx;
 
 static void
@@ -3576,6 +3578,11 @@ fact_graph_snapshot_use (WylEngine *engine, gpointer user_data)
 {
   FactGraphSnapshotCtx *ctx = user_data;
   ctx->engine = engine;
+  if (!ctx->allow_inference && wyl_engine_has_fact_rule_pack (engine)) {
+    if (ctx->out_inference_required != NULL)
+      *ctx->out_inference_required = TRUE;
+    return WYRELOG_E_POLICY;
+  }
   for (gsize i = 0; i < ctx->n_relations; i++) {
     wyrelog_error_t rc = wyl_engine_snapshot (engine, ctx->relations[i],
             fact_graph_snapshot_tuple_trampoline, ctx);
@@ -3596,11 +3603,14 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
 }
 
 wyrelog_error_t
-wyl_handle_snapshot_fact_graph_relations (WylHandle *self,
+wyl_handle_snapshot_fact_graph_relations_guarded (WylHandle *self,
     const gchar *tenant_id, const gchar *graph_id,
     const gchar *const *relations, gsize n_relations,
-    wyl_fact_graph_tuple_cb cb, gpointer user_data)
+    wyl_fact_graph_tuple_cb cb, gpointer user_data,
+    gboolean allow_inference, gboolean *out_inference_required)
 {
+  if (out_inference_required != NULL)
+    *out_inference_required = FALSE;
   if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
       || graph_id == NULL || relations == NULL || n_relations == 0
       || cb == NULL || self->fact_graph_runtime == NULL
@@ -3644,10 +3654,23 @@ wyl_handle_snapshot_fact_graph_relations (WylHandle *self,
     .engine = NULL,
     .relations = relations,
     .n_relations = n_relations,
+    .allow_inference = allow_inference,
+    .out_inference_required = out_inference_required,
     .cb = cb,
     .user_data = user_data,
   };
   return wyl_fact_graph_snapshot_use (snapshot, fact_graph_snapshot_use, &ctx);
+}
+
+/* Private trusted callers explicitly opt into evaluation. */
+wyrelog_error_t
+wyl_handle_snapshot_fact_graph_relations (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id,
+    const gchar *const *relations, gsize n_relations,
+    wyl_fact_graph_tuple_cb cb, gpointer user_data)
+{
+  return wyl_handle_snapshot_fact_graph_relations_guarded (self, tenant_id,
+             graph_id, relations, n_relations, cb, user_data, TRUE, NULL);
 }
 
 typedef struct

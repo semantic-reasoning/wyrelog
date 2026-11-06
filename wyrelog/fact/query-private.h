@@ -15,6 +15,8 @@ typedef struct
   const gchar *query;
   guint limit;
   const gchar *query_id;
+  gboolean allow_inference;
+  gboolean *out_inference_required;
 } wyl_fact_datalog_query_options_t;
 
 wyrelog_error_t wyl_fact_datalog_query_json (WylHandle * handle,

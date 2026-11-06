@@ -74,6 +74,9 @@ struct _WylEngine
   gboolean source_inputs_started;
   /* Schema capabilities derived from the exact source passed to easy_open. */
   guint inline_source_probe_mask;
+  /* Immutable before publication; authorization follows the pinned engine. */
+  guint32 fact_rule_pack_version;
+  guint8 fact_rule_pack_digest[32];
 };
 
 /*
@@ -179,5 +182,9 @@ wyrelog_error_t wyl_engine_owned_set_session_state_witness_for_test
   (WylEngine * self, const gint64 row[2], guint64 row_multiplicity,
     guint64 scope_total);
 #endif
+
+void wyl_engine_set_fact_rule_pack (WylEngine *engine, guint32 version,
+    const guint8 digest[32]);
+gboolean wyl_engine_has_fact_rule_pack (WylEngine *engine);
 
 G_END_DECLS;

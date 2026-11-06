@@ -1784,3 +1784,19 @@ wyl_engine_owned_remove (WylEngine *self, const gchar *relation,
 {
   return wyl_engine_remove_unchecked (self, relation, row, ncols);
 }
+
+/* Only the unpublished replay builder assigns this generation identity. */
+void
+wyl_engine_set_fact_rule_pack (WylEngine *engine, guint32 version,
+    const guint8 digest[32])
+{
+  engine->fact_rule_pack_version = version;
+  memcpy (engine->fact_rule_pack_digest, digest,
+      sizeof engine->fact_rule_pack_digest);
+}
+
+gboolean
+wyl_engine_has_fact_rule_pack (WylEngine *engine)
+{
+  return engine->fact_rule_pack_version != 0;
+}

@@ -37,7 +37,10 @@ const gchar *wyl_fact_graph_program_wire_type (const gchar * column_type);
 /* Renders the program a graph engine is built from: per relation, a .decl for
  * the relation and for its _observed twin plus the identity rule between
  * them, in array order, followed by @rules verbatim when it is not NULL.
- * Returns NULL when a column carries an unknown type. */
+ * With nonempty rules, also declares an _input EDB per relation and unions
+ * it into the logical relation, so durable inputs and derived rows coexist.
+ * Replay must insert into _input for these programs. No-pack output is
+ * unchanged. Returns NULL when a column carries an unknown type. */
 gchar *wyl_fact_graph_program_render (const wyl_fact_graph_program_relation_t *
     relations, gsize n_relations, const gchar * rules);
 

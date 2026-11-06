@@ -25915,7 +25915,9 @@ wyl_policy_store_load_fact_rule_pack (wyl_policy_store_t *store,
   sqlite3_int64 version = sqlite3_column_int64 (stmt, 0);
   sqlite3_int64 rule_count = sqlite3_column_int64 (stmt, 1);
   guint8 stored_digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
-  gboolean header_ok = version >= 1 && version <= G_MAXUINT32
+  gboolean header_ok = sqlite3_column_type (stmt, 0) == SQLITE_INTEGER
+      && sqlite3_column_type (stmt, 1) == SQLITE_INTEGER
+      && version >= 1 && version <= G_MAXUINT32
       && rule_count >= 1 && rule_count <= WYL_FACT_RULE_PACK_MAX_RULES
       && sqlite3_column_type (stmt, 2) == SQLITE_BLOB
       && sqlite3_column_bytes (stmt, 2)
@@ -25943,7 +25945,9 @@ wyl_policy_store_load_fact_rule_pack (wyl_policy_store_t *store,
   g_autoptr (GPtrArray) rules = g_ptr_array_new_with_free_func (g_free);
   while (rc == WYRELOG_E_OK && (step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
     const gchar *text = (const gchar *) sqlite3_column_text (stmt, 1);
-    if (text == NULL
+    if (text == NULL || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 0) != SQLITE_INTEGER
+        || (gsize) sqlite3_column_bytes (stmt, 1) != strlen (text)
         || sqlite3_column_int64 (stmt, 0) != (sqlite3_int64) rules->len + 1)
       rc = WYRELOG_E_INTERNAL;
     else
