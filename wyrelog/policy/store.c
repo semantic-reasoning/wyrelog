@@ -12507,6 +12507,117 @@ migrate_fact_logical_quota_scope (sqlite3 *db)
   return rc;
 }
 
+#define FACT_PHYSICAL_QUOTA_TABLE_SQL(request_column, scope_key) \
+  "CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations (" \
+  request_column \
+  "  tenant_id TEXT NOT NULL," \
+  "  graph_id TEXT NOT NULL," \
+  "  inventory_generation TEXT NOT NULL," \
+  "  inventory_digest TEXT NOT NULL CHECK (" \
+  "    typeof(inventory_digest) = 'text' AND length(inventory_digest) = 64 AND " \
+  "    inventory_digest = lower(inventory_digest) AND " \
+  "    inventory_digest NOT GLOB '*[^0-9a-f]*')," \
+  "  requested_bytes INTEGER NOT NULL CHECK (" \
+  "    typeof(requested_bytes) = 'integer' AND requested_bytes >= 0)," \
+  "  applied_bytes INTEGER NOT NULL DEFAULT 0 CHECK (" \
+  "    typeof(applied_bytes) = 'integer' AND applied_bytes >= 0)," \
+  "  state TEXT NOT NULL CHECK (state IN " \
+  "    ('pending', 'reconciling', 'settled', 'cancelled'))," \
+  "  created_at INTEGER NOT NULL," \
+  "  updated_at INTEGER NOT NULL," \
+  scope_key \
+  "  UNIQUE (tenant_id, graph_id, request_id, inventory_generation, inventory_digest)," \
+  "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs " \
+  "    (tenant_id, graph_id)" \
+  ");"
+
+static const gchar fact_physical_quota_scoped_sql[] =
+    FACT_PHYSICAL_QUOTA_TABLE_SQL ("request_id TEXT NOT NULL,",
+        "PRIMARY KEY (tenant_id, graph_id, request_id),");
+static const gchar fact_physical_quota_legacy_sql[] =
+    FACT_PHYSICAL_QUOTA_TABLE_SQL ("request_id TEXT PRIMARY KEY,", "");
+static const gchar fact_physical_quota_state_index_sql[] =
+    "CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state "
+    "ON fact_physical_quota_reservations (tenant_id, state);";
+
+/* Runs under both schema transaction paths, before their publication checks.
+ * Preserve raw keys and every journal field; usage is not recomputed. */
+static wyrelog_error_t
+migrate_fact_physical_quota_scope (sqlite3 *db)
+{
+  wyrelog_error_t rc = graph_authority_object_matches (db, "table",
+          "fact_physical_quota_reservations", fact_physical_quota_scoped_sql);
+  gboolean current = rc == WYRELOG_E_OK;
+  if (rc == WYRELOG_E_POLICY)
+    rc = graph_authority_object_matches (db, "table",
+            "fact_physical_quota_reservations", fact_physical_quota_legacy_sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = graph_authority_object_matches (db, "index",
+          "idx_fact_physical_quota_reservations_state",
+          fact_physical_quota_state_index_sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (db,
+          "SELECT 1 FROM sqlite_master WHERE "
+          "(tbl_name='fact_physical_quota_reservations' AND sql IS NOT NULL "
+          "AND name NOT IN ('fact_physical_quota_reservations',"
+          "'idx_fact_physical_quota_reservations_state')) OR "
+          "name='fact_physical_quota_reservations_legacy_1486' "
+          "UNION ALL SELECT 1 FROM sqlite_temp_master WHERE "
+          "name='fact_physical_quota_reservations_legacy_1486';", &stmt);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    rc = step == SQLITE_DONE ? WYRELOG_E_OK :
+        step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!current) {
+    /* A temporary copy avoids ALTER TABLE reparsing unrelated predecessor
+     * triggers whose referenced columns are upgraded later in this transaction. */
+    rc = exec_sql (db,
+            "CREATE TEMP TABLE fact_physical_quota_reservations_legacy_1486 AS "
+            "SELECT request_id,tenant_id,graph_id,inventory_generation,inventory_digest,"
+            "requested_bytes,applied_bytes,"
+            "state,created_at,updated_at FROM main.fact_physical_quota_reservations;");
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, "DROP TABLE main.fact_physical_quota_reservations;");
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, fact_physical_quota_scoped_sql);
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db,
+              "INSERT INTO main.fact_physical_quota_reservations "
+              "(request_id,tenant_id,graph_id,inventory_generation,inventory_digest,"
+              "requested_bytes,applied_bytes,"
+              "state,created_at,updated_at) SELECT "
+              "request_id,tenant_id,graph_id,inventory_generation,inventory_digest,"
+              "requested_bytes,applied_bytes,"
+              "state,created_at,updated_at "
+              "FROM temp.fact_physical_quota_reservations_legacy_1486;");
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db,
+              "DROP TABLE temp.fact_physical_quota_reservations_legacy_1486;");
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, fact_physical_quota_state_index_sql);
+  }
+  /* The provisioning predecessor path temporarily disables FK enforcement.
+   * Check before commit there too, rather than accepting orphaned rows. */
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (db,
+            "PRAGMA foreign_key_check(fact_physical_quota_reservations);", &stmt);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    rc = step == SQLITE_DONE ? WYRELOG_E_OK :
+        step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
 static wyrelog_error_t
 migrate_offline_restore_receipt_graph_count (sqlite3 *db)
 {
@@ -14943,7 +15054,7 @@ validate_graph_authority_schema (sqlite3 *db)
        NULL, "CHECK", NULL},
       {"fact_tenant_physical_quota_usage", "reconciling_bytes", "INTEGER", TRUE,
        NULL, "CHECK", NULL},
-      {"fact_physical_quota_reservations", "request_id", "TEXT", FALSE,
+      {"fact_physical_quota_reservations", "request_id", "TEXT", TRUE,
        NULL, NULL, NULL},
       {"fact_physical_quota_reservations", "tenant_id", "TEXT", TRUE,
        NULL, NULL, NULL},
@@ -15203,6 +15314,8 @@ migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
 {
   sqlite3 *db = store->db;
   wyrelog_error_t rc = migrate_fact_logical_quota_scope (db);
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_fact_physical_quota_scope (db);
   if (rc != WYRELOG_E_OK)
     return rc;
   gboolean added_tenant_sealed_generation = FALSE;
@@ -16364,27 +16477,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "    typeof(reconciling_bytes) = 'integer' AND reconciling_bytes >= 0),"
       "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
       ");"
-      "CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations ("
-      "  request_id TEXT PRIMARY KEY,"
-      "  tenant_id TEXT NOT NULL,"
-      "  graph_id TEXT NOT NULL,"
-      "  inventory_generation TEXT NOT NULL,"
-      "  inventory_digest TEXT NOT NULL CHECK ("
-      "    typeof(inventory_digest) = 'text' AND length(inventory_digest) = 64 AND "
-      "    inventory_digest = lower(inventory_digest) AND "
-      "    inventory_digest NOT GLOB '*[^0-9a-f]*'),"
-      "  requested_bytes INTEGER NOT NULL CHECK ("
-      "    typeof(requested_bytes) = 'integer' AND requested_bytes >= 0),"
-      "  applied_bytes INTEGER NOT NULL DEFAULT 0 CHECK ("
-      "    typeof(applied_bytes) = 'integer' AND applied_bytes >= 0),"
-      "  state TEXT NOT NULL CHECK (state IN "
-      "    ('pending', 'reconciling', 'settled', 'cancelled')),"
-      "  created_at INTEGER NOT NULL,"
-      "  updated_at INTEGER NOT NULL,"
-      "  UNIQUE (tenant_id, graph_id, request_id, inventory_generation, inventory_digest),"
-      "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs "
-      "    (tenant_id, graph_id)"
-      ");"
+      FACT_PHYSICAL_QUOTA_TABLE_SQL ("request_id TEXT NOT NULL,",
+          "PRIMARY KEY (tenant_id, graph_id, request_id),")
       "CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state "
       "  ON fact_physical_quota_reservations (tenant_id, state);"
       "CREATE TABLE IF NOT EXISTS fact_open_owners ("
@@ -19792,9 +19886,11 @@ fact_physical_quota_operation_load (wyl_policy_store_t *store,
   wyrelog_error_t rc = prepare_stmt (store->db,
           "SELECT tenant_id,graph_id,inventory_generation,inventory_digest,"
           "requested_bytes,applied_bytes,state FROM fact_physical_quota_reservations "
-          "WHERE request_id=?;", &stmt);
+          "WHERE request_id=? AND tenant_id=? AND graph_id=?;", &stmt);
   if (rc == WYRELOG_E_OK)
     rc = bind_text (stmt, 1, operation->request_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, operation->tenant_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, operation->graph_id);
   int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
     if (out_found != NULL)
@@ -20063,7 +20159,7 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
     if (rc == WYRELOG_E_OK)
       rc = prepare_stmt (store->db,
               "UPDATE fact_physical_quota_reservations SET applied_bytes=?,"
-              "state=?,updated_at=unixepoch() WHERE request_id=? AND state='pending';",
+              "state=?,updated_at=unixepoch() WHERE request_id=? AND tenant_id=? AND graph_id=? AND state='pending';",
               &stmt);
     if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 1,
         (sqlite3_int64) (stable_evidence ? observed_bytes : charge)) != SQLITE_OK)
@@ -20073,7 +20169,10 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
           ? "settled" : "reconciling", -1, SQLITE_TRANSIENT) != SQLITE_OK)
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, operation->request_id);
-    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, operation->tenant_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, operation->graph_id);
+    if (rc == WYRELOG_E_OK && (sqlite3_step (stmt) != SQLITE_DONE
+        || sqlite3_changes (store->db) != 1))
       rc = WYRELOG_E_IO;
     sqlite3_finalize (stmt);
     current.applied_bytes = stable_evidence ? observed_bytes : charge;
@@ -20114,7 +20213,7 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
     if (rc == WYRELOG_E_OK && !current.replay)
       rc = prepare_stmt (store->db,
               "UPDATE fact_physical_quota_reservations SET applied_bytes=?,"
-              "state=?,updated_at=unixepoch() WHERE request_id=? AND state='reconciling';",
+              "state=?,updated_at=unixepoch() WHERE request_id=? AND tenant_id=? AND graph_id=? AND state='reconciling';",
               &stmt);
     if (rc == WYRELOG_E_OK && !current.replay
         && sqlite3_bind_int64 (stmt, 1,
@@ -20127,8 +20226,12 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK && !current.replay)
       rc = bind_text (stmt, 3, operation->request_id);
+    if (rc == WYRELOG_E_OK && !current.replay)
+      rc = bind_text (stmt, 4, operation->tenant_id);
+    if (rc == WYRELOG_E_OK && !current.replay)
+      rc = bind_text (stmt, 5, operation->graph_id);
     if (rc == WYRELOG_E_OK && !current.replay
-        && sqlite3_step (stmt) != SQLITE_DONE)
+        && (sqlite3_step (stmt) != SQLITE_DONE || sqlite3_changes (store->db) != 1))
       rc = WYRELOG_E_IO;
     sqlite3_finalize (stmt);
     if (rc == WYRELOG_E_OK && out_status != NULL)
@@ -20262,7 +20365,7 @@ wyl_policy_store_cancel_fact_physical_quota (wyl_policy_store_t *store,
     if (rc == WYRELOG_E_OK)
       rc = prepare_stmt (store->db,
               "UPDATE fact_physical_quota_reservations SET state=?,"
-              "applied_bytes=?,updated_at=unixepoch() WHERE request_id=? AND state='pending';",
+              "applied_bytes=?,updated_at=unixepoch() WHERE request_id=? AND tenant_id=? AND graph_id=? AND state='pending';",
               &stmt);
     if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 1,
         definite_noncommit ? "cancelled" : "reconciling", -1,
@@ -20272,7 +20375,10 @@ wyl_policy_store_cancel_fact_physical_quota (wyl_policy_store_t *store,
         (sqlite3_int64) current.requested_bytes) != SQLITE_OK)
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, operation->request_id);
-    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, operation->tenant_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, operation->graph_id);
+    if (rc == WYRELOG_E_OK && (sqlite3_step (stmt) != SQLITE_DONE
+        || sqlite3_changes (store->db) != 1))
       rc = WYRELOG_E_IO;
     sqlite3_finalize (stmt);
     if (rc == WYRELOG_E_OK) {
