@@ -7859,6 +7859,44 @@ test_fact_physical_quota_ledger (void)
   cleanup_store_path (store_root, store_path);
 }
 
+/* #1509: the per-graph charge table is validated like the other physical
+ * quota tables: a same-name table without its checks, or a row the checks
+ * would refuse, fails the schema. */
+static void
+test_fact_physical_quota_graph_charges_rejects_malformed (void)
+{
+  const gchar *mutations[] = {
+    "DROP TABLE fact_physical_quota_graph_charges; "
+    "CREATE TABLE fact_physical_quota_graph_charges (tenant_id TEXT NOT NULL,"
+    "graph_id TEXT NOT NULL,charged_bytes INTEGER NOT NULL,"
+    "updated_at INTEGER NOT NULL,PRIMARY KEY (tenant_id, graph_id))",
+    "PRAGMA ignore_check_constraints=ON; INSERT INTO "
+    "fact_physical_quota_graph_charges VALUES ('__wr_default','g',-1,1); "
+    "PRAGMA ignore_check_constraints=OFF;",
+    "PRAGMA ignore_check_constraints=ON; INSERT INTO "
+    "fact_physical_quota_graph_charges VALUES ('__wr_default','g','many',1); "
+    "PRAGMA ignore_check_constraints=OFF;",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (mutations); i++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    wyl_policy_store_open_options_t opts = { .path = path };
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    g_autofree gchar *table = scalar_text (db, "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='fact_physical_quota_graph_charges'");
+    g_assert_cmpstr (table, ==, "fact_physical_quota_graph_charges");
+    exec_ok (db, "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,"
+        "storage_path,schema_version,owner_scope,sealed,created_at,updated_at) "
+        "VALUES ('__wr_default','g','file:///g','/g',1,'__wr_default',0,1,1)");
+    exec_ok (db, mutations[i]);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), !=, WYRELOG_E_OK);
+  }
+}
+
 
 static void
 test_fact_physical_quota_scoped_keys (void)
@@ -8996,6 +9034,9 @@ main (int argc, char **argv)
       test_fact_physical_quota_scope_rejects_unknown);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-scoped-keys",
       test_fact_physical_quota_scoped_keys);
+  g_test_add_func
+    ("/policy/graph-authority/fact-physical-quota-graph-charges-rejects-malformed",
+      test_fact_physical_quota_graph_charges_rejects_malformed);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-ledger",
       test_fact_physical_quota_ledger);
   g_test_add_func

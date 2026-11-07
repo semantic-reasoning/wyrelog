@@ -903,6 +903,7 @@ static const gchar *const required_tables[] = {
   "fact_tenant_physical_quota_limits",
   "fact_tenant_physical_quota_usage",
   "fact_physical_quota_reservations",
+  "fact_physical_quota_graph_charges",
   "fact_graph_create_reservations",
   "fact_offline_restore_journals",
   "fact_offline_restore_tenant_claims",
@@ -15025,7 +15026,8 @@ validate_graph_authority_schema (sqlite3 *db)
     if (sqlite3_prepare_v2 (db,
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
         "name IN ('fact_tenant_physical_quota_limits',"
-        "'fact_tenant_physical_quota_usage','fact_physical_quota_reservations');",
+        "'fact_tenant_physical_quota_usage','fact_physical_quota_reservations',"
+        "'fact_physical_quota_graph_charges');",
         -1, &physical_presence, NULL) != SQLITE_OK)
       return WYRELOG_E_IO;
     int presence_step = sqlite3_step (physical_presence);
@@ -15039,7 +15041,7 @@ validate_graph_authority_schema (sqlite3 *db)
       return WYRELOG_E_IO;
     if (physical_table_count == 0)
       return validate_graph_authority_rows (db);
-    if (physical_table_count != 3)
+    if (physical_table_count != 4)
       return WYRELOG_E_POLICY;
     static const WylGraphAuthorityColumn physical_columns[] = {
       {"fact_tenant_physical_quota_limits", "tenant_id", "TEXT", FALSE,
@@ -15070,6 +15072,14 @@ validate_graph_authority_schema (sqlite3 *db)
        "0", "CHECK", NULL},
       {"fact_physical_quota_reservations", "state", "TEXT", TRUE,
        NULL, "CHECK", NULL},
+      {"fact_physical_quota_graph_charges", "tenant_id", "TEXT", TRUE,
+       NULL, NULL, NULL},
+      {"fact_physical_quota_graph_charges", "graph_id", "TEXT", TRUE,
+       NULL, NULL, NULL},
+      {"fact_physical_quota_graph_charges", "charged_bytes", "INTEGER", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_physical_quota_graph_charges", "updated_at", "INTEGER", TRUE,
+       NULL, NULL, NULL},
     };
     for (gsize i = 0; i < G_N_ELEMENTS (physical_columns); i++) {
       gboolean exists = FALSE, matches = FALSE;
@@ -15085,6 +15095,7 @@ validate_graph_authority_schema (sqlite3 *db)
       "fact_tenant_physical_quota_usage",
       "fact_physical_quota_reservations",
       "idx_fact_physical_quota_reservations_state",
+      "fact_physical_quota_graph_charges",
     };
     for (gsize i = 0; i < G_N_ELEMENTS (physical_objects); i++) {
       sqlite3_stmt *stmt = NULL;
@@ -15111,6 +15122,8 @@ validate_graph_authority_schema (sqlite3 *db)
       "typeof(requested_bytes)!='integer' OR requested_bytes<0 OR "
       "typeof(applied_bytes)!='integer' OR applied_bytes<0 OR "
       "state NOT IN ('pending','reconciling','settled','cancelled') LIMIT 1;",
+      "SELECT 1 FROM fact_physical_quota_graph_charges WHERE "
+      "typeof(charged_bytes)!='integer' OR charged_bytes<0 LIMIT 1;",
     };
     for (gsize i = 0; i < G_N_ELEMENTS (invalid_rows); i++) {
       sqlite3_stmt *stmt = NULL;
@@ -16481,6 +16494,21 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
           "PRIMARY KEY (tenant_id, graph_id, request_id),")
       "CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state "
       "  ON fact_physical_quota_reservations (tenant_id, state);"
+      /* #1509: the physical bytes charged to each graph, the highest stable
+       * observation settled for it.  The foreign key only keeps a charge row
+       * from outliving its graph; it does not release committed_bytes.
+       * Nothing deletes a single graph today, so tenant delete is the only
+       * release; a future graph delete must subtract charged_bytes itself. */
+      "CREATE TABLE IF NOT EXISTS fact_physical_quota_graph_charges ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  charged_bytes INTEGER NOT NULL CHECK ("
+      "    typeof(charged_bytes) = 'integer' AND charged_bytes >= 0),"
+      "  updated_at INTEGER NOT NULL,"
+      "  PRIMARY KEY (tenant_id, graph_id),"
+      "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs "
+      "(tenant_id, graph_id)"
+      ");"
       "CREATE TABLE IF NOT EXISTS fact_open_owners ("
       "  owner_incarnation TEXT PRIMARY KEY,"
       "  state TEXT NOT NULL CHECK (state IN ('active', 'retired')),"
@@ -47765,6 +47793,7 @@ static const TenantDeleteTable tenant_delete_tables[] = {
   TD_TENANT ("fact_tenant_quota_limits"), TD_TENANT ("fact_tenant_logical_quota_usage"),
   TD_TENANT ("fact_logical_quota_operations"), TD_TENANT ("fact_tenant_physical_quota_limits"),
   TD_TENANT ("fact_tenant_physical_quota_usage"), TD_TENANT ("fact_physical_quota_reservations"),
+  TD_TENANT ("fact_physical_quota_graph_charges"),
   TD_TENANT ("fact_tenant_write_rate_state"), TD_TENANT ("fact_open_reservations"),
   {"fact_open_settlements", "reservation_id IN (SELECT reservation_id FROM fact_open_reservations WHERE tenant_id=?1)"},
   TD_TENANT ("fact_offline_restore_journals"), TD_TENANT ("fact_offline_restore_tenant_claims"),

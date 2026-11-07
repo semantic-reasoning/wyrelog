@@ -610,6 +610,20 @@ CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations (
 CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state
     ON fact_physical_quota_reservations (tenant_id, state);
 
+-- The physical bytes charged to each graph: the highest stable observation
+-- settled for it, so a settle charges only growth over it (#1509).  The
+-- foreign key only keeps a charge row from outliving its graph; it does not
+-- release committed_bytes, so a graph delete must subtract charged_bytes.
+CREATE TABLE IF NOT EXISTS fact_physical_quota_graph_charges (
+    tenant_id     TEXT NOT NULL,
+    graph_id      TEXT NOT NULL,
+    charged_bytes INTEGER NOT NULL CHECK (
+        typeof(charged_bytes) = 'integer' AND charged_bytes >= 0),
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, graph_id),
+    FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs (tenant_id, graph_id)
+);
+
 CREATE TABLE IF NOT EXISTS fact_graph_create_reservations (
     tenant_id     TEXT NOT NULL,
     graph_id      TEXT NOT NULL,

@@ -8173,7 +8173,10 @@ check_tenant_delete_schema (void)
       "INSERT INTO service_credentials(credential_id,credential_format_version,subject_id,tenant_id,state,verifier_version,salt,verifier,created_by,created_at_us,updated_at_us,revoked_by,revoked_at_us) SELECT tenant_id,1,'svc:delete:identity',tenant_id,'revoked',1,zeroblob(16),zeroblob(32),'alice',1,2,'alice',2 FROM tenants WHERE tenant_id IN ('delete-test','unrelated');"
       "INSERT INTO service_credential_events(credential_id,subject_id,tenant_id,event,from_state,to_state,generation,actor_subject_id,created_at_us) SELECT credential_id,subject_id,tenant_id,'revoked','active','revoked',1,'alice',2 FROM service_credentials;"
       "INSERT INTO fact_offline_restore_receipts(operation_uuid,tenant_id,scope,manifest_sha256,final_revision,terminal_state,completed_at) VALUES('restore-delete','delete-test','tenant',zeroblob(32),1,'aborted',1);"
-      "INSERT INTO fact_offline_restore_terminal_guard VALUES('restore-delete');",
+      "INSERT INTO fact_offline_restore_terminal_guard VALUES('restore-delete');"
+      /* #1509: each graph's charged physical bytes go with its tenant. */
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,schema_version,owner_scope,sealed,created_at,updated_at) SELECT tenant_id,'charged','file:///charged','/charged',1,tenant_id,0,1,1 FROM tenants WHERE tenant_id IN ('delete-test','unrelated');"
+      "INSERT INTO fact_physical_quota_graph_charges (tenant_id,graph_id,charged_bytes,updated_at) SELECT tenant_id,'charged',4096,1 FROM tenants WHERE tenant_id IN ('delete-test','unrelated');",
       NULL, NULL, NULL), ==, SQLITE_OK);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "delete-test", TRUE), ==, WYRELOG_E_OK);
   g_assert_cmpint (sqlite3_exec (db, "UPDATE tenants SET lifecycle_state='sealed',lifecycle_generation=lifecycle_generation+1,reconciliation_generation=reconciliation_generation+1 WHERE tenant_id='delete-test' AND lifecycle_state='legacy_unclassified'", NULL, NULL, NULL), ==, SQLITE_OK);
@@ -8227,10 +8230,12 @@ check_tenant_delete_schema (void)
       "(SELECT count(*) FROM service_credential_events WHERE tenant_id='delete-test'),"
       "(SELECT count(*) FROM service_credentials WHERE tenant_id='unrelated'),"
       "(SELECT count(*) FROM fact_offline_restore_receipts WHERE tenant_id='delete-test'),"
-      "(SELECT count(*) FROM audit_events WHERE action='tenant_delete' AND resource_id='delete-test')",
+      "(SELECT count(*) FROM audit_events WHERE action='tenant_delete' AND resource_id='delete-test'),"
+      "(SELECT count(*) FROM fact_physical_quota_graph_charges WHERE tenant_id='delete-test'),"
+      "(SELECT count(*) FROM fact_physical_quota_graph_charges WHERE tenant_id='unrelated')",
       -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
-  const gint expected[] = {1,0,0,1,0,1};
+  const gint expected[] = {1,0,0,1,0,1,0,1};
   for (guint j = 0; j < G_N_ELEMENTS (expected); j++)
     g_assert_cmpint (sqlite3_column_int (stmt, j), ==, expected[j]);
   sqlite3_finalize (stmt);
