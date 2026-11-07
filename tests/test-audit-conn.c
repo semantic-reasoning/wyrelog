@@ -3,6 +3,7 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <duckdb.h>
+#include <string.h>
 
 #include "wyrelog/audit/conn-private.h"
 
@@ -1226,6 +1227,207 @@ check_service_exchange_sink_uuid_lifecycle (void)
   return 0;
 }
 
+/* #1453: the DuckDB 2.0 transaction contract the audit and fact stores rely
+ * on.  Every error inside an explicit transaction aborts it; a COMMIT of an
+ * aborted transaction reports success and keeps nothing; a COMMIT that fails
+ * when it commits leaves no transaction behind.  A DuckDB upgrade or a
+ * configuration change that alters any of this fails here first. */
+static gboolean
+abort_query_ok (duckdb_connection h, const gchar *sql)
+{
+  duckdb_result result;
+  gboolean ok = duckdb_query (h, sql, &result) == DuckDBSuccess;
+  duckdb_destroy_result (&result);
+  return ok;
+}
+
+static gboolean
+abort_query_fails_with (duckdb_connection h, const gchar *sql,
+    const gchar *message)
+{
+  duckdb_result result;
+  gboolean failed = duckdb_query (h, sql, &result) != DuckDBSuccess
+      && strstr (duckdb_result_error (&result), message) != NULL;
+  duckdb_destroy_result (&result);
+  return failed;
+}
+
+static gboolean
+abort_is_aborted (duckdb_connection h)
+{
+  return abort_query_fails_with (h, "SELECT 1;",
+             "Current transaction is aborted");
+}
+
+static gint64
+abort_count (duckdb_connection h, const gchar *sql)
+{
+  duckdb_result result;
+  gint64 count = -1;
+  if (duckdb_query (h, sql, &result) == DuckDBSuccess)
+    count = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return count;
+}
+
+static gint
+check_duckdb_transaction_abort_contract (void)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-audit-abort-XXXXXX", NULL);
+  if (tmpdir == NULL)
+    return 1453;
+  g_autofree gchar *path = g_build_filename (tmpdir, "audit.db", NULL);
+  g_autofree gchar *wal = g_strconcat (path, ".wal", NULL);
+  gint rc = 0;
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK) {
+    g_rmdir (tmpdir);
+    return 1454;
+  }
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  duckdb_result result;
+
+  /* The contract holds only under the default invalidation policy, which
+   * wyrelog's configuration leaves in place. */
+  if (duckdb_query (h, "SELECT value FROM duckdb_settings() WHERE name = "
+      "'default_transaction_invalidation_policy';", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    rc = 1455;
+    goto out;
+  }
+  gchar *policy = duckdb_value_varchar (&result, 0, 0);
+  gboolean default_policy = g_strcmp0 (policy,
+          "ALL_ERRORS_INVALIDATE_TRANSACTION") == 0;
+  duckdb_free (policy);
+  duckdb_destroy_result (&result);
+  if (!default_policy) {
+    rc = 1456;
+    goto out;
+  }
+  if (!abort_query_ok (h, "CREATE TABLE abort_t (k INTEGER PRIMARY KEY, "
+      "v INTEGER); INSERT INTO abort_t VALUES (1, 1);")) {
+    rc = 1457;
+    goto out;
+  }
+
+  /* A failed prepare aborts the transaction. */
+  duckdb_prepared_statement stmt = NULL;
+  if (!abort_query_ok (h, "BEGIN TRANSACTION;")
+      || duckdb_prepare (h, "SELECT * FROM abort_missing;", &stmt)
+      == DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    rc = 1458;
+    goto out;
+  }
+  duckdb_destroy_prepare (&stmt);
+  if (!abort_is_aborted (h) || !abort_query_ok (h, "ROLLBACK;")) {
+    rc = 1459;
+    goto out;
+  }
+
+  /* So does a failed prepared execution; a COMMIT of the aborted
+   * transaction then reports success and keeps none of its writes. */
+  if (!abort_query_ok (h, "BEGIN TRANSACTION;")
+      || !abort_query_ok (h, "INSERT INTO abort_t VALUES (2, 2);")
+      || duckdb_prepare (h, "INSERT INTO abort_t VALUES (1, 9);", &stmt)
+      != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    rc = 1460;
+    goto out;
+  }
+  gboolean executed = duckdb_execute_prepared (stmt, &result) == DuckDBSuccess;
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  if (executed || !abort_is_aborted (h) || !abort_query_ok (h, "COMMIT;")
+      || abort_count (h, "SELECT count(*) FROM abort_t WHERE k = 2;") != 0) {
+    rc = 1461;
+    goto out;
+  }
+
+  /* So does a statement that raises; ROLLBACK then leaves the connection
+   * usable for the next transaction. */
+  if (!abort_query_ok (h, "BEGIN TRANSACTION;")
+      || abort_query_ok (h, "SELECT error('abort');") || !abort_is_aborted (h)
+      || !abort_query_ok (h, "ROLLBACK;")
+      || !abort_query_ok (h, "BEGIN TRANSACTION;")
+      || !abort_query_ok (h, "ROLLBACK;")) {
+    rc = 1462;
+    goto out;
+  }
+
+  /* So does an appender whose flush violates a key. */
+  duckdb_appender appender = NULL;
+  if (!abort_query_ok (h, "BEGIN TRANSACTION;")
+      || duckdb_appender_create (h, NULL, "abort_t", &appender)
+      != DuckDBSuccess || duckdb_append_int32 (appender, 1) != DuckDBSuccess
+      || duckdb_append_int32 (appender, 5) != DuckDBSuccess
+      || duckdb_appender_end_row (appender) != DuckDBSuccess) {
+    duckdb_appender_destroy (&appender);
+    rc = 1463;
+    goto out;
+  }
+  gboolean flushed = duckdb_appender_flush (appender) == DuckDBSuccess;
+  duckdb_appender_destroy (&appender);
+  if (flushed || !abort_is_aborted (h) || !abort_query_ok (h, "ROLLBACK;")) {
+    rc = 1464;
+    goto out;
+  }
+out:
+  g_clear_pointer (&conn, wyl_audit_conn_close);
+  g_unlink (wal);
+  g_unlink (path);
+  g_rmdir (tmpdir);
+  return rc;
+}
+
+/* A COMMIT that fails when it commits leaves no transaction: the ROLLBACK a
+ * caller issues next fails, and the connection is usable again. */
+static gint
+check_duckdb_failed_commit_ends_transaction (void)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-audit-commit-XXXXXX", NULL);
+  if (tmpdir == NULL)
+    return 1470;
+  g_autofree gchar *path = g_build_filename (tmpdir, "conflict.db", NULL);
+  g_autofree gchar *wal = g_strconcat (path, ".wal", NULL);
+  duckdb_database db = NULL;
+  duckdb_connection first = NULL, second = NULL;
+  gint rc = 0;
+  if (duckdb_open (path, &db) != DuckDBSuccess
+      || duckdb_connect (db, &first) != DuckDBSuccess
+      || duckdb_connect (db, &second) != DuckDBSuccess) {
+    rc = 1471;
+    goto out;
+  }
+  if (!abort_query_ok (first, "CREATE TABLE commit_t (k INTEGER PRIMARY KEY);")
+      || !abort_query_ok (first, "BEGIN TRANSACTION;")
+      || !abort_query_ok (second, "BEGIN TRANSACTION;")
+      || !abort_query_ok (first, "INSERT INTO commit_t VALUES (7);")
+      || !abort_query_ok (second, "INSERT INTO commit_t VALUES (7);")
+      || !abort_query_ok (first, "COMMIT;")) {
+    rc = 1472;
+    goto out;
+  }
+  if (!abort_query_fails_with (second, "COMMIT;", "Failed to commit")
+      || !abort_query_fails_with (second, "ROLLBACK;",
+      "no transaction is active") || !abort_query_ok (second, "SELECT 1;")
+      || abort_count (second, "SELECT count(*) FROM commit_t;") != 1) {
+    rc = 1473;
+    goto out;
+  }
+out:
+  if (second != NULL)
+    duckdb_disconnect (&second);
+  if (first != NULL)
+    duckdb_disconnect (&first);
+  if (db != NULL)
+    duckdb_close (&db);
+  g_unlink (wal);
+  g_unlink (path);
+  g_rmdir (tmpdir);
+  return rc;
+}
+
 int
 main (void)
 {
@@ -1282,6 +1484,10 @@ main (void)
   if ((rc = check_service_exchange_projection_schema_is_exact ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_service_exchange_metadata_transaction_readback ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_duckdb_transaction_abort_contract ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_duckdb_failed_commit_ends_transaction ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);
 }
