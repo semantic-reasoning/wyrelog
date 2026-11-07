@@ -25,7 +25,7 @@ struct wyl_audit_conn_t
 {
   duckdb_database db;
   duckdb_connection conn;
-  GMutex lock;
+  GRecMutex lock;
   GHashTable *chain_tail_cache;
   gboolean fail_insert_once;
   gboolean persistent;
@@ -234,6 +234,15 @@ wyl_audit_conn_service_exchange_reset_entry_count_for_test (wyl_audit_conn_t
     g_atomic_int_set (&conn->service_exchange_entry_count, 0);
 }
 
+gboolean
+wyl_audit_conn_try_lock_for_test (wyl_audit_conn_t *conn)
+{
+  if (conn == NULL || !g_rec_mutex_trylock (&conn->lock))
+    return FALSE;
+  g_rec_mutex_unlock (&conn->lock);
+  return TRUE;
+}
+
 void wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
   (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data), gpointer data)
 {
@@ -261,9 +270,9 @@ wyl_audit_conn_service_exchange_fail_once (wyl_audit_conn_t *conn,
 {
   if (conn == NULL)
     return;
-  g_mutex_lock (&conn->lock);
+  g_rec_mutex_lock (&conn->lock);
   conn->service_exchange_fail_stage = stage;
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
 }
 
 guint
@@ -271,9 +280,9 @@ wyl_audit_conn_service_exchange_get_rollback_count_for_test
   (wyl_audit_conn_t * conn) {
   if (conn == NULL)
     return 0;
-  g_mutex_lock (&conn->lock);
+  g_rec_mutex_lock (&conn->lock);
   guint count = conn->service_exchange_rollback_count;
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
   return count;
 }
 
@@ -364,7 +373,7 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
     g_free (self);
     return WYRELOG_E_INTERNAL;
   }
-  g_mutex_init (&self->lock);
+  g_rec_mutex_init (&self->lock);
   g_mutex_init (&self->service_exchange_checkpoint_lock);
   self->chain_tail_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
           g_free, (GDestroyNotify) audit_chain_tail_free);
@@ -386,7 +395,7 @@ wyl_audit_conn_close (wyl_audit_conn_t *conn)
    * already free'd the wrapper at that point. */
   duckdb_disconnect (&conn->conn);
   duckdb_close (&conn->db);
-  g_mutex_clear (&conn->lock);
+  g_rec_mutex_clear (&conn->lock);
   g_mutex_clear (&conn->service_exchange_checkpoint_lock);
   g_clear_pointer (&conn->chain_tail_cache, g_hash_table_destroy);
   g_free (conn);
@@ -408,9 +417,9 @@ wyl_audit_conn_fail_insert_once (wyl_audit_conn_t *conn)
 {
   if (conn == NULL)
     return;
-  g_mutex_lock (&conn->lock);
+  g_rec_mutex_lock (&conn->lock);
   conn->fail_insert_once = TRUE;
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
 }
 
 static wyrelog_error_t
@@ -557,8 +566,8 @@ ensure_column (wyl_audit_conn_t *conn, const gchar *table_name,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
+static wyrelog_error_t
+audit_conn_create_schema_unlocked (wyl_audit_conn_t *conn)
 {
   static const gchar *ddl =
       "CREATE TABLE IF NOT EXISTS audit_events ("
@@ -705,6 +714,17 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
+{
+  if (conn == NULL)
+    return audit_conn_create_schema_unlocked (conn);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_create_schema_unlocked (conn);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
+}
+
 static gchar *
 compute_audit_record_hash (const gchar *stream_name, gint64 sequence_no,
     const gchar *previous_hash, const gchar *id, gint64 created_at_us,
@@ -801,14 +821,56 @@ evict_chain_tail_cache (wyl_audit_conn_t *conn, const gchar *stream_name)
   g_hash_table_remove (conn->chain_tail_cache, stream_name);
 }
 
+static gboolean
+audit_conn_run (wyl_audit_conn_t *conn, const gchar *sql)
+{
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+  gboolean ok = duckdb_query (conn->conn, sql, &result) == DuckDBSuccess;
+  duckdb_destroy_result (&result);
+  return ok;
+}
+
+wyrelog_error_t
+wyl_audit_conn_transaction_begin (wyl_audit_conn_t *conn)
+{
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&conn->lock);
+  if (!audit_conn_run (conn, "BEGIN TRANSACTION;")) {
+    g_rec_mutex_unlock (&conn->lock);
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
 void
-wyl_audit_conn_discard_chain_tail_cache (wyl_audit_conn_t *conn)
+wyl_audit_conn_transaction_rollback (wyl_audit_conn_t *conn)
 {
   if (conn == NULL)
     return;
-  g_mutex_lock (&conn->lock);
+  /* The ROLLBACK runs even after a failed COMMIT: a COMMIT that failed when
+   * committing has already ended the transaction, and this ROLLBACK then
+   * fails harmlessly, but one refused before committing leaves the
+   * transaction open and aborted.  The inserts made in the transaction
+   * moved the chain tail cache forward to rows the ROLLBACK discards, so
+   * the cache goes with them, before any other thread can insert. */
+  (void) audit_conn_run (conn, "ROLLBACK;");
   g_hash_table_remove_all (conn->chain_tail_cache);
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
+}
+
+wyrelog_error_t
+wyl_audit_conn_transaction_commit (wyl_audit_conn_t *conn)
+{
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+  if (!audit_conn_run (conn, "COMMIT;")) {
+    wyl_audit_conn_transaction_rollback (conn);
+    return WYRELOG_E_IO;
+  }
+  g_rec_mutex_unlock (&conn->lock);
+  return WYRELOG_E_OK;
 }
 
 static void
@@ -1225,11 +1287,25 @@ ensure_service_exchange_schema (wyl_audit_conn_t *conn,
   return metadata_rc;
 }
 
+static wyrelog_error_t
+audit_conn_table_exists_unlocked (wyl_audit_conn_t *conn,
+    const gchar *table_name,
+    gboolean *out_exists)
+{
+  return table_exists_unlocked (conn, table_name, out_exists);
+}
+
 wyrelog_error_t
 wyl_audit_conn_table_exists (wyl_audit_conn_t *conn, const gchar *table_name,
     gboolean *out_exists)
 {
-  return table_exists_unlocked (conn, table_name, out_exists);
+  if (conn == NULL)
+    return audit_conn_table_exists_unlocked (conn, table_name, out_exists);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_table_exists_unlocked (conn, table_name,
+          out_exists);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -1360,11 +1436,11 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
   if (conn == NULL)
     return WYRELOG_E_INVALID;
 
-  g_mutex_lock (&conn->lock);
+  g_rec_mutex_lock (&conn->lock);
   wyrelog_error_t rc = insert_event_full_unlocked (conn, id, created_at_us,
           subject_id, action, resource_id, deny_reason, deny_origin, request_id,
           decision, out_inserted);
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
   return rc;
 }
 
@@ -1475,14 +1551,14 @@ wyl_audit_conn_service_exchange_get_sink_identity (wyl_audit_conn_t *conn,
     memset (out_sink_uuid, 0, WYL_SERVICE_EXCHANGE_UUID_BUF);
   if (conn == NULL || out_logical_name == NULL || out_sink_uuid == NULL)
     return WYRELOG_E_INVALID;
-  g_mutex_lock (&conn->lock);
+  g_rec_mutex_lock (&conn->lock);
   wyrelog_error_t rc = ensure_service_exchange_schema (conn, FALSE);
   if (rc == WYRELOG_E_OK)
     rc = load_sink_uuid_unlocked (conn, out_sink_uuid);
   if (rc == WYRELOG_E_OK)
     memcpy (out_logical_name, WYL_AUDIT_SERVICE_EXCHANGE_STREAM,
         sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
   return rc;
 }
 
@@ -1769,7 +1845,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
   if (entry_checkpoint != NULL)
     entry_checkpoint (checkpoint_data);
 
-  g_mutex_lock (&conn->lock);
+  g_rec_mutex_lock (&conn->lock);
   wyrelog_error_t rc = ensure_service_exchange_schema (conn, FALSE);
   gchar sink_uuid[WYL_ID_STRING_BUF] = { 0 };
   if (rc == WYRELOG_E_OK)
@@ -1944,12 +2020,12 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
   duckdb_destroy_result (&side);
   duckdb_destroy_result (&anchor);
   duckdb_destroy_result (&checkpoint);
-  g_mutex_unlock (&conn->lock);
+  g_rec_mutex_unlock (&conn->lock);
   return rc;
 }
 
-wyrelog_error_t
-wyl_audit_conn_delete_event (wyl_audit_conn_t *conn, const gchar *id)
+static wyrelog_error_t
+audit_conn_delete_event_unlocked (wyl_audit_conn_t *conn, const gchar *id)
 {
   wyl_id_t parsed_id;
 
@@ -1962,7 +2038,18 @@ wyl_audit_conn_delete_event (wyl_audit_conn_t *conn, const gchar *id)
 }
 
 wyrelog_error_t
-wyl_audit_conn_create_user_stream (wyl_audit_conn_t *conn,
+wyl_audit_conn_delete_event (wyl_audit_conn_t *conn, const gchar *id)
+{
+  if (conn == NULL)
+    return audit_conn_delete_event_unlocked (conn, id);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_delete_event_unlocked (conn, id);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
+}
+
+static wyrelog_error_t
+audit_conn_create_user_stream_unlocked (wyl_audit_conn_t *conn,
     const gchar *stream_name)
 {
   duckdb_prepared_statement stmt = NULL;
@@ -1992,7 +2079,20 @@ wyl_audit_conn_create_user_stream (wyl_audit_conn_t *conn,
 }
 
 wyrelog_error_t
-wyl_audit_conn_drop_user_stream (wyl_audit_conn_t *conn,
+wyl_audit_conn_create_user_stream (wyl_audit_conn_t *conn,
+    const gchar *stream_name)
+{
+  if (conn == NULL)
+    return audit_conn_create_user_stream_unlocked (conn, stream_name);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_create_user_stream_unlocked (conn,
+          stream_name);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
+}
+
+static wyrelog_error_t
+audit_conn_drop_user_stream_unlocked (wyl_audit_conn_t *conn,
     const gchar *stream_name)
 {
   duckdb_prepared_statement stmt = NULL;
@@ -2020,7 +2120,19 @@ wyl_audit_conn_drop_user_stream (wyl_audit_conn_t *conn,
 }
 
 wyrelog_error_t
-wyl_audit_conn_rename_user_stream (wyl_audit_conn_t *conn,
+wyl_audit_conn_drop_user_stream (wyl_audit_conn_t *conn,
+    const gchar *stream_name)
+{
+  if (conn == NULL)
+    return audit_conn_drop_user_stream_unlocked (conn, stream_name);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_drop_user_stream_unlocked (conn, stream_name);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
+}
+
+static wyrelog_error_t
+audit_conn_rename_user_stream_unlocked (wyl_audit_conn_t *conn,
     const gchar *old_name, const gchar *new_name)
 {
   duckdb_prepared_statement stmt = NULL;
@@ -2053,6 +2165,19 @@ wyl_audit_conn_rename_user_stream (wyl_audit_conn_t *conn,
 }
 
 wyrelog_error_t
+wyl_audit_conn_rename_user_stream (wyl_audit_conn_t *conn,
+    const gchar *old_name, const gchar *new_name)
+{
+  if (conn == NULL)
+    return audit_conn_rename_user_stream_unlocked (conn, old_name, new_name);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_rename_user_stream_unlocked (conn,
+          old_name, new_name);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_audit_conn_append_tombstone (wyl_audit_conn_t *conn,
     const gchar *subject_id, const gchar *request_id, gboolean *out_inserted)
 {
@@ -2081,8 +2206,8 @@ dup_result_varchar (duckdb_result *result, idx_t col, idx_t row)
   return copy;
 }
 
-wyrelog_error_t
-wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
+static wyrelog_error_t
+audit_conn_verify_chain_unlocked (wyl_audit_conn_t *conn, gchar **out_error)
 {
   duckdb_result result = { 0 };
 
@@ -2207,6 +2332,17 @@ wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
   }
   duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
+{
+  if (conn == NULL)
+    return audit_conn_verify_chain_unlocked (conn, out_error);
+  g_rec_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = audit_conn_verify_chain_unlocked (conn, out_error);
+  g_rec_mutex_unlock (&conn->lock);
+  return rc;
 }
 
 static void
@@ -2442,8 +2578,13 @@ wyl_audit_conn_query_events_json_redacted (wyl_audit_conn_t *conn,
             column);
   }
 
+  /* The statement runs under the connection's lock; its result is
+   * materialised, so the rows, and the redactor, which reads session state,
+   * are taken after the lock is released. */
+  g_rec_mutex_lock (&conn->lock);
   if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
+    g_rec_mutex_unlock (&conn->lock);
     return WYRELOG_E_IO;
   }
 
@@ -2455,12 +2596,14 @@ wyl_audit_conn_query_events_json_redacted (wyl_audit_conn_t *conn,
       bind_rc = duckdb_bind_varchar (stmt, 1, string_value);
     if (bind_rc != DuckDBSuccess) {
       duckdb_destroy_prepare (&stmt);
+      g_rec_mutex_unlock (&conn->lock);
       return WYRELOG_E_IO;
     }
   }
 
   rc = duckdb_execute_prepared (stmt, &result);
   duckdb_destroy_prepare (&stmt);
+  g_rec_mutex_unlock (&conn->lock);
   if (rc != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;

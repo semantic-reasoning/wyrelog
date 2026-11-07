@@ -262,6 +262,10 @@ void wyl_handle_set_engine_snapshot_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
+/* Runs once inside the policy-store audit replay's transaction, before its
+ * first insert. */
+void wyl_handle_set_audit_replay_transaction_checkpoint_for_test
+  (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 void wyl_handle_set_committed_publication_checkpoint_for_test
   (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
 gboolean wyl_handle_engine_session_locked_for_test (WylHandle * self);

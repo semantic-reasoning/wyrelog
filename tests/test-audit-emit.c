@@ -7,6 +7,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/audit/conn-private.h"
+#include "wyrelog/audit/event-private.h"
 #include "wyrelog/auth/service-credential-domain-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -70,6 +71,154 @@ run_audit_replay (gpointer data)
   AuditReplayRace *race = data;
   race->rc = wyl_handle_load_policy_store_audit_events (race->handle);
   return NULL;
+}
+
+static gboolean runtime_count_audit_rows (WylHandle * handle,
+    const gchar * id, gint64 * out_count);
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  wyl_audit_conn_t *audit;
+  GThread *writer;
+  gboolean held_elsewhere;
+  gboolean read_done;
+  gboolean read_inside;
+  gboolean written;
+  wyrelog_error_t read_rc;
+  wyrelog_error_t writer_rc;
+} AuditReplayWriter;
+
+static gpointer
+probe_audit_conn_lock (gpointer data)
+{
+  AuditReplayWriter *w = data;
+  w->held_elsewhere = !wyl_audit_conn_try_lock_for_test (w->audit);
+  return NULL;
+}
+
+/* Another thread first reads the audit connection, then mirrors an event
+ * through it, as the session and permission paths do. */
+static gpointer
+run_concurrent_audit_writer (gpointer data)
+{
+  AuditReplayWriter *w = data;
+  wyrelog_error_t rc = wyl_audit_conn_verify_chain (w->audit, NULL);
+  g_mutex_lock (&w->mutex);
+  w->read_rc = rc;
+  w->read_done = TRUE;
+  g_cond_broadcast (&w->changed);
+  g_mutex_unlock (&w->mutex);
+  g_autoptr (WylAuditEvent) event = NULL;
+  rc = wyl_audit_event_new_from_fields
+        ("01890c10-2e3f-7000-8000-000000001461", 2002, "mirror-user",
+          "mirror-action", "mirror-resource", NULL, NULL, "req-mirror-1453",
+          WYL_DECISION_ALLOW, &event);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_audit_mirror_event (w->handle, event);
+  g_mutex_lock (&w->mutex);
+  w->writer_rc = rc;
+  w->written = TRUE;
+  g_cond_broadcast (&w->changed);
+  g_mutex_unlock (&w->mutex);
+  return NULL;
+}
+
+/* Runs inside the replay's open transaction.  The lock must be held, and
+ * another thread's statement must not get in before the replay ends. */
+static void
+start_concurrent_audit_writer (gpointer data)
+{
+  AuditReplayWriter *w = data;
+  g_thread_join (g_thread_new ("audit-lock-probe", probe_audit_conn_lock, w));
+  w->writer = g_thread_new ("audit-mirror", run_concurrent_audit_writer, w);
+  gint64 deadline = g_get_monotonic_time () + 300 * G_TIME_SPAN_MILLISECOND;
+  g_mutex_lock (&w->mutex);
+  while (!w->read_done
+      && g_cond_wait_until (&w->changed, &w->mutex, deadline));
+  w->read_inside = w->read_done;
+  g_mutex_unlock (&w->mutex);
+}
+
+/* #1453: the replay's transaction is the audit connection's alone.  A
+ * statement another thread ran inside it would be committed or rolled back
+ * with it, and one that failed would abort it unseen.  The replay is run to
+ * its commit, and into a rollback by a corrupt policy-store row met after
+ * its first insert; either way the other thread's mirrored event must land
+ * after the replay, durably, on an intact chain. */
+static gint
+audit_replay_hold_case (gboolean rollback, gint base)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return base;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_append_audit_event_full (store,
+      "01890c10-2e3f-7000-8000-000000001460", 1001, "replay-user",
+      "replay-action", "replay-resource", NULL, NULL, "req-hold-1453",
+      WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK || !inserted)
+    return base + 1;
+  if (rollback && sqlite3_exec (wyl_policy_store_get_db (store),
+      "INSERT INTO audit_events (id, created_at_us, subject_id, action, "
+      "resource_id, decision) VALUES ('corrupt-hold-1453', 1002, "
+      "'replay-user', 'replay-action', 'replay-resource', 1);", NULL, NULL,
+      NULL) != SQLITE_OK)
+    return base + 1;
+  AuditReplayWriter w = {
+    .handle = handle,
+    .audit = wyl_handle_get_audit_conn (handle),
+    .read_rc = WYRELOG_E_INTERNAL,
+    .writer_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&w.mutex);
+  g_cond_init (&w.changed);
+  wyl_handle_set_audit_replay_transaction_checkpoint_for_test (handle,
+      start_concurrent_audit_writer, &w);
+  wyrelog_error_t replay_rc = wyl_handle_load_policy_store_audit_events
+        (handle);
+  if (w.writer != NULL)
+    g_thread_join (w.writer);
+  wyl_handle_set_audit_replay_transaction_checkpoint_for_test (handle, NULL,
+      NULL);
+  g_autofree gchar *chain_error = NULL;
+  gint64 count = -1;
+  gint64 replayed = -1;
+  gint rc = 0;
+  if (replay_rc != (rollback ? WYRELOG_E_POLICY : WYRELOG_E_OK)
+      || w.writer == NULL)
+    rc = base + 2;
+  else if (!w.held_elsewhere)
+    rc = base + 6;
+  else if (w.read_inside)
+    rc = base + 3;
+  else if (w.read_rc != WYRELOG_E_OK || w.writer_rc != WYRELOG_E_OK
+      || !runtime_count_audit_rows (handle,
+      "01890c10-2e3f-7000-8000-000000001461", &count) || count != 1)
+    rc = base + 4;
+  else if (!runtime_count_audit_rows (handle,
+      "01890c10-2e3f-7000-8000-000000001460", &replayed)
+      || replayed != (rollback ? 0 : 1))
+    rc = base + 7;
+  else if (wyl_audit_conn_verify_chain (w.audit, &chain_error)
+      != WYRELOG_E_OK)
+    rc = base + 5;
+  if (rc != 0)
+    g_printerr ("audit replay hold check (%s) failed at %d (%s)\n",
+        rollback ? "rollback" : "commit", rc,
+        chain_error != NULL ? chain_error : "-");
+  g_cond_clear (&w.changed);
+  g_mutex_clear (&w.mutex);
+  return rc;
+}
+
+static gint
+check_audit_replay_holds_audit_connection (void)
+{
+  gint rc = audit_replay_hold_case (FALSE, 820);
+  return rc != 0 ? rc : audit_replay_hold_case (TRUE, 830);
 }
 
 static gint
@@ -4179,6 +4328,8 @@ main (void)
   gint rc;
 #ifdef WYL_TEST_HANDLE_SEAMS
   if ((rc = check_audit_replay_uses_engine_session ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_audit_replay_holds_audit_connection ()) != 0)
     return wyl_test_normalize_exit_status (rc);
 #endif
   if ((rc = check_service_lifecycle_audit_reconciliation ()) != 0)

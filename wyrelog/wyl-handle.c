@@ -99,6 +99,8 @@ struct _WylHandle
   gpointer engine_snapshot_checkpoint_data;
   void (*audit_replay_checkpoint) (gpointer data);
   gpointer audit_replay_checkpoint_data;
+  void (*audit_replay_transaction_checkpoint) (gpointer data);
+  gpointer audit_replay_transaction_checkpoint_data;
   void (*committed_publication_checkpoint) (gpointer data);
   gpointer committed_publication_checkpoint_data;
   WylEnginePartialFault engine_partial_fault_once;
@@ -1048,6 +1050,15 @@ wyl_handle_set_audit_replay_checkpoint_for_test (WylHandle *self,
   g_return_if_fail (WYL_IS_HANDLE (self));
   self->audit_replay_checkpoint = checkpoint;
   self->audit_replay_checkpoint_data = data;
+}
+
+void
+wyl_handle_set_audit_replay_transaction_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->audit_replay_transaction_checkpoint = checkpoint;
+  self->audit_replay_transaction_checkpoint_data = data;
 }
 
 void
@@ -2442,22 +2453,6 @@ reconcile_policy_store_audit_intentions (WylHandle *self,
              "failed", reconcile_policy_store_audit_intention, &ctx);
 }
 
-/* Ends a failed replay transaction.  Its inserts moved the audit
- * connection's chain tail cache forward to rows the rollback discards, so
- * the cache is dropped with them (#1453).  The ROLLBACK runs even after a
- * failed COMMIT: a COMMIT that failed when committing has already ended the
- * transaction, and this ROLLBACK then fails harmlessly, but one refused
- * before committing leaves the transaction open and aborted. */
-static void
-rollback_policy_store_audit_replay (WylHandle *self, duckdb_connection conn)
-{
-  duckdb_result result;
-  memset (&result, 0, sizeof (result));
-  (void) duckdb_query (conn, "ROLLBACK;", &result);
-  duckdb_destroy_result (&result);
-  wyl_audit_conn_discard_chain_tail_cache (self->audit_conn);
-}
-
 wyrelog_error_t
 wyl_handle_load_policy_store_audit_events (WylHandle *self)
 {
@@ -2485,37 +2480,42 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  duckdb_connection conn = wyl_audit_conn_get_connection (self->audit_conn);
-  duckdb_result result;
-  memset (&result, 0, sizeof (result));
   g_autoptr (GPtrArray) committed_ids = g_ptr_array_new_with_free_func (g_free);
 
-  if (duckdb_query (conn, "BEGIN TRANSACTION;", &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
+  /* The replay holds the audit connection for its whole transaction
+   * (#1453): another thread's statement run inside it would be committed
+   * or rolled back with it, and one that failed would abort it unseen, so
+   * that the COMMIT reported success and kept nothing. */
+  rc = wyl_audit_conn_transaction_begin (self->audit_conn);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (self->audit_replay_transaction_checkpoint != NULL) {
+    void (*checkpoint) (gpointer data) =
+        self->audit_replay_transaction_checkpoint;
+    gpointer data = self->audit_replay_transaction_checkpoint_data;
+    self->audit_replay_transaction_checkpoint = NULL;
+    self->audit_replay_transaction_checkpoint_data = NULL;
+    checkpoint (data);
   }
-  duckdb_destroy_result (&result);
+#endif
 
   rc = reconcile_policy_store_audit_intentions (self, committed_ids);
   if (rc != WYRELOG_E_OK) {
-    rollback_policy_store_audit_replay (self, conn);
+    wyl_audit_conn_transaction_rollback (self->audit_conn);
     return rc;
   }
 
   rc = wyl_policy_store_foreach_audit_event (self->policy_store,
           insert_policy_store_audit_event, self);
   if (rc != WYRELOG_E_OK) {
-    rollback_policy_store_audit_replay (self, conn);
+    wyl_audit_conn_transaction_rollback (self->audit_conn);
     return rc;
   }
 
-  memset (&result, 0, sizeof (result));
-  if (duckdb_query (conn, "COMMIT;", &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    rollback_policy_store_audit_replay (self, conn);
-    return WYRELOG_E_IO;
-  }
-  duckdb_destroy_result (&result);
+  rc = wyl_audit_conn_transaction_commit (self->audit_conn);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   for (guint i = 0; i < committed_ids->len; i++) {
     const gchar *id = g_ptr_array_index (committed_ids, i);
     rc = wyl_policy_store_mark_audit_intention_committed (self->policy_store,
