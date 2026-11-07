@@ -161,6 +161,52 @@ feature-enabled repository suite before merging. `tools/check-format.sh
 --ledger` is a separate required check. Host-specific logs belong in the PR;
 these commands and assertions are the durable reproducible evidence.
 
+## Internal rule-pack compiler capability (#1504)
+
+`wyl_fact_rule_pack_compile_with_mode()` accepts an explicit private language
+mode. `WYL_FACT_RULE_PACK_POSITIVE_RECURSION` permits direct, mutual and
+nonlinear positive recursion with stratified negation. The existing
+`compile()` and `compile_canonical()` entry points select
+`WYL_FACT_RULE_PACK_ACYCLIC`: production registration and replay still reject
+recursive packs. This option is neither authorization nor a storage format
+marker. #1505 owns reader/storage compatibility and #1506 owns activation.
+
+The grammar remains finite-domain: variables, existing scalar constants and
+opaque compound references range over input values and rule constants. There
+are no arithmetic expressions, aggregates, constructors or value-generating
+extensions. Each positive recursive component denotes its least fixed point
+with set semantics. A positive self-cycle without input has an empty model.
+Durable rows enter the renderer's separate `_input` relations and are unioned
+with derived rows in customer heads; duplicate support does not duplicate
+query tuples. Derived rows remain query results, not durable fact batches.
+
+Dependency nodes are the resolved schema identities used by rendering, so
+qualified and unqualified aliases cannot conceal cycles. SCC connectivity
+uses both positive and negative edges. A negative edge within an SCC is
+rejected; a negative edge to an independent lower stratum is accepted. For
+example, recursive `reachable` may feed
+`visible(X,Y):-reachable(X,Y),!blocked(X,Y).` when `blocked` is independent.
+All existing relation, arity, type, variable safety, string and size checks run
+before dependency analysis. Acyclic canonical text and digest inputs remain
+byte-identical in both modes.
+
+The opted path reports `rule_pack_negative_cycle`. `rule_index` and
+`atom_index` select the first internal negative edge in source order;
+`cycle_rules` lists the ascending unique rules having internal edges in that
+edge's SCC. It excludes seed-only rules and unrelated components. The first
+listed rule can precede `rule_index`. Owned head/body namespace and relation
+fields identify the resolved endpoints separately, even when names contain
+dots. Legacy callers retain the original `rule_pack_cycle` diagnostics.
+
+`fact-rule-pack` asserts literal rendered/canonical text, negative-cycle
+diagnostics under schema permutation, and exact engine results with one
+worker. Its real parser witness confirms recursive strata in the complete
+rendered program, exercising the revised compile backstop. The unreachable
+legacy recursive-stratum invariant failure is not artificially injected.
+`fact-replay` additionally verifies that rejected recursive replacements leave
+the stored pack version, digest and rules unchanged; normal replay still
+refuses stored recursive packs. No test-only raw compiler bypass is added.
+
 ## Resource-control inventory and downstream work
 
 The pin already contains memory admission/governor machinery and internal

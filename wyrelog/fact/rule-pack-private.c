@@ -111,6 +111,7 @@ static const gchar *const reject_names[] = {
   [WYL_FACT_RULE_PACK_REJECT_CYCLE] = "rule_pack_cycle",
   [WYL_FACT_RULE_PACK_REJECT_COMPILE] = "rule_pack_compile",
   [WYL_FACT_RULE_PACK_REJECT_EMPTY] = "rule_pack_empty",
+  [WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE] = "rule_pack_negative_cycle",
 };
 
 const gchar *
@@ -127,6 +128,10 @@ wyl_fact_rule_pack_rejection_clear (wyl_fact_rule_pack_rejection_t *rejection)
   if (rejection == NULL)
     return;
   g_free (rejection->cycle_rules);
+  g_free (rejection->cycle_head_namespace);
+  g_free (rejection->cycle_head_relation);
+  g_free (rejection->cycle_body_namespace);
+  g_free (rejection->cycle_body_relation);
   *rejection = (wyl_fact_rule_pack_rejection_t) {
     0
   };
@@ -520,7 +525,7 @@ check_rule (PackRule *rule, const wyl_fact_graph_program_relation_t *rels,
   return TRUE;
 }
 
-/* ---- acyclicity ------------------------------------------------------- */
+/* ---- signed dependencies --------------------------------------------- */
 
 typedef struct
 {
@@ -571,8 +576,10 @@ tarjan_visit (Tarjan *t, gsize v)
  * the body relation is the head itself, or each reaches the other through
  * the pack.  The recursion depth is bounded by the number of distinct heads,
  * which is at most WYL_FACT_RULE_PACK_MAX_RULES. */
-static GArray *
-find_cycle_rules (GPtrArray *rules, gsize n_rels)
+static gboolean
+check_dependencies (GPtrArray *rules,
+    const wyl_fact_graph_program_relation_t *rels, gsize n_rels,
+    wyl_fact_rule_pack_mode_t mode, wyl_fact_rule_pack_rejection_t *rejection)
 {
   Tarjan t = {
     .rules = rules,
@@ -590,10 +597,38 @@ find_cycle_rules (GPtrArray *rules, gsize n_rels)
       tarjan_visit (&t, rule->head.relation);
   }
 
-  GArray *cyclic = g_array_new (FALSE, FALSE, sizeof (guint));
+  /* Connectivity includes both signs. A negative edge inside an SCC is
+   * exactly an unstratifiable cycle. Pick it in source order, never Tarjan
+   * traversal order, so schema enumeration cannot alter diagnostics. */
+  gint negative_component = -1;
+  if (mode == WYL_FACT_RULE_PACK_POSITIVE_RECURSION) {
+    for (guint r = 0; r < rules->len && negative_component < 0; r++) {
+      PackRule *rule = g_ptr_array_index (rules, r);
+      for (guint b = 0; b < rule->body->len; b++) {
+        RuleAtom *body = g_ptr_array_index (rule->body, b);
+        if (!body->negated
+            || t.component[body->relation] != t.component[rule->head.relation])
+          continue;
+        negative_component = t.component[rule->head.relation];
+        rejection->reason = WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE;
+        rejection->rule_index = r + 1;
+        rejection->atom_index = b + 1;
+        rejection->cycle_head_namespace = g_strdup (rels[rule->head.relation].namespace_id);
+        rejection->cycle_head_relation = g_strdup (rels[rule->head.relation].relation_name);
+        rejection->cycle_body_namespace = g_strdup (rels[body->relation].namespace_id);
+        rejection->cycle_body_relation = g_strdup (rels[body->relation].relation_name);
+        break;
+      }
+    }
+  }
+
+  g_autoptr (GArray) cyclic = g_array_new (FALSE, FALSE, sizeof (guint));
   for (guint r = 0; r < rules->len; r++) {
     PackRule *rule = g_ptr_array_index (rules, r);
     gsize head = rule->head.relation;
+    if (mode == WYL_FACT_RULE_PACK_POSITIVE_RECURSION
+        && (negative_component < 0 || t.component[head] != negative_component))
+      continue;
     for (guint b = 0; b < rule->body->len; b++) {
       gsize body = ((RuleAtom *) g_ptr_array_index (rule->body, b))->relation;
       if (t.index[body] >= 0 && t.component[body] == t.component[head]) {
@@ -608,7 +643,15 @@ find_cycle_rules (GPtrArray *rules, gsize n_rels)
   g_free (t.component);
   g_free (t.on_stack);
   g_array_unref (t.stack);
-  return cyclic;
+  if (cyclic->len == 0)
+    return TRUE;
+  if (mode == WYL_FACT_RULE_PACK_ACYCLIC) {
+    rejection->reason = WYL_FACT_RULE_PACK_REJECT_CYCLE;
+    rejection->rule_index = g_array_index (cyclic, guint, 0);
+  }
+  rejection->n_cycle_rules = cyclic->len;
+  rejection->cycle_rules = (guint *) g_array_free (g_steal_pointer (&cyclic), FALSE);
+  return FALSE;
 }
 
 /* ---- rendering -------------------------------------------------------- */
@@ -750,12 +793,12 @@ canonical_rules (GPtrArray *rules)
   return out;
 }
 
-/* The backstop: wirelog compiles the program a rebuild would open.  An
- * acyclic pack is always stratifiable, so a recursive stratum here means the
- * acyclicity check above is wrong, not that the pack is. */
+/* Compile the exact program a rebuild would open. The signed dependency
+ * check precedes this backstop. Recursion is an invariant failure only when
+ * the caller explicitly requested acyclic admission. */
 static wyrelog_error_t
 compile_program (const wyl_fact_graph_program_relation_t *rels, gsize n_rels,
-    const gchar *rules, gboolean *out_compiled)
+    const gchar *rules, wyl_fact_rule_pack_mode_t mode, gboolean *out_compiled)
 {
   *out_compiled = FALSE;
   g_autofree gchar *program = wyl_fact_graph_program_render (rels, n_rels,
@@ -773,7 +816,8 @@ compile_program (const wyl_fact_graph_program_relation_t *rels, gsize n_rels,
   uint32_t n_strata = wirelog_program_get_stratum_count (parsed);
   for (uint32_t s = 0; s < n_strata; s++) {
     const wirelog_stratum_t *stratum = wirelog_program_get_stratum (parsed, s);
-    if (stratum == NULL || stratum->is_recursive)
+    if (stratum == NULL
+        || (mode == WYL_FACT_RULE_PACK_ACYCLIC && stratum->is_recursive))
       rc = WYRELOG_E_INTERNAL;
   }
   wirelog_program_free (parsed);
@@ -796,6 +840,17 @@ wyl_fact_rule_pack_compile_canonical (const gchar *text, gsize text_len,
     gchar **out_rules, gchar ***out_canonical,
     wyl_fact_rule_pack_rejection_t *out_rejection)
 {
+  return wyl_fact_rule_pack_compile_with_mode (text, text_len, relations,
+             n_relations, WYL_FACT_RULE_PACK_ACYCLIC, out_rules, out_canonical,
+             out_rejection);
+}
+
+wyrelog_error_t
+wyl_fact_rule_pack_compile_with_mode (const gchar *text, gsize text_len,
+    const wyl_fact_graph_program_relation_t *relations, gsize n_relations,
+    wyl_fact_rule_pack_mode_t mode, gchar **out_rules, gchar ***out_canonical,
+    wyl_fact_rule_pack_rejection_t *out_rejection)
+{
   if (out_rules != NULL)
     *out_rules = NULL;
   if (out_canonical != NULL)
@@ -805,7 +860,9 @@ wyl_fact_rule_pack_compile_canonical (const gchar *text, gsize text_len,
       0
     };
   if (text == NULL || (relations == NULL && n_relations > 0)
-      || out_rules == NULL || out_rejection == NULL)
+      || out_rules == NULL || out_rejection == NULL
+      || (mode != WYL_FACT_RULE_PACK_ACYCLIC
+      && mode != WYL_FACT_RULE_PACK_POSITIVE_RECURSION))
     return WYRELOG_E_INVALID;
   for (gsize i = 0; i < n_relations; i++)
     if (relations[i].namespace_id == NULL
@@ -832,19 +889,12 @@ wyl_fact_rule_pack_compile_canonical (const gchar *text, gsize text_len,
     return WYRELOG_E_POLICY;
   }
 
-  g_autoptr (GArray) cyclic = find_cycle_rules (rules, n_relations);
-  if (cyclic->len > 0) {
-    out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_CYCLE;
-    out_rejection->rule_index = g_array_index (cyclic, guint, 0);
-    out_rejection->n_cycle_rules = cyclic->len;
-    out_rejection->cycle_rules =
-        (guint *) g_array_free (g_steal_pointer (&cyclic), FALSE);
+  if (!check_dependencies (rules, relations, n_relations, mode, out_rejection))
     return WYRELOG_E_POLICY;
-  }
 
   g_autofree gchar *rendered = render_rules (rules, relations);
   gboolean compiled = FALSE;
-  wyrelog_error_t rc = compile_program (relations, n_relations, rendered,
+  wyrelog_error_t rc = compile_program (relations, n_relations, rendered, mode,
           &compiled);
   if (rc != WYRELOG_E_OK)
     return rc;
