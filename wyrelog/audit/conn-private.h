@@ -194,6 +194,11 @@ wyrelog_error_t wyl_audit_conn_rename_user_stream (wyl_audit_conn_t * conn,
 wyrelog_error_t wyl_audit_conn_append_tombstone (wyl_audit_conn_t * conn,
     const gchar * subject_id, const gchar * request_id,
     gboolean * out_inserted);
+/* Forgets every cached chain tail, so the next insert reads the tail from
+ * the durable rows.  A caller that rolls back a transaction it ran inserts
+ * in must call it: those inserts advanced the cache to rows that no longer
+ * exist. */
+void wyl_audit_conn_discard_chain_tail_cache (wyl_audit_conn_t * conn);
 wyrelog_error_t wyl_audit_conn_verify_chain (wyl_audit_conn_t * conn,
     gchar ** out_error);
 

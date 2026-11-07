@@ -14,7 +14,7 @@
   },
   "raw_db_borrowers": {
     "tests/check-service-permission-closure-seed.c": 2,
-    "tests/test-audit-emit.c": 15,
+    "tests/test-audit-emit.c": 16,
     "tests/test-daemon-checks-noaudit.c": 3,
     "tests/test-daemon-checks.c": 2,
     "tests/test-daemon-http-decide.c": 10,

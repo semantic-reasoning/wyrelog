@@ -2442,6 +2442,22 @@ reconcile_policy_store_audit_intentions (WylHandle *self,
              "failed", reconcile_policy_store_audit_intention, &ctx);
 }
 
+/* Ends a failed replay transaction.  Its inserts moved the audit
+ * connection's chain tail cache forward to rows the rollback discards, so
+ * the cache is dropped with them (#1453).  The ROLLBACK runs even after a
+ * failed COMMIT: a COMMIT that failed when committing has already ended the
+ * transaction, and this ROLLBACK then fails harmlessly, but one refused
+ * before committing leaves the transaction open and aborted. */
+static void
+rollback_policy_store_audit_replay (WylHandle *self, duckdb_connection conn)
+{
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+  (void) duckdb_query (conn, "ROLLBACK;", &result);
+  duckdb_destroy_result (&result);
+  wyl_audit_conn_discard_chain_tail_cache (self->audit_conn);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_audit_events (WylHandle *self)
 {
@@ -2482,27 +2498,21 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
 
   rc = reconcile_policy_store_audit_intentions (self, committed_ids);
   if (rc != WYRELOG_E_OK) {
-    memset (&result, 0, sizeof (result));
-    duckdb_query (conn, "ROLLBACK;", &result);
-    duckdb_destroy_result (&result);
+    rollback_policy_store_audit_replay (self, conn);
     return rc;
   }
 
   rc = wyl_policy_store_foreach_audit_event (self->policy_store,
           insert_policy_store_audit_event, self);
   if (rc != WYRELOG_E_OK) {
-    memset (&result, 0, sizeof (result));
-    duckdb_query (conn, "ROLLBACK;", &result);
-    duckdb_destroy_result (&result);
+    rollback_policy_store_audit_replay (self, conn);
     return rc;
   }
 
   memset (&result, 0, sizeof (result));
   if (duckdb_query (conn, "COMMIT;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
-    memset (&result, 0, sizeof (result));
-    duckdb_query (conn, "ROLLBACK;", &result);
-    duckdb_destroy_result (&result);
+    rollback_policy_store_audit_replay (self, conn);
     return WYRELOG_E_IO;
   }
   duckdb_destroy_result (&result);

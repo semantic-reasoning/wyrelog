@@ -801,6 +801,16 @@ evict_chain_tail_cache (wyl_audit_conn_t *conn, const gchar *stream_name)
   g_hash_table_remove (conn->chain_tail_cache, stream_name);
 }
 
+void
+wyl_audit_conn_discard_chain_tail_cache (wyl_audit_conn_t *conn)
+{
+  if (conn == NULL)
+    return;
+  g_mutex_lock (&conn->lock);
+  g_hash_table_remove_all (conn->chain_tail_cache);
+  g_mutex_unlock (&conn->lock);
+}
+
 static void
 update_chain_tail_cache (wyl_audit_conn_t *conn, const gchar *stream_name,
     gint64 sequence_no, const gchar *record_hash)
