@@ -3992,6 +3992,69 @@ check_denied_login_skip_mfa_projects_audit_fact (void)
   return 0;
 }
 
+/* #1453: a replay that rolls back after inserting rows must not leave the
+ * chain tail cache pointing at a rolled-back row.  The failure here is not a
+ * DuckDB statement failure (that path already evicts the cache) but a
+ * corrupt policy-store row met after one row was inserted. */
+static gint
+check_policy_store_audit_replay_rollback_keeps_chain_contiguous (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1453;
+  gint rc = 0;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_audit_conn_t *audit = wyl_handle_get_audit_conn (handle);
+  static const gchar *valid_id = "01890c10-2e3f-7000-8000-000000001453";
+  gboolean inserted = FALSE;
+  g_autofree gchar *chain_error = NULL;
+  gint64 count = -1;
+  if (wyl_policy_store_append_audit_event_full (store, valid_id, 1001,
+      "replay-user", "replay-action", "replay-resource", NULL, NULL,
+      "req-replay-1453", WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK
+      || !inserted) {
+    rc = 1454;
+    goto out;
+  }
+  /* A row the policy-store scan refuses after the valid one is inserted. */
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  if (sqlite3_exec (db, "INSERT INTO audit_events (id, created_at_us, "
+      "subject_id, action, resource_id, decision) VALUES ('corrupt-1453', "
+      "1002, 'replay-user', 'replay-action', 'replay-resource', 1);", NULL,
+      NULL, NULL) != SQLITE_OK) {
+    rc = 1455;
+    goto out;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_POLICY) {
+    rc = 1456;
+    goto out;
+  }
+  /* The replay rolled back: nothing it inserted persisted. */
+  if (!runtime_count_audit_rows (handle, valid_id, &count) || count != 0) {
+    rc = 1457;
+    goto out;
+  }
+  if (sqlite3_exec (db, "DELETE FROM audit_events WHERE id = 'corrupt-1453';",
+      NULL, NULL, NULL) != SQLITE_OK) {
+    rc = 1458;
+    goto out;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK
+      || !runtime_count_audit_rows (handle, valid_id, &count) || count != 1) {
+    rc = 1459;
+    goto out;
+  }
+  if (wyl_audit_conn_verify_chain (audit, &chain_error) != WYRELOG_E_OK) {
+    g_printerr ("audit chain after replay rollback: %s\n",
+        chain_error != NULL ? chain_error : "(none)");
+    rc = 1460;
+    goto out;
+  }
+out:
+  g_object_unref (handle);
+  return rc;
+}
+
 static gint
 check_policy_store_audit_rows_load_wirelog_facts (void)
 {
@@ -4202,6 +4265,9 @@ main (void)
   if ((rc = check_role_grant_emits_audit_row ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_emits_audit_row ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_policy_store_audit_replay_rollback_keeps_chain_contiguous ())
+      != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_audit_rows_load_wirelog_facts ()) != 0)
     return wyl_test_normalize_exit_status (rc);
