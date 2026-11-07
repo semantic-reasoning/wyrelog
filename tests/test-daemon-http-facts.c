@@ -1143,6 +1143,28 @@ check_schema_status (SoupSession *session, const gchar *base_url,
       FACT_GUARD, deny_token, 403, "{\"error\":\"schema_denied\"}");
 }
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+/* The physical bytes charged so far to a default-tenant graph (#1509); 0 for
+ * a graph never settled. */
+static gint64
+physical_graph_charge (wyl_policy_store_t *store, const gchar *graph_id)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+      "SELECT COALESCE((SELECT charged_bytes FROM "
+      "fact_physical_quota_graph_charges WHERE tenant_id=?1 AND "
+      "graph_id=?2),0);", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, WYL_TENANT_DEFAULT, -1,
+      SQLITE_STATIC), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 2, graph_id, -1, SQLITE_STATIC),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gint64 charged = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return charged;
+}
+#endif
+
 static void
 check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_url,
     const gchar *token, const gchar *root)
@@ -1285,6 +1307,58 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
       logical_before_reopen.pending_rows);
   g_assert_cmpuint (logical_after_reopen.pending_bytes, ==,
       logical_before_reopen.pending_bytes);
+
+  /* #1509: an append is charged for the growth of its graph's allocation
+   * past the highest observation already charged to that graph, not for the
+   * whole allocation again.  Two appends to one graph and one to another
+   * leave committed bytes moving exactly with the graphs' charges. */
+  const gchar *hw_graphs[] = { "physical-hw-a", "physical-hw-b" };
+  for (gsize i = 0; i < G_N_ELEMENTS (hw_graphs); i++) {
+    g_autofree gchar *hw_create = g_strdup_printf (
+      "tenant=__wr_default&graph=%s&%s", hw_graphs[i], FACT_GUARD);
+    tsv_post (session, base_url, token, "/graphs/create", hw_create, "", 0,
+        200, "\"created\":true");
+    g_autofree gchar *hw_schema_query = g_strdup_printf (
+      "tenant=__wr_default&graph=%s&namespace=shop&relation=pair&"
+      "schema_version=1&%s", hw_graphs[i], FACT_GUARD);
+    tsv_post (session, base_url, token, "/facts/schema/register",
+        hw_schema_query, schema, strlen (schema), 200, "\"ok\":true");
+  }
+  const struct
+  {
+    const gchar *graph;
+    const gchar *batch;
+  } hw_appends[] = {
+    { "physical-hw-a", "physical-hw-1" },
+    { "physical-hw-a", "physical-hw-2" },
+    { "physical-hw-b", "physical-hw-3" },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (hw_appends); i++) {
+    WylPolicyFactPhysicalQuotaStatus hw_before = { 0 };
+    g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+        WYL_TENANT_DEFAULT, &hw_before), ==, WYRELOG_E_OK);
+    gint64 charge_before = physical_graph_charge (store, hw_appends[i].graph);
+    g_autofree gchar *hw_path = g_strdup_printf (
+      "/facts/__wr_default/%s/pair:append", hw_appends[i].graph);
+    g_autofree gchar *hw_query = g_strdup_printf (
+      "tenant=__wr_default&namespace=shop&schema_version=1&batch_id=%s&"
+      "idempotency_key=%s&%s", hw_appends[i].batch, hw_appends[i].batch,
+      FACT_GUARD);
+    g_autofree gchar *hw_rows = g_strdup_printf ("a\tb\nrow\t%s\n",
+            hw_appends[i].batch);
+    tsv_post (session, base_url, token, hw_path, hw_query, hw_rows,
+        strlen (hw_rows), 200, "\"inserted\":true");
+    WylPolicyFactPhysicalQuotaStatus hw_after = { 0 };
+    g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+        WYL_TENANT_DEFAULT, &hw_after), ==, WYRELOG_E_OK);
+    gint64 charge_after = physical_graph_charge (store, hw_appends[i].graph);
+    g_assert_cmpint (charge_after, >, 0);
+    g_assert_cmpint (charge_after, >=, charge_before);
+    g_assert_cmpuint (hw_after.pending_bytes, ==, 0);
+    g_assert_cmpuint (hw_after.reconciling_bytes, ==, 0);
+    g_assert_cmpuint (hw_after.committed_bytes - hw_before.committed_bytes,
+        ==, (guint64) (charge_after - charge_before));
+  }
 #endif
 
   const gchar *bad_schemas[] = { "v\tstring\tfalse\ttrue   \n",

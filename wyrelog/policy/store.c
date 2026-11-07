@@ -19900,6 +19900,62 @@ fact_physical_quota_limit_load (wyl_policy_store_t *store,
   return rc;
 }
 
+/* #1509: the physical bytes already charged to a graph, the highest stable
+ * observation settled for it.  A graph never settled has charged nothing. */
+static wyrelog_error_t
+fact_physical_quota_graph_charge_load (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, guint64 *out_charged)
+{
+  sqlite3_stmt *stmt = NULL;
+  *out_charged = 0;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT charged_bytes FROM fact_physical_quota_graph_charges "
+          "WHERE tenant_id=? AND graph_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    sqlite3_int64 charged = sqlite3_column_int64 (stmt, 0);
+    if (sqlite3_column_type (stmt, 0) != SQLITE_INTEGER || charged < 0)
+      rc = WYRELOG_E_IO;
+    else
+      *out_charged = (guint64) charged;
+  } else if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+/* Raise a graph's charge to observed_bytes; a lower observation leaves it. */
+static wyrelog_error_t
+fact_physical_quota_graph_charge_raise (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, guint64 observed_bytes)
+{
+  if (observed_bytes > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "INSERT INTO fact_physical_quota_graph_charges "
+          "(tenant_id,graph_id,charged_bytes,updated_at) "
+          "VALUES (?,?,?,unixepoch()) "
+          "ON CONFLICT (tenant_id,graph_id) DO UPDATE SET "
+          "charged_bytes=excluded.charged_bytes,updated_at=excluded.updated_at "
+          "WHERE excluded.charged_bytes > charged_bytes;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 3,
+      (sqlite3_int64) observed_bytes) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
 static wyrelog_error_t
 fact_physical_quota_operation_load (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,
@@ -20154,19 +20210,26 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
     rc = found ? WYRELOG_E_CONFLICT : WYRELOG_E_NOT_FOUND;
   if (rc == WYRELOG_E_OK && current.state ==
       WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING) {
-    guint64 committed = 0, pending = 0, reconciling = 0;
-    guint64 charge = observed_bytes > current.requested_bytes
-        ? observed_bytes : current.requested_bytes;
-    rc = fact_physical_quota_usage_load (store, operation->tenant_id,
-            &committed, &pending, &reconciling);
+    guint64 committed = 0, pending = 0, reconciling = 0, charged = 0;
+    rc = fact_physical_quota_graph_charge_load (store, operation->tenant_id,
+            operation->graph_id, &charged);
+    /* #1509: only growth past the graph's charge is new allocation. */
+    guint64 growth = observed_bytes > charged ? observed_bytes - charged : 0;
+    guint64 charge = growth > current.requested_bytes
+        ? growth : current.requested_bytes;
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_load (store, operation->tenant_id,
+              &committed, &pending, &reconciling);
     if (rc == WYRELOG_E_OK && current.requested_bytes > pending)
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK && stable_evidence) {
-      if (committed > G_MAXUINT64 - observed_bytes)
+      if (committed > G_MAXINT64 - growth)
         rc = WYRELOG_E_IO;
       else {
-        committed += observed_bytes;
+        committed += growth;
         pending -= current.requested_bytes;
+        rc = fact_physical_quota_graph_charge_raise (store,
+                operation->tenant_id, operation->graph_id, observed_bytes);
       }
     } else if (rc == WYRELOG_E_OK) {
       if (reconciling > G_MAXUINT64 - charge)
@@ -20190,7 +20253,7 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
               "state=?,updated_at=unixepoch() WHERE request_id=? AND tenant_id=? AND graph_id=? AND state='pending';",
               &stmt);
     if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 1,
-        (sqlite3_int64) (stable_evidence ? observed_bytes : charge)) != SQLITE_OK)
+        (sqlite3_int64) (stable_evidence ? growth : charge)) != SQLITE_OK)
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 2,
         current.state == WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED
@@ -20203,27 +20266,33 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
         || sqlite3_changes (store->db) != 1))
       rc = WYRELOG_E_IO;
     sqlite3_finalize (stmt);
-    current.applied_bytes = stable_evidence ? observed_bytes : charge;
+    current.applied_bytes = stable_evidence ? growth : charge;
     if (out_status != NULL)
       *out_status = current;
   } else if (rc == WYRELOG_E_OK && current.state ==
       WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING) {
-    guint64 committed = 0, pending = 0, reconciling = 0;
-    rc = fact_physical_quota_usage_load (store, operation->tenant_id,
-            &committed, &pending, &reconciling);
+    guint64 committed = 0, pending = 0, reconciling = 0, charged = 0;
+    rc = fact_physical_quota_graph_charge_load (store, operation->tenant_id,
+            operation->graph_id, &charged);
+    guint64 growth = observed_bytes > charged ? observed_bytes - charged : 0;
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_load (store, operation->tenant_id,
+              &committed, &pending, &reconciling);
     if (rc == WYRELOG_E_OK && stable_evidence) {
       if (current.applied_bytes > reconciling
-          || committed > G_MAXUINT64 - observed_bytes)
+          || committed > G_MAXINT64 - growth)
         rc = WYRELOG_E_IO;
       else {
         reconciling -= current.applied_bytes;
-        committed += observed_bytes;
-        current.applied_bytes = observed_bytes;
+        committed += growth;
+        current.applied_bytes = growth;
         current.state = WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED;
+        rc = fact_physical_quota_graph_charge_raise (store,
+                operation->tenant_id, operation->graph_id, observed_bytes);
       }
     } else if (rc == WYRELOG_E_OK) {
-      guint64 charge = observed_bytes > current.applied_bytes
-          ? observed_bytes : current.applied_bytes;
+      guint64 charge = growth > current.applied_bytes
+          ? growth : current.applied_bytes;
       if (charge > current.applied_bytes
           && reconciling > G_MAXUINT64 - (charge - current.applied_bytes))
         rc = WYRELOG_E_IO;
