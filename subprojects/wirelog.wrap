@@ -2,4 +2,4 @@
 url = https://github.com/semantic-reasoning/wirelog.git
 revision = 9cb295ad49280c2562e29148796d1ac7ec69c2ef
 depth = 1
-diff_files = wirelog/0001-optional-benchmarks.patch
+diff_files = wirelog/0001-optional-benchmarks.patch, wirelog/0002-easy-snapshot-completeness.patch

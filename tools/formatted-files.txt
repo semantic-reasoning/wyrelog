@@ -39,6 +39,7 @@ tests/test-duckdb-source-offbridge-c-consumer.c
 tests/test-duckdb-temp-name.c
 tests/test-engine-intern.c
 tests/test-engine-io.c
+tests/test-engine-recursion.c
 tests/test-engine.c
 tests/test-events.c
 tests/test-exit-status-reporting.c

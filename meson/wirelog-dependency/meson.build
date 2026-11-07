@@ -74,6 +74,17 @@ int main(void) {
   return result;
 }
 '''
+# Same-version providers can still expose successful partial snapshots.
+wirelog_snapshot_probe = '''
+#include <wirelog/wirelog-easy.h>
+#if !defined(WIRELOG_EASY_SNAPSHOT_COMPLETENESS_VERSION) || WIRELOG_EASY_SNAPSHOT_COMPLETENESS_VERSION < 1
+#error Wirelog easy snapshot completeness v1 is required
+#endif
+int main(void) { return 0; }
+'''
+wirelog_snapshot_system_error = 'System Wirelog candidate lacks easy snapshot completeness v1.'
+wirelog_snapshot_fallback_error = 'Pinned Wirelog fallback lacks easy snapshot completeness v1; apply package diffs.'
+
 wirelog_source_signature_error = 'System Wirelog candidate lacks source-query v1 signatures.'
 wirelog_source_link_error = 'System Wirelog candidate cannot link source-query v1 functions.'
 wirelog_source_fallback_error = 'Pinned Wirelog fallback lacks source-query v1 signatures.'
@@ -98,7 +109,7 @@ wirelog_fallback_signature_error = (
 )
 wirelog_nofallback_error = (
   '--wrap-mode=nofallback refuses the pinned Wirelog fallback required '
-  + 'to satisfy wirelog_program_relation_has_input and source-query v1.'
+  + 'to satisfy wirelog_program_relation_has_input, source-query v1 and easy snapshot completeness v1.'
 )
 
 wirelog_force_fallback = (
@@ -131,6 +142,10 @@ if not wirelog_force_fallback
         dependencies : wirelog_system_candidate,
         name : 'system Wirelog source-query v1 link')
       wirelog_system_rejection = wirelog_source_link_error
+    elif not cc.compiles(wirelog_snapshot_probe,
+        dependencies : wirelog_system_candidate,
+        name : 'system Wirelog easy snapshot completeness v1')
+      wirelog_system_rejection = wirelog_snapshot_system_error
     else
       wirelog_dep = wirelog_system_candidate
     endif
@@ -181,6 +196,13 @@ if not wirelog_dep.found()
       include_directories : [wirelog_inc, wirelog_src_inc],
       name : 'pinned Wirelog source-query v1 signatures')
     error(wirelog_source_fallback_error)
+  endif
+
+  if not cc.compiles(wirelog_snapshot_probe,
+      args : wirelog_consumer_args,
+      include_directories : [wirelog_inc, wirelog_src_inc],
+      name : 'pinned Wirelog easy snapshot completeness v1')
+    error(wirelog_snapshot_fallback_error)
   endif
 
   wirelog_dep = declare_dependency(

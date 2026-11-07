@@ -4050,6 +4050,13 @@ test_engine = executable('test-engine',
 
 test('engine', test_engine)
 
+# Direct engine qualification deliberately bypasses rule-pack admission.
+test_engine_recursion = executable('test-engine-recursion',
+  'test-engine-recursion.c',
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+test('engine-recursion', test_engine_recursion, timeout : 120)
+
 test_engine_intern = executable('test-engine-intern',
   'test-engine-intern.c',
   c_args : [
