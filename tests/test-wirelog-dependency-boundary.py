@@ -158,6 +158,9 @@ def source_header(kind):
     macro = ("" if kind == "missing_source_macro" else
              "#define WIRELOG_SOURCE_QUERY_VERSION " +
              ("0" if kind == "old_source_macro" else "1") + "\n")
+    if kind != "missing_snapshot_macro":
+        macro += ("#define WIRELOG_EASY_SNAPSHOT_COMPLETENESS_VERSION " +
+                  ("0" if kind == "old_snapshot_macro" else "1") + "\n")
     result = ("#pragma once\n#include <stdbool.h>\n#include <stdint.h>\n" + macro +
               "typedef struct wirelog_easy_session wirelog_easy_session_t;\n"
               "typedef enum { WIRELOG_SOURCE_QUERY_OK = 0 } "
@@ -182,7 +185,7 @@ def source_definitions(kind):
 
 
 def provider_header(kind, provider):
-    if "source" in kind:
+    if "source" in kind or "snapshot" in kind:
         kind = "compatible"
     marker = f"WIRELOG_PROVIDER_{provider.upper()}"
     declaration = ""
@@ -204,7 +207,7 @@ typedef struct wirelog_program wirelog_program_t;
 
 
 def provider_source(kind, provider):
-    if "source" in kind:
+    if "source" in kind or "snapshot" in kind:
         kind = "compatible"
     if kind == "compatible":
         return f"""#include <string.h>
@@ -423,7 +426,7 @@ FALLBACK_SIGNATURE = (
 )
 NOFALLBACK = (
     "--wrap-mode=nofallback refuses the pinned Wirelog fallback required "
-    f"to satisfy {required_api} and source-query v1."
+    f"to satisfy {required_api}, source-query v1 and easy snapshot completeness v1."
 )
 
 
@@ -573,6 +576,16 @@ with tempfile.TemporaryDirectory(prefix="wyrelog-wirelog-boundary-") as temp:
     setup_failure_scenario(base, "fallback-old-source", "compatible",
                            "old_source_macro", ["--force-fallback-for=wirelog"],
                            [FALLBACK_SOURCE])
+
+    for kind in ("missing_snapshot_macro", "old_snapshot_macro"):
+        diagnostic = "System Wirelog candidate lacks easy snapshot completeness v1."
+        successful_scenario(base, kind, kind, "compatible", "fallback",
+                            messages=[diagnostic])
+        setup_failure_scenario(base, "nofallback-" + kind, kind, "compatible",
+                               ["--wrap-mode=nofallback"], [diagnostic, NOFALLBACK])
+        setup_failure_scenario(base, "fallback-" + kind, "compatible", kind,
+                               ["--force-fallback-for=wirelog"],
+                               ["Pinned Wirelog fallback lacks easy snapshot completeness v1"])
 
 
 print("Wirelog dependency boundary: OK")

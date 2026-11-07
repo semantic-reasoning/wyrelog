@@ -1,0 +1,79 @@
+Subject: Reject incomplete recursive easy snapshots at the iteration cap
+Upstream: https://github.com/semantic-reasoning/wirelog/issues/2345
+Base: 9cb295ad49280c2562e29148796d1ac7ec69c2ef
+
+Keep raw continuation semantics and retry state; the easy facade must not
+report partial models as successful complete snapshots. Remove this patch
+when a pinned upstream provider supplies the same capability contract.
+
+diff --git a/wirelog/wirelog-easy.c b/wirelog/wirelog-easy.c
+index 4e279ba0..eb528dd0 100644
+--- a/wirelog/wirelog-easy.c
++++ b/wirelog/wirelog-easy.c
+@@ -570,6 +570,7 @@ wirelog_easy_banner(const char *label)
+ 
+ typedef struct {
+     const char *wanted;
++    wl_col_session_t *session;
+     wirelog_on_tuple_fn user_cb;
+     void *user_data;
+ } wirelog_easy_snapshot_filter_t;
+@@ -582,6 +583,9 @@ snapshot_trampoline(const char *relation, const int64_t *row, uint32_t ncols,
+         (wirelog_easy_snapshot_filter_t *)user_data;
+     if (!relation || !f || !f->wanted)
+         return;
++    /* Raw snapshots may expose a resumable, incomplete fixed point. */
++    if (f->session->eval_stratum_iteration_capped)
++        return;
+     if (strcmp(relation, f->wanted) != 0)
+         return;
+     if (f->user_cb)
+@@ -601,11 +605,18 @@ wirelog_easy_snapshot(wirelog_easy_session_t *s, const char *relation,
+     if (err != WIRELOG_OK)
+         return err;
+     wirelog_easy_snapshot_filter_t filter
+-        = { .wanted = relation, .user_cb = cb, .user_data = user_data };
++        = { .wanted = relation, .session = COL_SESSION(s->session),
++            .user_cb = cb, .user_data = user_data };
+     int rc = wl_session_snapshot(s->session, snapshot_trampoline, &filter);
+-    return (wirelog_error_t)wl_facade_session_error_code_with_budget(rc,
+-               COL_SESSION(s->session)->extension_expr_status,
+-               wl_columnar_session_budget_denied(COL_SESSION(s->session)));
++    wirelog_error_t result =
++        (wirelog_error_t)wl_facade_session_error_code_with_budget(rc,
++            COL_SESSION(s->session)->extension_expr_status,
++            wl_columnar_session_budget_denied(COL_SESSION(s->session)));
++    /* Preserve pending-input state for retry, and existing error precedence.
++     * This also detects a cap when the selected relation emitted no rows. */
++    if (result == WIRELOG_OK && filter.session->eval_stratum_iteration_capped)
++        return WIRELOG_ERR_EXEC;
++    return result;
+ }
+ 
+ /* ======================================================================== */
+diff --git a/wirelog/wirelog-easy.h b/wirelog/wirelog-easy.h
+index 759f8625..7e5878bc 100644
+--- a/wirelog/wirelog-easy.h
++++ b/wirelog/wirelog-easy.h
+@@ -29,6 +29,9 @@
+ #ifndef WIRELOG_WL_EASY_H
+ #define WIRELOG_WL_EASY_H
+ 
++/* easy_snapshot refuses capped, incomplete models without tuple callbacks. */
++#define WIRELOG_EASY_SNAPSHOT_COMPLETENESS_VERSION 1
++
+ #include "wirelog/wirelog-export.h"
+ 
+ #ifdef __cplusplus
+@@ -368,6 +371,11 @@ wirelog_easy_banner(const char *label);
+  * @cb:        Callback invoked once per matching tuple.
+  * @user_data: Opaque user data passed back to @cb.
+  *
++ * If recursive evaluation reaches its iteration cap before convergence,
++ * returns WIRELOG_ERR_EXEC without tuple callbacks. Pending inputs remain
++ * available for retry; the cap is not a public runtime budget control.
++ * This contract applies to easy_snapshot, not raw session or step APIs.
++ *
+  * Take a snapshot of the current state and forward only tuples whose
+  * relation name matches @relation to @cb.
+  *
