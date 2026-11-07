@@ -66,12 +66,22 @@ matrix. Normal tests do not reference internal Wirelog symbols.
 
 ## Failure and retry semantics
 
-The join-output-limit case uses an isolated subprocess with
+All engine cases run in isolated subprocesses. The launcher clears ambient
+evaluator knobs, then supplies each case's settings before process creation;
+child initialization preserves them. This matters on Windows, where GLib and
+the evaluator can use different CRT environment copies. Changing GLib's
+environment after startup is not reliable configuration for the evaluator.
+The TDD cases also receive their threshold and diagnostic flags at startup.
+
+The join-output-limit case starts a subprocess with
 `WIRELOG_JOIN_OUTPUT_LIMIT=1`. A real recursive join exceeds the latched
 limit: snapshot must return `WYRELOG_E_EXEC`, deliver zero callbacks, and not
-latch successful snapshot mode. Clearing the environment does not change the
-existing session: a second attempt must still fail. A new unrestricted engine
-must recover the full independently computed model.
+latch successful snapshot mode. A second attempt on that engine must still
+fail. A separate subprocess starts without the limit and must recover the full
+independently computed model from the same inputs. On POSIX, the limited child
+additionally clears the environment between attempts, proving the existing
+session retains its limit while a newly opened engine recovers. Windows does
+not rely on a late GLib unset reaching the evaluator's CRT.
 
 The separate hook-enabled static configuration sets the **real upstream**
 `wl_columnar_eval_serial_test_iteration_limit` and

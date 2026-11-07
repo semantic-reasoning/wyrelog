@@ -145,6 +145,11 @@ check_pair (Fixture *f, gboolean unary)
 static void
 lifecycle (gconstpointer data)
 {
+  if (!g_test_subprocess ()) {
+    g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_passed ();
+    return;
+  }
   guint config = GPOINTER_TO_UINT (data);
   guint workers = config / 3;
   guint kind = config % 3;
@@ -202,15 +207,50 @@ lifecycle (gconstpointer data)
   wyl_engine_close (f.engine);
 }
 
+/* Configure before process startup: GLib and the evaluator can use different
+ * CRT environment copies on Windows. Restore before any trap assertion. */
+static void
+trap_configured (const gchar *mode)
+{
+  const gchar *keys[] = { "WIRELOG_JOIN_OUTPUT_LIMIT",
+                          "WIRELOG_TDD_MIN_ROWS_PER_WORKER", "WIRELOG_TDD_DECISION_DEBUG",
+                          "WYL_TEST_RECURSION_MODE" };
+  const gchar *values[] = { g_str_equal (mode, "limited") ? "1" : NULL,
+                            g_str_equal (mode, "parallel") ? "1" : NULL,
+                            g_str_equal (mode, "parallel") ? "1" : NULL, mode };
+  gchar *saved[G_N_ELEMENTS (keys)];
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
+    saved[i] = g_strdup (g_getenv (keys[i]));
+    if (values[i])
+      g_assert_true (g_setenv (keys[i], values[i], TRUE));
+    else
+      g_unsetenv (keys[i]);
+  }
+  g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
+    if (saved[i])
+      g_assert_true (g_setenv (keys[i], saved[i], TRUE));
+    else
+      g_unsetenv (keys[i]);
+    g_free (saved[i]);
+  }
+  g_test_trap_assert_passed ();
+}
+
 static void
 join_limit (void)
 {
   if (!g_test_subprocess ()) {
-    g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
-    g_test_trap_assert_passed ();
+    trap_configured ("limited");
+    trap_configured ("unlimited");
     return;
   }
-  g_setenv ("WIRELOG_JOIN_OUTPUT_LIMIT", "1", TRUE);
+  const gchar *mode = g_getenv ("WYL_TEST_RECURSION_MODE");
+  g_assert_nonnull (mode);
+  gboolean limited = g_str_equal (mode, "limited");
+  g_assert_true (limited || g_str_equal (mode, "unlimited"));
+  g_assert_cmpstr (g_getenv ("WIRELOG_JOIN_OUTPUT_LIMIT"), ==,
+      limited ? "1" : NULL);
   Fixture f;
   open_fixture (&f, mutual, 1);
   g_assert_cmpint (wyl_engine_owned_insert (f.engine, "seed", &f.ids[0], 1),
@@ -218,16 +258,25 @@ join_limit (void)
   f.seed[0] = TRUE;
   for (guint i = 1; i < 8; i++)
     edge (&f, 0, i, TRUE);
+  if (!limited) {
+    check_pair (&f, TRUE);
+    wyl_engine_close (f.engine);
+    return;
+  }
   for (guint retry = 0; retry < 2; retry++) {
     Image image = { .fixture = &f, .relation = "p", .width = 1 };
     g_assert_cmpint (wyl_engine_snapshot (f.engine, "p", capture, &image),
         ==, WYRELOG_E_EXEC);
     g_assert_cmpuint (image.count, ==, 0);
     g_assert_cmpint (f.engine->mode, ==, WYL_ENGINE_MODE_NONE);
-    /* Session limit is latched: changing env cannot repair this session. */
+    /* POSIX also proves that changing env cannot repair this session. */
+#ifndef G_OS_WIN32
     g_unsetenv ("WIRELOG_JOIN_OUTPUT_LIMIT");
+#endif
   }
   wyl_engine_close (f.engine);
+#ifndef G_OS_WIN32
+  /* On Windows the separate unlimited child proves unrestricted recovery. */
   open_fixture (&f, mutual, 1);
   g_assert_cmpint (wyl_engine_owned_insert (f.engine, "seed", &f.ids[0], 1),
       ==, WYRELOG_E_OK);
@@ -236,20 +285,20 @@ join_limit (void)
     edge (&f, 0, i, TRUE);
   check_pair (&f, TRUE);
   wyl_engine_close (f.engine);
+#endif
 }
 
 static void
 parallel_route (void)
 {
   if (!g_test_subprocess ()) {
-    g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
-    g_test_trap_assert_passed ();
+    trap_configured ("parallel");
     /* Runtime dispatch evidence, not merely the requested worker count. */
     g_test_trap_assert_stderr ("*use_tdd=1*");
     return;
   }
-  g_setenv ("WIRELOG_TDD_MIN_ROWS_PER_WORKER", "1", TRUE);
-  g_setenv ("WIRELOG_TDD_DECISION_DEBUG", "1", TRUE);
+  g_assert_cmpstr (g_getenv ("WIRELOG_TDD_MIN_ROWS_PER_WORKER"), ==, "1");
+  g_assert_cmpstr (g_getenv ("WIRELOG_TDD_DECISION_DEBUG"), ==, "1");
   const gchar *rules[] = {
     "reachable(X,Z) :- reachable(X,Y), edge(Y,Z).\n",
     "reachable(X,Z) :- reachable(X,Y), reachable(Y,Z).\n"
@@ -284,6 +333,11 @@ extern uint32_t wl_columnar_session_test_iteration_limit;
 static void
 iteration_cap (void)
 {
+  if (!g_test_subprocess ()) {
+    g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_passed ();
+    return;
+  }
   const gchar *relations[] = { "p", "q", "seed_seen", "absent" };
   for (guint workers = 0; workers <= 2; workers++) {
     for (guint r = 0; r < G_N_ELEMENTS (relations); r++) {
@@ -324,13 +378,12 @@ static void
 iteration_cap_parallel (void)
 {
   if (!g_test_subprocess ()) {
-    g_test_trap_subprocess (NULL, 30 * G_USEC_PER_SEC, 0);
-    g_test_trap_assert_passed ();
+    trap_configured ("parallel");
     g_test_trap_assert_stderr ("*use_tdd=1*");
     return;
   }
-  g_setenv ("WIRELOG_TDD_MIN_ROWS_PER_WORKER", "1", TRUE);
-  g_setenv ("WIRELOG_TDD_DECISION_DEBUG", "1", TRUE);
+  g_assert_cmpstr (g_getenv ("WIRELOG_TDD_MIN_ROWS_PER_WORKER"), ==, "1");
+  g_assert_cmpstr (g_getenv ("WIRELOG_TDD_DECISION_DEBUG"), ==, "1");
   g_autofree gchar *source = g_strconcat (decls,
           "reachable(X,Z) :- reachable(X,Y), edge(Y,Z).\n", NULL);
   Fixture f;
@@ -354,12 +407,17 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
-  /* Private, single-purpose process: do not inherit ambient evaluator knobs. */
-  g_unsetenv ("WIRELOG_JOIN_OUTPUT_LIMIT");
-  g_unsetenv ("WIRELOG_TDD_MIN_ROWS_PER_WORKER");
-  g_unsetenv ("WIRELOG_MAX_WORKERS");
-  g_unsetenv ("WIRELOG_TDD_GLOBAL_READ");
-  g_unsetenv ("WIRELOG_DIFF_ENABLED");
+  /* Only the launcher sanitizes ambient knobs; children inherit intentional
+   * settings before their runtimes initialize. No engine runs in the parent. */
+  if (!g_test_subprocess ()) {
+    g_unsetenv ("WIRELOG_JOIN_OUTPUT_LIMIT");
+    g_unsetenv ("WIRELOG_TDD_MIN_ROWS_PER_WORKER");
+    g_unsetenv ("WIRELOG_TDD_DECISION_DEBUG");
+    g_unsetenv ("WIRELOG_MAX_WORKERS");
+    g_unsetenv ("WIRELOG_TDD_GLOBAL_READ");
+    g_unsetenv ("WIRELOG_DIFF_ENABLED");
+    g_unsetenv ("WYL_TEST_RECURSION_MODE");
+  }
   g_test_add_func ("/engine-recursion/join-limit", join_limit);
   g_test_add_func ("/engine-recursion/parallel-route", parallel_route);
   for (guint workers = 0; workers <= 2; workers++) {
