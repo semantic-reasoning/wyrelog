@@ -26,8 +26,13 @@ G_BEGIN_DECLS;
  *   3. wyl_audit_conn_close(conn) -- disconnect then close, in
  *      that order (DuckDB requirement). NULL-safe and idempotent.
  *
- * Threading: a connection is not safe for concurrent use; the
- * engine layer serialises writers. Tests run single-threaded.
+ * Threading: every function that runs a statement takes the
+ * connection's recursive lock, and a transaction begun with
+ * wyl_audit_conn_transaction_begin holds it until its commit or
+ * rollback, so another thread's statement can never run inside it.
+ * The connection wyl_audit_conn_get_connection returns bypasses the
+ * lock: a caller may use it only where nothing else uses the
+ * connection.
  *
  * Path semantics: NULL or the literal ":memory:" both yield an
  * in-memory database. Other paths are passed verbatim to DuckDB,
@@ -75,6 +80,9 @@ guint64 wyl_audit_conn_service_exchange_get_entry_count_for_test
   (wyl_audit_conn_t * conn);
 void wyl_audit_conn_service_exchange_reset_entry_count_for_test
   (wyl_audit_conn_t * conn);
+/* WYL_TEST-only: whether the calling thread can take the connection's lock
+ * now.  From a thread that does not hold it, FALSE means another does. */
+gboolean wyl_audit_conn_try_lock_for_test (wyl_audit_conn_t * conn);
 void wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
   (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data),
     gpointer data);
@@ -194,11 +202,17 @@ wyrelog_error_t wyl_audit_conn_rename_user_stream (wyl_audit_conn_t * conn,
 wyrelog_error_t wyl_audit_conn_append_tombstone (wyl_audit_conn_t * conn,
     const gchar * subject_id, const gchar * request_id,
     gboolean * out_inserted);
-/* Forgets every cached chain tail, so the next insert reads the tail from
- * the durable rows.  A caller that rolls back a transaction it ran inserts
- * in must call it: those inserts advanced the cache to rows that no longer
- * exist. */
-void wyl_audit_conn_discard_chain_tail_cache (wyl_audit_conn_t * conn);
+/* A transaction a caller runs its own inserts in (the policy-store audit
+ * replay, #1453).  Begin holds the connection's lock until commit or
+ * rollback, so no other thread's statement can run inside the transaction
+ * and be committed or rolled back with it; the holder's own inserts
+ * re-enter the lock.  A failed begin holds nothing.  Commit and rollback
+ * always release it; a failed commit rolls back.  Rolling back also forgets
+ * every cached chain tail, since the transaction's inserts advanced the
+ * cache to rows that no longer exist. */
+wyrelog_error_t wyl_audit_conn_transaction_begin (wyl_audit_conn_t * conn);
+wyrelog_error_t wyl_audit_conn_transaction_commit (wyl_audit_conn_t * conn);
+void wyl_audit_conn_transaction_rollback (wyl_audit_conn_t * conn);
 wyrelog_error_t wyl_audit_conn_verify_chain (wyl_audit_conn_t * conn,
     gchar ** out_error);
 
