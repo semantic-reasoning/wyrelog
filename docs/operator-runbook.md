@@ -2802,7 +2802,13 @@ bounded evidence of the artifact inventory and fails closed: when evidence
 cannot be taken, the mutation is an error, never an admission. A mutation is
 refused when committed plus pending plus reconciling bytes have reached the
 limit, or when the bytes the evidence bounds for it exceed the remaining
-headroom, and it settles from the size observed after the commit. When the
+headroom, and it settles from the size observed after the commit. That
+observation is the graph's whole allocation (its main file, WAL, temporary
+files and any filesystem preallocation), so a settle charges only its growth
+past the highest observation already charged to the graph: `committed_bytes`
+is the sum of each graph's high-water allocation. A smaller observation, for
+example after a checkpoint shrinks the WAL, lowers nothing; a graph's charge is
+released only when its tenant is deleted. When the
 post-commit observation cannot be taken, the reservation's bytes move to
 `reconciling_bytes`, which keeps counting against the limit and is never
 lowered by unverified evidence. This dimension is enforced only by builds
