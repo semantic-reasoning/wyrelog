@@ -11,8 +11,9 @@ G_BEGIN_DECLS;
 /* Input-size bounds on a rule pack.  They keep the parse and the acceptance
  * check bounded; they are NOT a bound on evaluation cost.  A single two-atom
  * rule over n facts can enumerate n^2 candidate pairs whatever these numbers
- * are (#1213), and per-query evaluation is bounded only once wirelog enforces
- * an evaluation budget (semantic-reasoning/wirelog#1817). */
+ * are (#1213). Existing backend controls do not provide an end-to-end work
+ * bound. semantic-reasoning/wirelog#1817 is related control work, not a
+ * prerequisite for the finite-domain recursive compiler capability. */
 #define WYL_FACT_RULE_PACK_MAX_BYTES 65536
 #define WYL_FACT_RULE_PACK_MAX_RULES 256
 #define WYL_FACT_RULE_PACK_MAX_BODY_ATOMS 16
@@ -55,7 +56,17 @@ typedef enum
   /* The pack holds no rule.  Set by registration, never by the compiler,
    * which accepts an empty pack. */
   WYL_FACT_RULE_PACK_REJECT_EMPTY,
+  /* A recursive dependency component contains a negated edge. */
+  WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE,
 } wyl_fact_rule_pack_reject_t;
+
+/* Internal language capability, not stored metadata or authorization.
+ * Production registration/replay continue to use the acyclic wrappers. */
+typedef enum
+{
+  WYL_FACT_RULE_PACK_ACYCLIC = 0,
+  WYL_FACT_RULE_PACK_POSITIVE_RECURSION,
+} wyl_fact_rule_pack_mode_t;
 
 typedef struct
 {
@@ -66,9 +77,19 @@ typedef struct
   /* 0 for the head, n for the nth body atom.  Set for SYNTAX,
    * INVALID_CONSTANT, the relation, arity, safety and type reasons. */
   guint atom_index;
-  /* CYCLE only: every rule on a cycle, ascending.  rule_index is the first. */
+  /* CYCLE: every rule on any cycle, ascending; rule_index is the first.
+   * NEGATIVE_CYCLE: every rule with an internal edge in the selected bad
+   * SCC, ascending and unique. Seed-only rules and other SCCs are excluded.
+   * rule_index/atom_index instead identify the first internal negative edge
+   * in source rule/body order, so rule_index may differ from cycle_rules[0]. */
   guint *cycle_rules;
   guint n_cycle_rules;
+  /* NEGATIVE_CYCLE only: owned resolved identities of that negative edge.
+   * Keep namespace and relation separate: both can contain dots. */
+  gchar *cycle_head_namespace;
+  gchar *cycle_head_relation;
+  gchar *cycle_body_namespace;
+  gchar *cycle_body_relation;
 } wyl_fact_rule_pack_rejection_t;
 
 /* Checks a rule pack against the relations registered for one graph and
@@ -110,6 +131,19 @@ wyrelog_error_t wyl_fact_rule_pack_compile_canonical (const gchar * text,
 
 void wyl_fact_rule_pack_rejection_clear (wyl_fact_rule_pack_rejection_t *
     rejection);
+
+/* Explicit internal opt-in variant with the same outputs and ownership as
+ * compile_canonical(). POSITIVE_RECURSION accepts positive SCCs and stratified
+ * negation; an internal negative dependency produces NEGATIVE_CYCLE. All
+ * other parsing, schema, type and safety checks remain mandatory. ACYCLIC
+ * preserves the old wrappers' contract; unknown modes return E_INVALID.
+ * Canonical bytes are independent of mode. This is not production admission
+ * activation: callers in registration and replay must stay on the old API
+ * until the storage/activation contracts in #1505/#1506 are implemented. */
+wyrelog_error_t wyl_fact_rule_pack_compile_with_mode (const gchar * text,
+    gsize text_len, const wyl_fact_graph_program_relation_t * relations,
+    gsize n_relations, wyl_fact_rule_pack_mode_t mode, gchar ** out_rules,
+    gchar *** out_canonical, wyl_fact_rule_pack_rejection_t * out_rejection);
 
 /* Stable snake_case name of a reason, e.g. "rule_pack_cycle". */
 const gchar *wyl_fact_rule_pack_reject_name (wyl_fact_rule_pack_reject_t

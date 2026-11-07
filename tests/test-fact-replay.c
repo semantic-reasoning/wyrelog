@@ -7164,6 +7164,28 @@ test_register_rule_pack_checks_then_stores (void)
   wyl_policy_fact_rule_pack_info_clear (&info);
   assert_stored_rule_pack (policy, "orders", 1, stored);
   append_order_batches (policy, root, "tenant-a", "orders");
+  /* The internal recursive compiler capability must not activate production
+   * registration. Rejected replacements preserve the stored identity. */
+  const gchar *recursive_packs[] = {
+    "big(O):-big(O).",
+    "big(O):-orders-rel(O,_,_).\norders-rel(O,22,false):-big(O).",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (recursive_packs); i++) {
+    const gchar *recursive = recursive_packs[i];
+    g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph,
+        recursive, strlen (recursive), &info, &rejection), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_CYCLE);
+    g_assert_cmpuint (rejection.rule_index, ==, 1);
+    g_assert_cmpuint (rejection.n_cycle_rules, ==, i + 1);
+    g_assert_cmpuint (info.pack_version, ==, 0);
+    g_assert_null (info.rules);
+    wyl_fact_rule_pack_rejection_clear (&rejection);
+    assert_stored_rule_pack (policy, "orders", 1, stored);
+    g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (policy, "tenant-a",
+        "orders", &info), ==, WYRELOG_E_OK);
+    g_assert_cmpmem (info.digest, sizeof info.digest, digest, sizeof digest);
+    wyl_policy_fact_rule_pack_info_clear (&info);
+  }
   /* The head has no batches. Its only row is derived by the stored rules. */
   g_autoptr (WylEngine) derived_engine = NULL;
   g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &graph,

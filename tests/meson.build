@@ -2458,7 +2458,7 @@ if get_option('enable_fact_store').allowed()
   test_fact_rule_pack = executable('test-fact-rule-pack',
     'test-fact-rule-pack.c',
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep],
+    dependencies : [wyrelog_dep, wirelog_dep],
   )
   test('fact-rule-pack', test_fact_rule_pack)
 
