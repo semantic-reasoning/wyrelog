@@ -7772,14 +7772,14 @@ test_fact_physical_quota_ledger (void)
       "physical-a", &quota), ==, WYRELOG_E_OK);
   g_assert_cmpuint (quota.committed_bytes, ==, 40);
   g_assert_cmpuint (quota.pending_bytes, ==, 0);
-  g_assert_cmpuint (quota.reconciling_bytes, ==, 120);
+  g_assert_cmpuint (quota.reconciling_bytes, ==, 80);
   g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store,
       &second, 50, TRUE, &op_status), ==, WYRELOG_E_OK);
   g_assert_cmpint (op_status.state, ==,
       WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
   g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
       "physical-a", &quota), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (quota.committed_bytes, ==, 90);
+  g_assert_cmpuint (quota.committed_bytes, ==, 50);
   g_assert_cmpuint (quota.reconciling_bytes, ==, 0);
   g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "physical-a",
       WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
@@ -7856,6 +7856,191 @@ test_fact_physical_quota_ledger (void)
       &op_status), ==, WYRELOG_E_OK);
   g_assert_cmpint (op_status.state, ==,
       WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+  cleanup_store_path (store_root, store_path);
+}
+
+/* #1509: settle charges a graph only for growth past the highest stable
+ * observation settled for it.  An observation is the graph's whole
+ * allocation, not the bytes one append wrote, so charging it on every settle
+ * counts the same pages once per append. */
+static void
+hw_settle (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *base, const gchar *graph_id,
+    const gchar *request_id, guint64 requested, guint64 observed,
+    WylPolicyFactPhysicalOperationStatus *out_status)
+{
+  WylPolicyFactPhysicalQuotaOperation op = *base;
+  op.graph_id = graph_id;
+  op.request_id = request_id;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store, &op,
+      requested, out_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      observed, TRUE, out_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (out_status->state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+}
+
+static guint64
+hw_committed (wyl_policy_store_t *store, const gchar *tenant_id,
+    guint64 *out_reconciling)
+{
+  WylPolicyFactPhysicalQuotaStatus quota = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      tenant_id, &quota), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota.pending_bytes, ==, 0);
+  if (out_reconciling != NULL)
+    *out_reconciling = quota.reconciling_bytes;
+  return quota.committed_bytes;
+}
+
+static void
+test_fact_physical_quota_high_water (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "hw-a",
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "hw-b",
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,"
+      "schema_version,owner_scope,sealed,created_at,updated_at) VALUES "
+      "('hw-a','g1','file:///hw-a/g1','/hw-a/g1',1,'hw-a',0,1,1),"
+      "('hw-a','g2','file:///hw-a/g2','/hw-a/g2',1,'hw-a',0,1,1),"
+      "('hw-b','g3','file:///hw-b/g3','/hw-b/g3',1,'hw-b',0,1,1);");
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "hw-a",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 1000 }),
+      ==, WYRELOG_E_OK);
+  const WylPolicyFactPhysicalQuotaOperation base = {
+    .tenant_id = "hw-a",
+    .graph_id = "g1",
+    .request_id = "unused",
+    .inventory_generation = "generation-hw",
+    .inventory_digest =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  };
+  WylPolicyFactPhysicalOperationStatus st = { 0 };
+  guint64 reconciling = 0;
+
+  /* 1: the first settle charges the whole observation. */
+  hw_settle (store, &base, "g1", "hw-1", 100, 40, &st);
+  g_assert_cmpuint (st.applied_bytes, ==, 40);
+  g_assert_cmpuint (hw_committed (store, "hw-a", NULL), ==, 40);
+
+  /* 2: a second append on the same graph charges only the growth. */
+  hw_settle (store, &base, "g1", "hw-2", 100, 70, &st);
+  g_assert_cmpuint (st.applied_bytes, ==, 30);
+  g_assert_cmpuint (hw_committed (store, "hw-a", NULL), ==, 70);
+
+  /* 3: a smaller observation (a checkpoint shrank the WAL) charges nothing
+   * and lowers nothing. */
+  hw_settle (store, &base, "g1", "hw-3", 100, 50, &st);
+  g_assert_cmpuint (st.applied_bytes, ==, 0);
+  g_assert_cmpuint (hw_committed (store, "hw-a", NULL), ==, 70);
+  g_assert_cmpint (scalar_int64 (db, "SELECT charged_bytes FROM "
+      "fact_physical_quota_graph_charges WHERE tenant_id='hw-a' AND "
+      "graph_id='g1'"), ==, 70);
+
+  /* 4: another graph has its own mark. */
+  hw_settle (store, &base, "g2", "hw-4", 100, 30, &st);
+  g_assert_cmpuint (st.applied_bytes, ==, 30);
+  g_assert_cmpuint (hw_committed (store, "hw-a", NULL), ==, 100);
+
+  /* 5: unstable evidence holds the larger of the request and the growth,
+   * and leaves the mark alone until stable evidence settles it. */
+  WylPolicyFactPhysicalQuotaOperation op = base;
+  op.request_id = "hw-5";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store, &op,
+      10, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      90, FALSE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (st.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING);
+  g_assert_cmpuint (st.applied_bytes, ==, 20);
+  g_assert_cmpuint (hw_committed (store, "hw-a", &reconciling), ==, 100);
+  g_assert_cmpuint (reconciling, ==, 20);
+  g_assert_cmpint (scalar_int64 (db, "SELECT charged_bytes FROM "
+      "fact_physical_quota_graph_charges WHERE tenant_id='hw-a' AND "
+      "graph_id='g1'"), ==, 70);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      80, TRUE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (st.state, ==, WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+  g_assert_cmpuint (st.applied_bytes, ==, 10);
+  g_assert_cmpuint (hw_committed (store, "hw-a", &reconciling), ==, 110);
+  g_assert_cmpuint (reconciling, ==, 0);
+
+  /* 6: unstable evidence below the mark holds the request; a repeat that
+   * does not grow is a replay; stable evidence below the mark charges 0. */
+  op.request_id = "hw-6";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store, &op,
+      25, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      60, FALSE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (st.applied_bytes, ==, 25);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      85, FALSE, &st), ==, WYRELOG_E_OK);
+  g_assert_true (st.replay);
+  g_assert_cmpuint (hw_committed (store, "hw-a", &reconciling), ==, 110);
+  g_assert_cmpuint (reconciling, ==, 25);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      60, TRUE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (st.applied_bytes, ==, 0);
+  g_assert_cmpuint (hw_committed (store, "hw-a", &reconciling), ==, 110);
+  g_assert_cmpuint (reconciling, ==, 0);
+
+  /* 7: an uncertain cancel's reconciling hold settles to the growth. */
+  op.request_id = "hw-7";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store, &op,
+      15, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_physical_quota (store, &op,
+      FALSE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op,
+      100, TRUE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (st.applied_bytes, ==, 20);
+  g_assert_cmpuint (hw_committed (store, "hw-a", &reconciling), ==, 130);
+  g_assert_cmpuint (reconciling, ==, 0);
+
+  /* 8: committed is exactly the sum of the graphs' marks, so a limit at the
+   * graphs' real allocation is accepted. */
+  g_assert_cmpint (scalar_int64 (db, "SELECT SUM(charged_bytes) FROM "
+      "fact_physical_quota_graph_charges WHERE tenant_id='hw-a'"), ==,
+      130);
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "hw-a",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 130 }),
+      ==, WYRELOG_E_OK);
+
+  /* 9: growth that would overflow committed fails before any write: the
+   * mark, the usage and the operation are all left as they were. */
+  WylPolicyFactPhysicalQuotaOperation big = base;
+  big.tenant_id = "hw-b";
+  big.graph_id = "g3";
+  big.request_id = "hw-9";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store, &big,
+      1, &st), ==, WYRELOG_E_OK);
+  exec_ok (db, "UPDATE fact_tenant_physical_quota_usage SET "
+      "committed_bytes=9223372036854775800 WHERE tenant_id='hw-b'");
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &big,
+      10, TRUE, &st), ==, WYRELOG_E_IO);
+  g_assert_cmpint (scalar_int64 (db, "SELECT COUNT(*) FROM "
+      "fact_physical_quota_graph_charges WHERE tenant_id='hw-b'"), ==, 0);
+  g_assert_cmpint (scalar_int64 (db, "SELECT committed_bytes FROM "
+      "fact_tenant_physical_quota_usage WHERE tenant_id='hw-b'"), ==,
+      G_GINT64_CONSTANT (9223372036854775800));
+  g_autofree gchar *big_state = scalar_text (db, "SELECT state FROM "
+          "fact_physical_quota_reservations WHERE request_id='hw-9'");
+  g_assert_cmpstr (big_state, ==, "pending");
+  g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_store_path (store_root, store_path);
 }
 
@@ -9039,6 +9224,8 @@ main (int argc, char **argv)
       test_fact_physical_quota_graph_charges_rejects_malformed);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-ledger",
       test_fact_physical_quota_ledger);
+  g_test_add_func ("/policy/graph-authority/fact-physical-quota-high-water",
+      test_fact_physical_quota_high_water);
   g_test_add_func
     ("/policy/graph-authority/graph-quota-reservation-reopen",
       test_graph_quota_reservation_survives_reopen);
