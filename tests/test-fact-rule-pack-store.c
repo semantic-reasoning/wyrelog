@@ -626,6 +626,14 @@ assert_legacy_reader (const gchar *executable, const gchar *path,
   if (!g_spawn_check_wait_status (status, &error))
     g_printerr ("legacy reader: %s\n%s", error->message, errors);
   g_assert_no_error (error);
+  /* Windows text stdout translates the final LF to CRLF. Preserve all other
+   * bytes so extra lines or changed result fields still fail the assertion. */
+  gsize output_size = strlen (output);
+  if (output_size >= 2 && output[output_size - 2] == '\r'
+      && output[output_size - 1] == '\n') {
+    output[output_size - 2] = '\n';
+    output[output_size - 1] = '\0';
+  }
   g_autofree gchar *expected = g_strdup_printf (
     "%s version=%u reason=%s rule=%u\n", graph, version,
     recursive ? "rule_pack_cycle" : "rule_pack_none", recursive ? 2 : 0);

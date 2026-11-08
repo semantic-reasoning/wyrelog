@@ -2253,12 +2253,21 @@ test_fact_rule_pack_legacy_reader = executable('test-fact-rule-pack-legacy-reade
 test('rule-pack-legacy-fixture-provenance', python3,
   args : [files('check-rule-pack-legacy-fixture.py'), meson.project_source_root()])
 
+fact_rule_pack_store_sources = []
+if not get_option('enable_fact_store').allowed()
+  # Keep storage compatibility coverage when the production reader is disabled.
+  fact_rule_pack_store_sources += files(
+    '../wyrelog/fact/rule-pack-private.c',
+    '../wyrelog/fact/graph-program-private.c',
+  )
+endif
 test_fact_rule_pack_store = executable('test-fact-rule-pack-store',
   'test-fact-rule-pack-store.c',
   'fact-test-support.c',
+  fact_rule_pack_store_sources,
   c_args : fact_test_support_c_args,
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
+  dependencies : [wyrelog_dep, sqlite_dep, wirelog_dep] + fact_test_support_deps,
 )
 
 test('fact-rule-pack-store', test_fact_rule_pack_store,
