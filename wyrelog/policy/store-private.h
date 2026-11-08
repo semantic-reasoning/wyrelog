@@ -3186,7 +3186,10 @@ wyrelog_error_t wyl_policy_store_load_fact_relation_query_max_rows
 /* One stored version of a graph's rule pack.  rules[i] is the text of
  * rule_index i + 1, the index the rule-pack compiler reports in a rejection;
  * registration stores the compiler's canonical text.  rules is
- * NULL-terminated. */
+ * NULL-terminated. The v1 representation also holds recursive rules without
+ * a format marker or migration; load success is integrity evidence, not
+ * language acceptance. Use the mode-aware stored rule-pack compiler against
+ * selected schemas before evaluation. Production remains acyclic. */
 typedef struct
 {
   guint32 pack_version;
@@ -3205,7 +3208,8 @@ wyrelog_error_t wyl_policy_fact_rule_pack_digest (const gchar * const *rules,
 /* Stores rules as the next version of the graph's pack; earlier versions
  * stay stored and are never modified.  Checks only what storage needs: 1 to
  * WYL_FACT_RULE_PACK_MAX_RULES non-empty single-line UTF-8 rules totalling
- * at most WYL_FACT_RULE_PACK_MAX_BYTES (WYRELOG_E_POLICY otherwise).  It does
+ * at most WYL_FACT_RULE_PACK_MAX_BYTES including newline separators
+ * (WYRELOG_E_POLICY otherwise).  It does
  * not parse or check the rules against the graph; the caller compiles them
  * first.  WYRELOG_E_NOT_FOUND when the graph is not active. */
 wyrelog_error_t wyl_policy_store_register_fact_rule_pack
@@ -3214,7 +3218,12 @@ wyrelog_error_t wyl_policy_store_register_fact_rule_pack
     guint32 * out_pack_version);
 /* Loads the graph's latest pack version in rule_index order.
  * WYRELOG_E_NOT_FOUND when the graph has none; WYRELOG_E_INTERNAL when the
- * stored rows disagree with their header's count or digest. */
+ * stored rows disagree with their header's count or digest, have malformed
+ * indices/types/NUL text, or exceed the compiler's joined byte limit. Such
+ * corruption leaves out_info empty; never fall back to an earlier version.
+ * Bounds are checked before copying row text. The caller must report the
+ * affected graph and restore its matching policy backup rather than treating
+ * an integrity failure as unsupported language or an absent pack. */
 wyrelog_error_t wyl_policy_store_load_fact_rule_pack (wyl_policy_store_t *
     store, const gchar * tenant_id, const gchar * graph_id,
     wyl_policy_fact_rule_pack_info_t * out_info);

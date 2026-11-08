@@ -207,6 +207,41 @@ legacy recursive-stratum invariant failure is not artificially injected.
 the stored pack version, digest and rules unchanged; normal replay still
 refuses stored recursive packs. No test-only raw compiler bypass is added.
 
+## Stored reader compatibility (#1505)
+
+`wyl_fact_rule_pack_compile_stored()` consumes counted canonical rows, version
+and digest plus the exact selected schemas and an explicit #1504 mode. It
+rechecks identity and the complete joined byte limit, compiles with schema and
+safety validation, then requires byte-identical canonical rows. No usable
+output is returned on failure. Unknown capability is an explicit invalid
+request. Positive recursion refused by an acyclic reader is distinguished from
+unsafe negative cycles through diagnostic-only positive-mode analysis; that
+analysis never publishes a program. Normal replay and restore explicitly pass
+`ACYCLIC`. #1506 owns any production opt-in and publication/security changes.
+
+The v1 ordered rows and digest already represent recursive programs, so no
+marker, migration or rewrite was introduced. The low-level writer remains
+structural and transactional; it is not a semantic admission API. Its byte
+limit includes separators, matching the compiler. The loader checks row counts
+and byte limits before copying text, and refuses corrupt latest versions
+instead of falling back. A failed second-row insertion leaves neither header
+nor rows visible after reopening the policy database.
+
+`fact-rule-pack-store` proves exact known-answer acyclic/recursive identities
+across upgrade, close/reopen and SQLite policy backup/restore, mixed ordinary
+and recursive graphs, corruption refusal and acyclic replacement preserving
+recursive history. The standalone historical fixture compiles byte-exact
+pre-#1504 compiler/renderer sources; a provenance test checks their SHA-256 and
+Git blob hashes. Its new read-only SQL adapter and current Wirelog dependency
+are explicitly narrower evidence than a full old daemon. Current production
+replay separately proves graph-local recursive refusal across restart.
+
+The secure-bridge `fact-offline-restore-stage-replay` test checks acyclic
+identity preservation and recursive refusal without source/stage/pack changes.
+Fact bundles do not transport policy rows; policy backup is a separate part of
+the matching stopped-writer backup set. See the operator runbook's
+[downgrade procedure](operator-runbook.md#rule-pack-storage-compatibility-and-downgrade).
+
 ## Resource-control inventory and downstream work
 
 The pin already contains memory admission/governor machinery and internal

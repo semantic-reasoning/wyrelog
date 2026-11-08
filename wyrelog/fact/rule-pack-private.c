@@ -112,6 +112,10 @@ static const gchar *const reject_names[] = {
   [WYL_FACT_RULE_PACK_REJECT_COMPILE] = "rule_pack_compile",
   [WYL_FACT_RULE_PACK_REJECT_EMPTY] = "rule_pack_empty",
   [WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE] = "rule_pack_negative_cycle",
+  [WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY] = "rule_pack_stored_identity",
+  [WYL_FACT_RULE_PACK_REJECT_NONCANONICAL] = "rule_pack_noncanonical",
+  [WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_RECURSION] = "rule_pack_unsupported_recursion",
+  [WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_CAPABILITY] = "rule_pack_unsupported_capability",
 };
 
 const gchar *
@@ -906,4 +910,92 @@ wyl_fact_rule_pack_compile_with_mode (const gchar *text, gsize text_len,
     *out_canonical = canonical_rules (rules);
   *out_rules = g_steal_pointer (&rendered);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_rule_pack_compile_stored (const wyl_policy_fact_rule_pack_info_t *pack,
+    const wyl_fact_graph_program_relation_t *relations, gsize n_relations,
+    wyl_fact_rule_pack_mode_t mode, gchar **out_rules,
+    wyl_fact_rule_pack_rejection_t *out_rejection)
+{
+  if (out_rules != NULL)
+    *out_rules = NULL;
+  if (out_rejection != NULL)
+    *out_rejection = (wyl_fact_rule_pack_rejection_t) { 0 };
+  if (pack == NULL || out_rules == NULL || out_rejection == NULL
+      || (relations == NULL && n_relations > 0))
+    return WYRELOG_E_INVALID;
+  if (mode != WYL_FACT_RULE_PACK_ACYCLIC
+      && mode != WYL_FACT_RULE_PACK_POSITIVE_RECURSION) {
+    out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_CAPABILITY;
+    return WYRELOG_E_INVALID;
+  }
+  if (pack->pack_version == 0 || pack->n_rules == 0
+      || pack->n_rules > WYL_FACT_RULE_PACK_MAX_RULES || pack->rules == NULL) {
+    out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY;
+    return WYRELOG_E_POLICY;
+  }
+  /* Counted rows: do not trust an unbounded strv walk or allocate the joined
+   * source before validating its complete byte budget, including separators. */
+  gsize bytes = pack->n_rules - 1;
+  for (gsize i = 0; i < pack->n_rules; i++) {
+    const gchar *row = pack->rules[i];
+    gsize len = row == NULL ? 0 : strlen (row);
+    if (len == 0 || len > WYL_FACT_RULE_PACK_MAX_BYTES - bytes
+        || strpbrk (row, "\r\n") != NULL || !g_utf8_validate (row, len, NULL)) {
+      out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY;
+      out_rejection->rule_index = i + 1;
+      return WYRELOG_E_POLICY;
+    }
+    bytes += len;
+  }
+  guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  if (wyl_policy_fact_rule_pack_digest ((const gchar * const *) pack->rules,
+      pack->n_rules, digest) != WYRELOG_E_OK
+      || memcmp (digest, pack->digest, sizeof digest) != 0) {
+    out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY;
+    return WYRELOG_E_POLICY;
+  }
+  g_autoptr (GString) text = g_string_sized_new (bytes);
+  for (gsize i = 0; i < pack->n_rules; i++) {
+    if (i > 0)
+      g_string_append_c (text, '\n');
+    g_string_append (text, pack->rules[i]);
+  }
+  g_autofree gchar *rendered = NULL;
+  g_auto (GStrv) canonical = NULL;
+  wyrelog_error_t rc = wyl_fact_rule_pack_compile_with_mode (text->str,
+          text->len, relations, n_relations, mode, &rendered, &canonical,
+          out_rejection);
+  wyl_fact_rule_pack_rejection_t unsupported = { 0 };
+  if (rc == WYRELOG_E_POLICY && mode == WYL_FACT_RULE_PACK_ACYCLIC
+      && out_rejection->reason == WYL_FACT_RULE_PACK_REJECT_CYCLE) {
+    /* Diagnostic-only analysis: a negative cycle is unsafe, not an otherwise
+     * valid pack requiring a more capable reader. Never publish this output. */
+    unsupported = *out_rejection;
+    *out_rejection = (wyl_fact_rule_pack_rejection_t) { 0 };
+    rc = wyl_fact_rule_pack_compile_with_mode (text->str, text->len, relations,
+            n_relations, WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered,
+            &canonical, out_rejection);
+  }
+  if (rc == WYRELOG_E_OK) {
+    for (gsize i = 0; i < pack->n_rules; i++) {
+      if (canonical[i] == NULL || strcmp (canonical[i], pack->rules[i]) != 0) {
+        out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_NONCANONICAL;
+        out_rejection->rule_index = i + 1;
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+    }
+    if (rc == WYRELOG_E_OK && unsupported.reason != WYL_FACT_RULE_PACK_REJECT_NONE) {
+      *out_rejection = unsupported;
+      unsupported = (wyl_fact_rule_pack_rejection_t) { 0 };
+      out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_RECURSION;
+      rc = WYRELOG_E_POLICY;
+    }
+  }
+  wyl_fact_rule_pack_rejection_clear (&unsupported);
+  if (rc == WYRELOG_E_OK)
+    *out_rules = g_steal_pointer (&rendered);
+  return rc;
 }

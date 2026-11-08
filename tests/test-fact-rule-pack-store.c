@@ -542,8 +542,227 @@ out:
   return rc;
 }
 
+static const gchar *const COMPAT_RULES[] = {
+  "reachable(X,Y):-edge(X,Y).",
+  "reachable(X,Z):-reachable(X,Y),edge(Y,Z).",
+};
+static const gchar *const COMPAT_ACYCLIC_RULES[] = {
+  "reachable(X,Y):-edge(X,Y).",
+  "reachable(X,Z):-edge(X,Y),edge(Y,Z).",
+};
+
+static void
+backup_policy (wyl_policy_store_t *store, const gchar *path)
+{
+  sqlite3 *destination = NULL;
+  g_assert_cmpint (sqlite3_open (path, &destination), ==, SQLITE_OK);
+  sqlite3_backup *backup = sqlite3_backup_init (destination, "main",
+          raw_db (store), "main");
+  g_assert_nonnull (backup);
+  g_assert_cmpint (sqlite3_backup_step (backup, -1), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_backup_remaining (backup), ==, 0);
+  g_assert_cmpint (sqlite3_backup_finish (backup), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_close (destination), ==, SQLITE_OK);
+}
+
+static void
+assert_compat_pack (wyl_policy_store_t *store, const gchar *graph,
+    guint version, gboolean recursive)
+{
+  wyl_policy_fact_rule_pack_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (store, "tenant-a",
+      graph, &info), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (info.pack_version, ==, version);
+  g_assert_cmpuint (info.n_rules, ==, 2);
+  for (gsize i = 0; i < info.n_rules; i++)
+    g_assert_cmpstr (info.rules[i], ==,
+        recursive ? COMPAT_RULES[i] : COMPAT_ACYCLIC_RULES[i]);
+  g_autofree gchar *hex = digest_hex (info.digest);
+  /* Independent known answers for the v1 length-prefixed encoding. */
+  g_assert_cmpstr (hex, ==, recursive
+      ? "80458b32c06844c447c99be32275339df60cbf6f43a599446721ffd5497337e1"
+      : "bb2e2c48aee52c1a447bf39e09fdb22c0d18f4f781ec92b9e68fd1201bbab737");
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    { "x", "int64", FALSE, TRUE }, { "y", "int64", FALSE, TRUE },
+  };
+  const wyl_fact_graph_program_relation_t schemas[] = {
+    { "g", "edge", columns, 2 }, { "g", "reachable", columns, 2 },
+  };
+  g_autofree gchar *rules = NULL;
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&info, schemas,
+      G_N_ELEMENTS (schemas), WYL_FACT_RULE_PACK_POSITIVE_RECURSION,
+      &rules, &rejection), ==, WYRELOG_E_OK);
+  g_assert_nonnull (rules);
+  g_clear_pointer (&rules, g_free);
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&info, schemas,
+      G_N_ELEMENTS (schemas), WYL_FACT_RULE_PACK_ACYCLIC, &rules, &rejection),
+      ==, recursive ? WYRELOG_E_POLICY : WYRELOG_E_OK);
+  if (recursive) {
+    g_assert_null (rules);
+    g_assert_cmpint (rejection.reason, ==,
+        WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_RECURSION);
+  }
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+}
+
+static void
+assert_legacy_reader (const gchar *executable, const gchar *path,
+    const gchar *graph, gboolean recursive, guint version)
+{
+  gchar *argv[] = { (gchar *) executable, (gchar *) path, (gchar *) graph,
+                    recursive ? "recursive" : "acyclic", NULL };
+  g_autofree gchar *before = NULL;
+  gsize before_size = 0;
+  g_assert_true (g_file_get_contents (path, &before, &before_size, NULL));
+  g_autofree gchar *output = NULL;
+  g_autofree gchar *errors = NULL;
+  gint status = 0;
+  g_autoptr (GError) error = NULL;
+  g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
+      &output, &errors, &status, &error));
+  g_assert_no_error (error);
+  if (!g_spawn_check_wait_status (status, &error))
+    g_printerr ("legacy reader: %s\n%s", error->message, errors);
+  g_assert_no_error (error);
+  g_autofree gchar *expected = g_strdup_printf (
+    "%s version=%u reason=%s rule=%u\n", graph, version,
+    recursive ? "rule_pack_cycle" : "rule_pack_none", recursive ? 2 : 0);
+  g_assert_cmpstr (output, ==, expected);
+  g_autofree gchar *after = NULL;
+  gsize after_size = 0;
+  g_assert_true (g_file_get_contents (path, &after, &after_size, NULL));
+  g_assert_cmpmem (before, before_size, after, after_size);
+}
+
+static void
+check_recursive_compatibility (const gchar *legacy_reader)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_autofree gchar *root = NULL;
+  g_assert_cmpint (open_store_with_graph (&store, &root), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_graph_column_t graph_columns[] = {
+    { "x", "int64" }, { "y", "int64" },
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    { "g.edge", graph_columns, 2 }, { "g.reachable", graph_columns, 2 },
+  };
+  const wyl_policy_fact_graph_create_options_t graph_options = {
+    .tenant_id = "tenant-a", .graph_id = "ordinary", .fact_root = root,
+    .schema_version = 1, .owner_scope = "tenant-a",
+    .relations = graph_relations, .n_relations = 2,
+  };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph (store, &graph_options,
+      NULL), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    { "x", "int64", FALSE, TRUE }, { "y", "int64", FALSE, TRUE },
+  };
+  const gchar *graphs[] = { "graph-main", "ordinary" };
+  const gchar *relations[] = { "edge", "reachable" };
+  for (guint g = 0; g < 2; g++) {
+    for (guint r = 0; r < 2; r++) {
+      const wyl_policy_fact_relation_schema_options_t schema = {
+        .tenant_id = "tenant-a", .graph_id = graphs[g], .namespace_id = "g",
+        .relation_name = relations[r], .schema_version = 1,
+        .relation_visible = TRUE, .columns = columns, .n_columns = 2,
+      };
+      g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (store,
+          &schema), ==, WYRELOG_E_OK);
+    }
+  }
+  guint32 version = 0;
+  for (guint g = 0; g < 2; g++) {
+    g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (store, "tenant-a",
+        graphs[g], COMPAT_ACYCLIC_RULES, 2, &version), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (version, ==, 1);
+    assert_compat_pack (store, graphs[g], 1, FALSE);
+  }
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite", NULL);
+  g_autofree gchar *backup_path = g_build_filename (root, "backup.sqlite", NULL);
+  backup_policy (store, policy_path);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  assert_legacy_reader (legacy_reader, policy_path, "graph-main", FALSE, 1);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  assert_compat_pack (store, "graph-main", 1, FALSE);
+  /* Test-authorized storage: public registration still refuses recursion. */
+  g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (store, "tenant-a",
+      "graph-main", COMPAT_RULES, 2, &version), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (version, ==, 2);
+  assert_compat_pack (store, "graph-main", 2, TRUE);
+
+  /* Failure between header and second row must expose neither partial header
+   * nor partial rows, and must survive a real close/reopen. */
+  g_assert_true (exec_sql (store,
+      "CREATE TRIGGER fail_pack BEFORE INSERT ON fact_rule_pack_rules "
+      "WHEN NEW.pack_version=3 AND NEW.rule_index=2 BEGIN "
+      "SELECT RAISE(ABORT,'injected second rule failure'); END;"));
+  g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (store, "tenant-a",
+      "graph-main", COMPAT_RULES, 2, &version), !=, WYRELOG_E_OK);
+  g_assert_cmpuint (version, ==, 0);
+  g_assert_true (exec_sql (store, "DROP TRIGGER fail_pack;"));
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (raw_db (store),
+      "SELECT (SELECT count(*) FROM fact_rule_packs WHERE pack_version=3),"
+      "(SELECT count(*) FROM fact_rule_pack_rules WHERE pack_version=3)",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 0);
+  g_assert_cmpint (sqlite3_column_int (stmt, 1), ==, 0);
+  sqlite3_finalize (stmt);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  assert_legacy_reader (legacy_reader, policy_path, "graph-main", TRUE, 2);
+  assert_legacy_reader (legacy_reader, policy_path, "ordinary", FALSE, 1);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &store), ==, WYRELOG_E_OK);
+  assert_compat_pack (store, "graph-main", 2, TRUE);
+  assert_compat_pack (store, "ordinary", 1, FALSE);
+  backup_policy (store, backup_path);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  assert_legacy_reader (legacy_reader, backup_path, "graph-main", TRUE, 2);
+  assert_legacy_reader (legacy_reader, backup_path, "ordinary", FALSE, 1);
+  g_assert_cmpint (wyl_policy_store_open (backup_path, &store), ==, WYRELOG_E_OK);
+  assert_compat_pack (store, "graph-main", 2, TRUE);
+  assert_compat_pack (store, "ordinary", 1, FALSE);
+
+  const gchar *corruptions[] = {
+    "DELETE FROM fact_rule_pack_rules WHERE graph_id='graph-main' AND pack_version=2 AND rule_index=1;",
+    "UPDATE fact_rule_pack_rules SET rule_index=3 WHERE graph_id='graph-main' AND pack_version=2 AND rule_index=2;",
+    "UPDATE fact_rule_packs SET pack_digest=zeroblob(32) WHERE graph_id='graph-main' AND pack_version=2;",
+    "UPDATE fact_rule_pack_rules SET rule_text=printf('%.*c',70000,'x') WHERE graph_id='graph-main' AND pack_version=2 AND rule_index=1;",
+    "UPDATE fact_rule_pack_rules SET rule_text=printf('%.*c',32768,'x') WHERE graph_id='graph-main' AND pack_version=2;",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (corruptions); i++) {
+    g_assert_true (exec_sql (store, "SAVEPOINT corrupt; DROP TRIGGER fact_rule_packs_immutable; DROP TRIGGER fact_rule_pack_rules_immutable;"));
+    g_assert_true (exec_sql (store, corruptions[i]));
+    wyl_policy_fact_rule_pack_info_t info = { 0 };
+    g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (store, "tenant-a",
+        "graph-main", &info), ==, WYRELOG_E_INTERNAL);
+    g_assert_cmpuint (info.pack_version, ==, 0);
+    g_assert_null (info.rules);
+    assert_compat_pack (store, "ordinary", 1, FALSE);
+    g_assert_true (exec_sql (store, "ROLLBACK TO corrupt; RELEASE corrupt;"));
+    assert_compat_pack (store, "graph-main", 2, TRUE);
+  }
+  /* Replacement before downgrade appends a version; immutable history stays. */
+  g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (store, "tenant-a",
+      "graph-main", COMPAT_ACYCLIC_RULES, 2, &version), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (version, ==, 3);
+  assert_compat_pack (store, "graph-main", 3, FALSE);
+  g_assert_cmpint (sqlite3_prepare_v2 (raw_db (store),
+      "SELECT count(*) FROM fact_rule_pack_rules WHERE graph_id='graph-main' AND pack_version=2",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 2);
+  sqlite3_finalize (stmt);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  assert_legacy_reader (legacy_reader, backup_path, "graph-main", FALSE, 3);
+  assert_legacy_reader (legacy_reader, backup_path, "ordinary", FALSE, 1);
+  cleanup_fact_root (root);
+}
+
 int
-main (void)
+main (int argc, char **argv)
 {
   gint (*const checks[]) (void) = {
     check_table_columns,
@@ -560,5 +779,7 @@ main (void)
     if (rc != 0)
       return wyl_test_normalize_exit_status (rc);
   }
+  g_assert_cmpint (argc, ==, 2);
+  check_recursive_compatibility (argv[1]);
   return wyl_test_normalize_exit_status (0);
 }

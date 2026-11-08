@@ -7285,6 +7285,14 @@ test_register_rule_pack_checks_then_stores (void)
     assert_guarded_rule_count (handle, TRUE, 1);
     assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
   }
+  /* A real recursive latest version also fails graph-locally on restart,
+   * leaving the unrelated ordinary graph queryable and stored data intact. */
+  const gchar *recursive_latest[] = {
+    "big(O):-orders-rel(O,_,_).", "big(O):-big(O).",
+  };
+  guint32 recursive_version = 0;
+  g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (live, "tenant-a",
+      "orders", recursive_latest, 2, &recursive_version), ==, WYRELOG_E_OK);
   g_clear_object (&handle);
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
@@ -7292,6 +7300,10 @@ test_register_rule_pack_checks_then_stores (void)
   g_assert_false (bad.queryable);
   assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
   live = wyl_handle_get_policy_store (handle);
+  const gchar *const recursive_stored[] = {
+    recursive_latest[0], recursive_latest[1], NULL,
+  };
+  assert_stored_rule_pack (live, "orders", recursive_version, recursive_stored);
   const gchar *no_match = "big(O):-orders-rel(O,999,false).";
   g_assert_cmpint (wyl_fact_replay_register_rule_pack (live, &graph,
       no_match, strlen (no_match), &info, &rejection), ==, WYRELOG_E_OK);

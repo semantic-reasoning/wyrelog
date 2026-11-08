@@ -746,6 +746,105 @@ test_invalid_arguments (void)
 }
 
 static void
+test_stored_reader_contract (void)
+{
+  gchar *rows[] = { "reachable(X,Y):-edge(X,Y).",
+                    "reachable(X,Z):-reachable(X,Y),edge(Y,Z).", NULL };
+  wyl_policy_fact_rule_pack_info_t pack = {
+    .pack_version = 7, .rules = rows, .n_rules = 2,
+  };
+  g_assert_cmpint (wyl_policy_fact_rule_pack_digest (
+        (const gchar * const *) rows, 2, pack.digest), ==, WYRELOG_E_OK);
+  g_autofree gchar *rendered = NULL;
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (rendered, ==,
+      G_REACH "(V0, V1) :- " G_EDGE "(V0, V1).\n"
+      G_REACH "(V0, V1) :- " G_REACH "(V0, V2), " G_EDGE "(V2, V1).\n");
+  g_clear_pointer (&rendered, g_free);
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_ACYCLIC, &rendered, &rejection), ==, WYRELOG_E_POLICY);
+  g_assert_null (rendered);
+  g_assert_cmpint (rejection.reason, ==,
+      WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_RECURSION);
+  g_assert_cmpuint (rejection.rule_index, ==, 2);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+
+  pack.digest[0] ^= 1;
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (rendered);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY);
+  pack.digest[0] ^= 1;
+  pack.pack_version = 0;
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY);
+  pack.pack_version = 7;
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      (wyl_fact_rule_pack_mode_t) 99, &rendered, &rejection), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (rejection.reason, ==,
+      WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_CAPABILITY);
+
+  rows[0] = "reachable(X,Y) :- edge(X,Y).";
+  g_assert_cmpint (wyl_policy_fact_rule_pack_digest (
+        (const gchar * const *) rows, 2, pack.digest), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_NONCANONICAL);
+  g_assert_cmpuint (rejection.rule_index, ==, 1);
+  g_assert_null (rendered);
+
+  rows[0] = "p(X):-seed(X),!p(X).";
+  rows[1] = NULL;
+  pack.n_rules = 1;
+  g_assert_cmpint (wyl_policy_fact_rule_pack_digest (
+        (const gchar * const *) rows, 1, pack.digest), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_ACYCLIC, &rendered, &rejection), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE);
+  g_assert_null (rendered);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  pack.n_rules = WYL_FACT_RULE_PACK_MAX_RULES + 1;
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY);
+  pack.n_rules = 1;
+  rows[0] = NULL;
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY);
+  g_autofree gchar *large = g_strnfill (WYL_FACT_RULE_PACK_MAX_BYTES / 2, 'x');
+  rows[0] = rows[1] = large;
+  pack.n_rules = 2;
+  g_assert_cmpint (wyl_policy_fact_rule_pack_digest (
+        (const gchar * const *) rows, 2, pack.digest), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_rule_pack_compile_stored (&pack,
+      recursive_relations, G_N_ELEMENTS (recursive_relations),
+      WYL_FACT_RULE_PACK_POSITIVE_RECURSION, &rendered, &rejection), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY);
+  g_assert_null (rendered);
+}
+
+static void
 test_reason_names (void)
 {
   g_assert_cmpstr (wyl_fact_rule_pack_reject_name
@@ -754,18 +853,19 @@ test_reason_names (void)
         (WYL_FACT_RULE_PACK_REJECT_UNSAFE_NEGATED_VARIABLE), ==,
       "rule_pack_unsafe_negated_variable");
   for (gint r = WYL_FACT_RULE_PACK_REJECT_NONE;
-      r <= WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE; r++)
+      r <= WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_CAPABILITY; r++)
     g_assert_nonnull (wyl_fact_rule_pack_reject_name (r));
   g_assert_cmpstr (wyl_fact_rule_pack_reject_name
         (WYL_FACT_RULE_PACK_REJECT_EMPTY), ==, "rule_pack_empty");
   g_assert_null (wyl_fact_rule_pack_reject_name
-        (WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE + 1));
+        (WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_CAPABILITY + 1));
 }
 
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact/rule-pack/stored-reader", test_stored_reader_contract);
   g_test_add_func ("/fact/rule-pack/accept/rendered",
       test_accept_renders_encoded_rules);
   g_test_add_func ("/fact/rule-pack/accept/negation",

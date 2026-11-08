@@ -2025,6 +2025,68 @@ mutate a relation before registering its schema fail with
 `fact_schema_not_found` on the schema-backed `/facts/<tenant>/<graph>/<relation>`
 routes.
 
+### Rule-pack storage compatibility and downgrade
+
+Rule packs use the existing immutable ordered rows, pack version and
+`wyrelog.fact.rule-pack.v1` digest. Positive recursion needs no new database
+column, format marker or migration. Existing acyclic canonical bytes and
+digests are unchanged. Reading intact storage does not establish that a
+reader supports its language: the selected schemas, canonical bytes and
+reader capability must also pass validation.
+
+The private reader added in #1505 can validate positive recursive packs when
+explicitly opted in. **This release's production registration, startup replay
+and fact restore remain nonrecursive** until #1506. It is not a recursively
+capable production daemon. A synthetic recursive latest version cannot be
+made queryable merely by restarting it. On current startup that graph is
+unavailable while an unaffected ordinary graph can remain queryable; a failed
+refresh preserves a previously published engine rather than publishing a
+partially validated replacement. Operators must check graph status as well
+as process readiness.
+
+Private reader diagnostics distinguish `rule_pack_unsupported_recursion`
+(valid positive recursion with an acyclic reader), `rule_pack_negative_cycle`
+(unsafe recursion through negation), `rule_pack_noncanonical`,
+`rule_pack_stored_identity`, and `rule_pack_unsupported_capability`. These are
+internal reader outcomes, not new HTTP response codes. Storage loading rejects
+missing/noncontiguous indices, count/digest/type mismatches and excessive
+joined text with `WYRELOG_E_INTERNAL` and an empty pack. Treat that as integrity
+failure for the affected graph: preserve the damaged files and restore a
+verified matching backup; do not silently select an earlier version, recalculate
+a digest over corrupt data, or edit immutable rows to get past the check.
+
+The offline **fact** bundle transports fact artifacts and schema selections;
+it does not contain `policy.sqlite` or its rule packs. Capture the matching
+policy database and complete fact root with all writers stopped, as described
+in [Backup And Restore](#backup-and-restore). Restoring only a fact bundle
+does not roll a rule pack back. Policy SQLite backup/reopen tests preserve
+exact ordered acyclic and recursive identity; separate fact restore tests
+confirm that the current acyclic reader refuses recursive policy without
+publishing the staged replacement or modifying its source or pack.
+
+For a future downgrade from a recursively capable release, before stopping
+that release, inventory every active graph and replace each recursive latest
+pack with a valid acyclic equivalent using `fact rule-pack register`. This
+appends a new version; old recursive history stays intact. Verify successful
+refresh, graph status and expected queries for each graph, then stop all
+writers and capture the matching backup set. There is no rule-pack removal
+API: do not delete historical rows or rewrite their digest. Replacement only
+removes recursion from the active version. If no equivalent exists, preserve
+the capable installation or use a verified pre-recursion backup set instead.
+This language preparation does not override other package/template downgrade
+restrictions; general package rollback remains restore-from-backup.
+
+If an unsupported reader has already started, stop it and preserve the whole
+data set. Return to the compatible capable package/templates to replace the
+pack and verify graph recovery, or restore the complete matching pre-recursion
+backup set with its matching package. Do not reset the policy DB or erase
+unaffected graphs. A pinned pre-#1504 compiler/renderer fixture from
+`6201ee46a3cfd5199e694e35d279741c9fd94103` accepts the ordinary graph and rejects
+the recursive graph with its original `rule_pack_cycle` diagnostic while
+opening the policy backup read-only. This characterizes that historical
+language reader, not every behavior of a full old daemon. A new marker could
+not change old binaries retroactively.
+
 ### Repairing rows left by an old wrong-relation forget
 
 An older forget implementation could remove a batch and its events while
