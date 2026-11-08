@@ -1,8 +1,9 @@
 # Recursive engine qualification
 
 This is the executable capability handoff for #1503 to #1504, #1505 and #1506,
-under #1502. It does **not** enable recursive rule-pack registration: the
-production cycle and recursive-stratum rejection checks remain in place.
+under #1502, extended with production activation evidence for #1506.
+Production registration and replay now enable the qualified positive recursive
+subset; unsafe negative cycles remain refused.
 
 The inspected baseline is Wyrelog `c462944d` and Wirelog
 `9cb295ad49280c2562e29148796d1ac7ec69c2ef`. Qualification uses that pinned
@@ -167,9 +168,9 @@ these commands and assertions are the durable reproducible evidence.
 mode. `WYL_FACT_RULE_PACK_POSITIVE_RECURSION` permits direct, mutual and
 nonlinear positive recursion with stratified negation. The existing
 `compile()` and `compile_canonical()` entry points select
-`WYL_FACT_RULE_PACK_ACYCLIC`: production registration and replay still reject
-recursive packs. This option is neither authorization nor a storage format
-marker. #1505 owns reader/storage compatibility and #1506 owns activation.
+`WYL_FACT_RULE_PACK_ACYCLIC` for compatibility callers. Production registration,
+replay and restore explicitly select positive recursion (#1506). This option
+is neither authorization nor a storage format marker.
 
 The grammar remains finite-domain: variables, existing scalar constants and
 opaque compound references range over input values and rule constants. There
@@ -203,9 +204,10 @@ diagnostics under schema permutation, and exact engine results with one
 worker. Its real parser witness confirms recursive strata in the complete
 rendered program, exercising the revised compile backstop. The unreachable
 legacy recursive-stratum invariant failure is not artificially injected.
-`fact-replay` additionally verifies that rejected recursive replacements leave
-the stored pack version, digest and rules unchanged; normal replay still
-refuses stored recursive packs. No test-only raw compiler bypass is added.
+`fact-replay` additionally verifies that rejected negative-cycle replacements
+leave the stored pack version, digest and rules unchanged. Normal replay
+accepts valid stored positive recursive packs and refuses invalid packs.
+No test-only raw compiler bypass is added.
 
 ## Stored reader compatibility (#1505)
 
@@ -217,7 +219,7 @@ output is returned on failure. Unknown capability is an explicit invalid
 request. Positive recursion refused by an acyclic reader is distinguished from
 unsafe negative cycles through diagnostic-only positive-mode analysis; that
 analysis never publishes a program. Normal replay and restore explicitly pass
-`ACYCLIC`. #1506 owns any production opt-in and publication/security changes.
+`POSITIVE_RECURSION`; historical-reader tests retain `ACYCLIC`.
 
 The v1 ordered rows and digest already represent recursive programs, so no
 marker, migration or rewrite was introduced. The low-level writer remains
@@ -234,10 +236,11 @@ recursive history. The standalone historical fixture compiles byte-exact
 pre-#1504 compiler/renderer sources; a provenance test checks their SHA-256 and
 Git blob hashes. Its new read-only SQL adapter and current Wirelog dependency
 are explicitly narrower evidence than a full old daemon. Current production
-replay separately proves graph-local recursive refusal across restart.
+replay proves recursive recovery across restart and graph-local refusal of
+invalid stored packs.
 
 The secure-bridge `fact-offline-restore-stage-replay` test checks acyclic
-identity preservation and recursive refusal without source/stage/pack changes.
+and recursive identity preservation without source/stage/pack changes.
 Fact bundles do not transport policy rows; policy backup is a separate part of
 the matching stopped-writer backup set. See the operator runbook's
 [downgrade procedure](operator-runbook.md#rule-pack-storage-compatibility-and-downgrade).
@@ -260,7 +263,44 @@ work or intermediate growth.
 
 #1504 consumes the qualified positive-recursion envelope while retaining
 schema/type/variable safety and adding signed negative-cycle checks. #1505
-owns canonical storage and downgrade contracts. #1506 owns registration,
+owns canonical storage and downgrade contracts. #1506 activates registration,
 replay/publication, inference authorization, mutation/restore and isolation.
 A demonstrated defect has a narrow tracked dependency (Wirelog #2345);
 completion of the unrelated resource-control umbrella #1817 is not required.
+
+## Production activation checks (#1506)
+
+`fact-recursive-replay` compares relation-qualified exact sets with the shared independent
+BFS oracle after append/retract/forget, alternate derivations and durable heads.
+It covers empty seeds, cyclic inputs, nonlinear and mutual rules, stratified
+negation, restart and supplied-store restore replay. The secure stage-reader
+suite separately verifies recursive restore validation and unchanged artifact
+and pack identities; validation itself does not run inference.
+
+Deterministic query barriers cover first-pack publication, schema replacement
+(two symbol columns to one int64 column), and seal draining on success/error.
+The query decoder's namespace, relation, version and ordered column metadata
+must match the pinned engine. A mismatch fails before evaluation. The engine
+continues to own the generation's pack identity and input/model state.
+
+`daemon-http-facts` exercises recursive registration, exact closure, repeated
+reads, retract and forget through HTTP. Human query-only/infer-only denials
+cover both base and derived relations. `daemon-http-recursive-credentials`
+uses the test-only engine archive to count actual evaluator entries while
+checking operation bits, issuer permissions, tenant/graph scope and lifecycle.
+The ordinary production-linked credential tests remain in place. Denied
+requests must not increment the evaluator counter; authorized controls do.
+
+In the static hook build above, also run:
+
+```sh
+meson compile -C builddir-recursion-hooks test-fact-replay
+builddir-recursion-hooks/tests/test-fact-replay -p /fact-replay/recursive/lazy-retry
+```
+
+This sets actual provider iteration limits during base and derived production
+queries, requires an error and no JSON, then checks the complete set twice on
+the same published generation after restoring limits. Synthetic snapshot
+failure in the seal test proves admission cleanup only. No test or publication
+step moves inference ahead of authorization, and no automatic rollback after
+lazy evaluation failure is promised.

@@ -434,8 +434,9 @@ test_stage_rule_pack_compatibility (void)
   fixture_init_internal (&f, FALSE, TRUE, FALSE, 2);
   g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (f.policy, tenant,
       graph, &before), ==, WYRELOG_E_OK);
-  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_POLICY);
-  g_assert_null (call.digest);
+  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (call.digest, ==, f.schema_digest);
+  g_clear_pointer (&call.digest, g_free);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
         (f.reader, f.bytes, f.checksum), ==, WYRELOG_E_OK);
   g_autofree gchar *source = NULL;

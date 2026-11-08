@@ -7,6 +7,7 @@ tests/fixtures/rule-pack-reader-6201ee46/fact/graph-program-private.h
 tests/fixtures/rule-pack-reader-6201ee46/fact/rule-pack-private.c
 tests/fixtures/rule-pack-reader-6201ee46/fact/rule-pack-private.h
 tests/human-user-test-support.h
+tests/recursive-rule-test-support.h
 tests/test-access-decision.c
 tests/test-audit-conn-duckdb-hardening.c
 tests/test-audit-conn.c

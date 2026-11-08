@@ -6,7 +6,24 @@
 
 #include "replay-private.h"
 #include "wyrelog/wyl-engine-private.h"
+#include "graph-program-private.h"
 #include "wyrelog/policy/store-private.h"
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+static void (*pre_snapshot_hook) (gpointer);
+static gpointer pre_snapshot_hook_data;
+G_LOCK_DEFINE_STATIC (pre_snapshot_hook);
+
+void
+wyl_fact_datalog_query_set_pre_snapshot_hook_for_test (
+  void (*hook) (gpointer), gpointer data)
+{
+  G_LOCK (pre_snapshot_hook);
+  pre_snapshot_hook = hook;
+  pre_snapshot_hook_data = data;
+  G_UNLOCK (pre_snapshot_hook);
+}
+#endif
 
 #define WYL_FACT_DATALOG_QUERY_MAX_LEN 512
 #define WYL_FACT_DATALOG_MAX_ARGS 32
@@ -456,12 +473,32 @@ wyl_fact_datalog_query_json (WylHandle *handle,
   g_autofree gchar *snapshot_relation =
       wire_relation != NULL ? g_strdup_printf ("%s_observed", wire_relation) :
       NULL;
+  g_autofree wyl_policy_fact_relation_schema_column_t *schema_columns =
+      g_new0 (wyl_policy_fact_relation_schema_column_t, n_columns);
+  for (gsize i = 0; i < n_columns; i++)
+    schema_columns[i] = (wyl_policy_fact_relation_schema_column_t) {
+      columns[i].column_name, columns[i].column_type,
+      columns[i].nullable, columns[i].visible,
+    };
+  const wyl_fact_graph_program_relation_t selected_schema = {
+    query_info.namespace_id, query_info.relation_name, schema_columns, n_columns,
+  };
+  g_autoptr (GBytes) schema_identity = wyl_fact_graph_program_schema_identity (
+    &selected_schema, query_info.schema_version);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  G_LOCK (pre_snapshot_hook);
+  void (*hook) (gpointer) = pre_snapshot_hook;
+  gpointer hook_data = pre_snapshot_hook_data;
+  G_UNLOCK (pre_snapshot_hook);
+  if (hook != NULL)
+    hook (hook_data);
+#endif
   if (wire_relation == NULL)
     rc = WYRELOG_E_NOMEM;
   else
-    rc = wyl_handle_snapshot_fact_graph_relations_guarded (handle,
+    rc = wyl_handle_snapshot_fact_graph_relation_checked (handle,
             opts->tenant_id, opts->graph_id,
-            (const gchar *const *) &snapshot_relation, 1, collect_tuple, &ctx,
+            snapshot_relation, schema_identity, collect_tuple, &ctx,
             opts->allow_inference, opts->out_inference_required);
 
   if (rc == WYRELOG_E_OK) {

@@ -77,6 +77,8 @@ struct _WylEngine
   /* Immutable before publication; authorization follows the pinned engine. */
   guint32 fact_rule_pack_version;
   guint8 fact_rule_pack_digest[32];
+  /* Owned query-decoder identities captured with this graph's program. */
+  GHashTable *fact_relation_schemas;
 };
 
 /*
@@ -186,5 +188,15 @@ wyrelog_error_t wyl_engine_owned_set_session_state_witness_for_test
 void wyl_engine_set_fact_rule_pack (WylEngine *engine, guint32 version,
     const guint8 digest[32]);
 gboolean wyl_engine_has_fact_rule_pack (WylEngine *engine);
+void wyl_engine_set_fact_relation_schema (WylEngine *engine,
+    const gchar *relation, GBytes *identity);
+gboolean wyl_engine_fact_relation_schema_matches (WylEngine *engine,
+    const gchar *relation, GBytes *identity);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+gint wyl_engine_fact_snapshot_count_for_test (void);
+void wyl_engine_set_fact_snapshot_hook_for_test (
+  wyrelog_error_t (*hook) (WylEngine *engine, gpointer data), gpointer data);
+#endif
 
 G_END_DECLS;

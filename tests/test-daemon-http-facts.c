@@ -23,6 +23,7 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-engine-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 #include "wyrelog/fact/secure-duckdb-bridge-private.h"
@@ -1457,6 +1458,84 @@ expected_rule_pack_identity (const gchar *const *rules, guint32 version)
 
 /* #1213: a rule pack is checked against the graph's relations, stored as
  * canonical rules, and a refusal names the rule. */
+/* Exact set comparisons are independent of the provider's row order. */
+static void
+recursive_http_query (SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *const *expected, guint n)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  gint before = wyl_engine_fact_snapshot_count_for_test ();
+  g_assert_cmpint (send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/recursive-http/query",
+      "tenant=__wr_default&" FACT_GUARD, token,
+      "{\"query\":\"reachable(X,Y)\",\"limit\":100}", &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), >, before);
+  g_autofree gchar *count = g_strdup_printf ("\"row_count\":%u", n);
+  g_assert_nonnull (strstr (body, count));
+  for (guint i = 0; i < n; i++) {
+    const gchar *at = strstr (body, expected[i]);
+    g_assert_nonnull (at);
+    g_assert_null (strstr (at + strlen (expected[i]), expected[i]));
+  }
+}
+
+static void
+check_recursive_http_mutations (SoupSession *session, const gchar *base_url,
+    const gchar *token)
+{
+  const gchar *graph = "tenant=__wr_default&graph=recursive-http&" FACT_GUARD;
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_assert_cmpint (send_raw (session, "POST", base_url, "/graphs/create",
+      graph, token, NULL, &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  const gchar *relations[] = { "edge", "reachable" };
+  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
+    g_autofree gchar *query = g_strdup_printf (
+      "%s&namespace=shop&relation=%s&schema_version=1&max_rows=100",
+      graph, relations[i]);
+    g_assert_cmpint (send_raw (session, "POST", base_url,
+        "/facts/schema/register", query, token,
+        "column_name\tcolumn_type\tnullable\tvisible\n"
+        "src\tsymbol\tfalse\ttrue\ndst\tsymbol\tfalse\ttrue\n",
+        &status, &body), ==, 0);
+    g_assert_cmpuint (status, ==, 200);
+  }
+  g_assert_cmpint (send_raw (session, "POST", base_url,
+      "/facts/rule-pack/register", graph, token,
+      "reachable(X,Y):-edge(X,Y).\nreachable(X,Z):-reachable(X,Y),edge(Y,Z).",
+      &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  recursive_http_query (session, base_url, token, NULL, 0);
+  const gchar *ab = "{\"X\":\"a\",\"Y\":\"b\"}";
+  const gchar *all[] = { ab, "{\"X\":\"b\",\"Y\":\"c\"}",
+                         "{\"X\":\"a\",\"Y\":\"c\"}" };
+  const gchar *mutation = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=recursive-seed&idempotency_key=recursive-seed&" FACT_GUARD;
+  g_assert_cmpint (send_raw (session, "POST", base_url,
+      "/facts/__wr_default/recursive-http/edge:append", mutation, token,
+      "src\tdst\na\tb\nb\tc\n", &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  recursive_http_query (session, base_url, token, all, 3);
+  recursive_http_query (session, base_url, token, all, 3);
+  g_assert_cmpint (send_raw (session, "POST", base_url,
+      "/facts/__wr_default/recursive-http/edge:retract",
+      "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=recursive-retract&idempotency_key=recursive-retract&" FACT_GUARD,
+      token, "src\tdst\nb\tc\n", &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  recursive_http_query (session, base_url, token, &ab, 1);
+  g_assert_cmpint (send_raw (session, "DELETE", base_url,
+      "/facts/__wr_default/recursive-http/edge:forget",
+      "tenant=__wr_default&namespace=shop&schema_version=1&" FACT_GUARD,
+      token, "{\"batch_id\":\"recursive-seed\",\"operator\":\"facts-admin\",\"reason\":\"test cleanup\"}",
+      &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  recursive_http_query (session, base_url, token, NULL, 0);
+}
+
 static gint
 check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
     const gchar *base_url, const gchar *admin_token, const gchar *deny_token)
@@ -1490,10 +1569,10 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
    * both cite the version and the digest. */
   rc = send_raw_with_request_id (session, "POST", base_url,
           "/facts/rule-pack/register", RULE_PACK_QUERY, admin_token,
-          "# large orders\nbig(O) :- orders(O, Amount),  shop.orders(O, 1000).\n",
+          "# large orders\nbig(O) :- orders(O, Amount),  shop.orders(O, 1000).\nbig(O):-big(O).\n",
           &status, &body, &request_id, NULL);
   const gchar *const stored[] = {
-    "big(O):-orders(O,Amount),shop.orders(O,1000).", NULL
+    "big(O):-orders(O,Amount),shop.orders(O,1000).", "big(O):-big(O).", NULL
   };
   g_autofree gchar *identity = expected_rule_pack_identity (stored, 1);
   if (rc != 0 || status != 200 || identity == NULL
@@ -1570,11 +1649,13 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
     g_autofree gchar *token = wyl_client_dup_access_token (client);
     const gchar *queries[] = { derived_query, "{\"query\":\"orders(O,A)\"}" };
     for (guint q = 0; q < G_N_ELEMENTS (queries); q++) {
+      gint before = wyl_engine_fact_snapshot_count_for_test ();
       g_assert_cmpint (send_raw (session, "POST", base_url, query_path,
           "tenant=__wr_default&" FACT_GUARD, token, queries[q], &status,
           &body), ==, 0);
       g_assert_cmpuint (status, ==, 403);
       g_assert_null (strstr (body, "rows"));
+      g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
     }
   }
 
@@ -1591,10 +1672,10 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
   }
   rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
           RULE_PACK_QUERY, admin_token,
-          "big(O) :- orders(O, _).\nbig(O) :- big(O).\n", &status, &body);
+          "big(O) :- orders(O, _).\nbig(O) :- orders(O,_), !big(O).\n", &status, &body);
   if (rc != 0 || status != 400 || g_strcmp0 (body,
-      "{\"error\":\"rule_pack_rejected\",\"reason\":\"rule_pack_cycle\","
-      "\"rule_index\":2,\"atom_index\":0,\"cycle_rules\":[2]}") != 0) {
+      "{\"error\":\"rule_pack_rejected\",\"reason\":\"rule_pack_negative_cycle\","
+      "\"rule_index\":2,\"atom_index\":2,\"cycle_rules\":[2]}") != 0) {
     g_printerr ("rule pack cycle: %u %s\n", status, body);
     return 4507;
   }
@@ -1613,9 +1694,9 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
 
   /* A replacement is the next version. */
   rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
-          RULE_PACK_QUERY, admin_token, "big(O) :- orders(O, _).", &status,
+          RULE_PACK_QUERY, admin_token, "big(O) :- orders(O, _).\nbig(O):-big(O).", &status,
           &body);
-  const gchar *const replaced[] = { "big(O):-orders(O,_).", NULL };
+  const gchar *const replaced[] = { "big(O):-orders(O,_).", "big(O):-big(O).", NULL };
   g_autofree gchar *replaced_identity =
       expected_rule_pack_identity (replaced, 2);
   if (rc != 0 || status != 200 || replaced_identity == NULL
@@ -1633,7 +1714,7 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
    * and continue to serve the old generation. */
   wyl_fact_replay_set_test_fault (WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE);
   rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
-          RULE_PACK_QUERY, admin_token, "big(O):-orders(O,999).", &status, &body);
+          RULE_PACK_QUERY, admin_token, "big(O):-orders(O,999).\nbig(O):-big(O).", &status, &body);
   g_assert_cmpint (rc, ==, 0);
   g_assert_cmpuint (status, ==, 200);
   g_assert_nonnull (strstr (body, "committed_degraded"));
@@ -1645,6 +1726,8 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
   g_assert_cmpuint (status, ==, 200);
   g_assert_nonnull (strstr (body, "\"row_count\":2"));
 #endif
+
+  check_recursive_http_mutations (session, base_url, admin_token);
 
   /* Request shape, authority and graph state. */
   rc = send_raw (session, "GET", base_url, "/facts/rule-pack/register",

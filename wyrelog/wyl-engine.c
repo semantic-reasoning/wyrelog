@@ -942,6 +942,7 @@ wyl_engine_finalize (GObject *object)
   g_clear_pointer (&self->session_state_input_totals, g_hash_table_unref);
   g_clear_pointer (&self->member_of_input_rows, g_hash_table_unref);
   g_clear_pointer (&self->guard_input_rows, g_hash_table_unref);
+  g_clear_pointer (&self->fact_relation_schemas, g_hash_table_unref);
   wyl_engine_owned_clear_source_probes (self);
 
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
@@ -1494,6 +1495,29 @@ wyl_engine_owned_step (WylEngine *self)
   return wyl_engine_step_unchecked (self);
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static gint fact_snapshot_count;
+static wyrelog_error_t (*fact_snapshot_hook) (WylEngine *, gpointer);
+static gpointer fact_snapshot_hook_data;
+G_LOCK_DEFINE_STATIC (fact_snapshot_hook);
+
+gint
+wyl_engine_fact_snapshot_count_for_test (void)
+{
+  return g_atomic_int_get (&fact_snapshot_count);
+}
+
+void
+wyl_engine_set_fact_snapshot_hook_for_test (
+  wyrelog_error_t (*hook) (WylEngine *, gpointer), gpointer data)
+{
+  G_LOCK (fact_snapshot_hook);
+  fact_snapshot_hook = hook;
+  fact_snapshot_hook_data = data;
+  G_UNLOCK (fact_snapshot_hook);
+}
+#endif
+
 wyrelog_error_t
 wyl_engine_snapshot (WylEngine *self, const gchar *relation,
     WylTupleCallback cb, gpointer user_data)
@@ -1510,6 +1534,20 @@ wyl_engine_snapshot (WylEngine *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   wyl_engine_tuple_cookie_t cookie = { cb, user_data };
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (self->fact_relation_schemas != NULL) {
+    G_LOCK (fact_snapshot_hook);
+    wyrelog_error_t (*hook) (WylEngine *, gpointer) = fact_snapshot_hook;
+    gpointer hook_data = fact_snapshot_hook_data;
+    G_UNLOCK (fact_snapshot_hook);
+    if (hook != NULL) {
+      wyrelog_error_t hook_rc = hook (self, hook_data);
+      if (hook_rc != WYRELOG_E_OK)
+        return hook_rc;
+    }
+    g_atomic_int_inc (&fact_snapshot_count);
+  }
+#endif
   wirelog_error_t wl_rc = wirelog_easy_snapshot (self->session, relation,
           wyl_engine_tuple_trampoline,
           &cookie);
@@ -1799,4 +1837,25 @@ gboolean
 wyl_engine_has_fact_rule_pack (WylEngine *engine)
 {
   return engine->fact_rule_pack_version != 0;
+}
+
+void
+wyl_engine_set_fact_relation_schema (WylEngine *engine,
+    const gchar *relation, GBytes *identity)
+{
+  if (engine->fact_relation_schemas == NULL)
+    engine->fact_relation_schemas = g_hash_table_new_full (g_str_hash,
+            g_str_equal, g_free, (GDestroyNotify) g_bytes_unref);
+  g_hash_table_insert (engine->fact_relation_schemas, g_strdup (relation),
+      g_bytes_ref (identity));
+}
+
+gboolean
+wyl_engine_fact_relation_schema_matches (WylEngine *engine,
+    const gchar *relation, GBytes *identity)
+{
+  GBytes *captured = engine->fact_relation_schemas != NULL
+      ? g_hash_table_lookup (engine->fact_relation_schemas, relation) : NULL;
+  return captured != NULL && identity != NULL
+         && g_bytes_equal (captured, identity);
 }

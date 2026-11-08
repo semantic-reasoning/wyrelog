@@ -1905,7 +1905,7 @@ target option, `4` when the daemon denies the caller (`403 schema_denied`),
 
 ### Rule packs
 
-A rule pack is a set of non-recursive rules that derive a graph's relations
+A rule pack is a set of rules, including positive recursive rules, that derive a graph's relations
 from its other relations. Registration stores a new version and immediately
 refreshes that graph's engine. Startup replay and restore also load the latest
 pack from their policy snapshot, rechecking it against the schemas selected
@@ -1913,21 +1913,36 @@ for that engine. An invalid stored pack prevents that graph from rebuilding;
 other graphs remain available.
 
 Rules execute when a Datalog query snapshots the engine. Derived rows are
-query results, not new durable fact batches. Appends and retractions rebuild
+query results, not new durable fact batches. Appends, retractions and forgets rebuild
 the engine so subsequent queries derive from the current facts. A query still
 accepts one allowlisted relation atom; it cannot supply inline rules. Both
 `wr.datalog.query` and `wr.datalog.infer` are required for a packed graph,
 including queries of base relations, because Wirelog evaluates the whole
-program on each snapshot. Data credentials need both `query` and `infer`
+program when a snapshot needs evaluation; unchanged reads can reuse its model. Data credentials need both `query` and `infer`
 operations and their issuer's corresponding permissions. Graphs without a
 pack retain the existing query-only permission behavior.
 
-**Evaluation has no hard work, memory or cancellation budget yet**
-(semantic-reasoning/wirelog#1817). Acyclic rules, pack-size limits and response
-row limits do not bound join work or intermediate tuples. Expensive queries
-can consume substantial resources and delay tenant sealing while their
-admission lease remains held. This limitation is accepted for #1213;
-operators should control who can register packs and authorize inference.
+**There is no end-to-end per-query work/time/cancellation guarantee.** The
+pinned evaluator has memory admission and join-output controls, but Wyrelog's
+easy-API opener does not attach the upstream internal per-query evaluation
+controls. Pack-size and response-row limits do not bound intermediate growth.
+Expensive queries can delay sealing while their admission lease remains held.
+Control who can register packs and authorize inference; Wirelog #1817 is
+related resource-control work, not a prerequisite for positive recursion.
+
+A published engine carries its pack and selected schema identities. Query
+schema decoding must match the engine actually pinned for the snapshot;
+a concurrent schema change fails closed rather than mixing versions. Retry
+after the schema and engine publication have converged. Authorization checks
+the pinned engine's pack, including a first pack published during a query.
+
+Publication does not evaluate the fixed point. A failed prepublication build
+preserves the previous usable engine. A later evaluation error returns an
+error with no partial result JSON and does not automatically restore the old
+engine. The evaluator retains dirty/retry state after an incomplete iteration;
+a retry can finish on that generation if the limiting condition is removed.
+A latched session limit, such as the join-output limit, requires a new engine
+with suitable configuration. Repeating an unchanged limit is not recovery.
 
 A pack is plain text, with one rule per line in the form `head :- body.` and
 `#` starting a comment:
@@ -1948,8 +1963,23 @@ of:
 - a decimal 64-bit integer;
 - `true` or `false`.
 
-Every head must be a relation registered for the graph, and the rules must not
-derive a relation from itself, directly or through other rules. A pack holds
+Every head must be a relation registered for the graph. Direct, mutual and
+nonlinear positive recursion are supported, including cyclic input and empty
+seeds. Negation must be stratified: a dependency cycle containing a negative
+edge is refused. Rules cannot generate new values through arithmetic,
+aggregates or constructors. For example, with symbol columns `src,dst` on
+both `edge` and `reachable`:
+
+```prolog
+reachable(X,Y) :- edge(X,Y).
+reachable(X,Z) :- reachable(X,Y), edge(Y,Z).
+```
+
+Inputs `(a,b),(b,c)` produce exactly `(a,b),(b,c),(a,c)`. Retracting `(b,c)`
+removes `(a,c)` unless another path or a durable `reachable(a,c)` supports it.
+Durable and derived heads form a set; removing derived support never deletes
+a directly stored head. Forgetting a supporting batch rebuilds from remaining
+current facts. A pack holds
 at most 256 rules and 64 KiB, and a rule at most 16 body atoms. These limits
 bound the check, not what evaluating the pack will cost.
 
@@ -1994,7 +2024,7 @@ wyctl: rule 2 atom 1: rule_pack_unknown_relation
 ```
 
 Rules are counted from 1, skipping blank and comment lines. Atom 0 is the
-head, and atom n is the nth body atom. A `rule_pack_cycle` refusal also lists
+head, and atom n is the nth body atom. A `rule_pack_negative_cycle` refusal also lists
 every rule on the cycle. A pack with no rules is refused as
 `rule_pack_empty`.
 
@@ -2034,15 +2064,13 @@ digests are unchanged. Reading intact storage does not establish that a
 reader supports its language: the selected schemas, canonical bytes and
 reader capability must also pass validation.
 
-The private reader added in #1505 can validate positive recursive packs when
-explicitly opted in. **This release's production registration, startup replay
-and fact restore remain nonrecursive** until #1506. It is not a recursively
-capable production daemon. A synthetic recursive latest version cannot be
-made queryable merely by restarting it. On current startup that graph is
-unavailable while an unaffected ordinary graph can remain queryable; a failed
-refresh preserves a previously published engine rather than publishing a
-partially validated replacement. Operators must check graph status as well
-as process readiness.
+Production registration, startup replay and restore select the positive
+recursive capability. A valid recursive latest version is replayed with its
+matching schema snapshot. An invalid stored pack makes only that graph
+unavailable; failed refresh preserves its previous usable engine. Operators
+must check graph status as well as process readiness. A historical acyclic
+reader still refuses a recursive latest version; follow the downgrade
+procedure below before running one.
 
 Private reader diagnostics distinguish `rule_pack_unsupported_recursion`
 (valid positive recursion with an acyclic reader), `rule_pack_negative_cycle`
@@ -2061,11 +2089,11 @@ policy database and complete fact root with all writers stopped, as described
 in [Backup And Restore](#backup-and-restore). Restoring only a fact bundle
 does not roll a rule pack back. Policy SQLite backup/reopen tests preserve
 exact ordered acyclic and recursive identity; separate fact restore tests
-confirm that the current acyclic reader refuses recursive policy without
-publishing the staged replacement or modifying its source or pack.
+confirm that the current reader accepts valid positive recursive policy while
+preserving its identity and leaving the source artifact and stored pack
+unchanged. Historical acyclic readers still refuse such policy.
 
-For a future downgrade from a recursively capable release, before stopping
-that release, inventory every active graph and replace each recursive latest
+To downgrade from this recursively capable release, before stopping it, inventory every active graph and replace each recursive latest
 pack with a valid acyclic equivalent using `fact rule-pack register`. This
 appends a new version; old recursive history stays intact. Verify successful
 refresh, graph status and expected queries for each graph, then stop all

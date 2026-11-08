@@ -702,6 +702,7 @@ if build_client
   ] + fact_test_support_c_args
   test_daemon_http_decide_deps = [
     wyrelog_dep,
+    wirelog_dep,
     wyrelog_client_dep,
     libsoup_dep,
     sqlite_dep,
@@ -1041,6 +1042,7 @@ if build_client
     test_daemon_http_facts_c_args += fact_test_support_c_args
     test_daemon_http_facts_deps = [
       wyrelog_handle_test_seams_dep,
+      wirelog_dep,
       wyrelog_client_dep,
       libsoup_dep,
       sodium_dep,
@@ -1069,6 +1071,32 @@ if build_client
       include_directories : [wyrelog_inc, include_directories('../wyrelog')],
       dependencies : test_daemon_http_facts_deps,
     )
+
+    # Keep production-linked credential tests intact; this additional target
+    # observes actual fact-engine entry through the existing test-only archive.
+    if get_option('enable_audit').allowed()
+      test_recursive_credentials = executable('test-daemon-http-recursive-credentials',
+        'test-daemon-http-decide.c',
+        'fact-test-support.c',
+        '../wyrelog/daemon/auth-registry-private.c',
+        '../wyrelog/daemon/http.c',
+        '../wyrelog/daemon/delta.c',
+        '../wyrelog/daemon/fact-status.c',
+        '../wyrelog/daemon/service-credential-handoff-private.c',
+        '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+        '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+        '../wyrelog/auth/service-credential-operation-storage-private.c',
+        c_args : test_daemon_http_facts_c_args + [
+          '-DWYL_TEST_RECURSIVE_CREDENTIALS',
+          '-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS',
+          '-Wno-unused-function',
+        ],
+        include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+        dependencies : test_daemon_http_facts_deps,
+      )
+      test('daemon-http-recursive-credentials', test_recursive_credentials,
+        timeout : 120)
+    endif
 
     test_daemon_http_facts_env = environment()
     if host_machine.system() == 'windows'
@@ -2503,8 +2531,16 @@ if get_option('enable_fact_store').allowed()
     test_fact_replay_timeout = 180
   endif
   test('fact-replay', test_fact_replay,
-    args : ['-s', '/fact-replay/single-graph-refresh-race',
-            '-s', '/fact-replay/mutation-isolation-concurrent'],
+    args : ['-x', '/fact-replay/recursive',
+            '-x', '/fact-replay/single-graph-refresh-race',
+            '-x', '/fact-replay/mutation-isolation-concurrent'],
+    timeout : test_fact_replay_timeout,
+    is_parallel : host_machine.system() != 'windows')
+  # Recursive production coverage added ~100s to the sanitizer replay suite
+  # (340s against its multiplied 360s deadline). Isolate it without dropping
+  # cases or enlarging deadlines so both groups keep useful CI headroom.
+  test('fact-recursive-replay', test_fact_replay,
+    args : ['-p', '/fact-replay/recursive'],
     timeout : test_fact_replay_timeout,
     is_parallel : host_machine.system() != 'windows')
   test('fact-replay-mutation-races', test_fact_replay,

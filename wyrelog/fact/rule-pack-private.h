@@ -145,9 +145,8 @@ void wyl_fact_rule_pack_rejection_clear (wyl_fact_rule_pack_rejection_t *
  * negation; an internal negative dependency produces NEGATIVE_CYCLE. All
  * other parsing, schema, type and safety checks remain mandatory. ACYCLIC
  * preserves the old wrappers' contract; unknown modes return E_INVALID.
- * Canonical bytes are independent of mode. This is not production admission
- * activation: callers in registration and replay must stay on the old API
- * until the storage/activation contracts in #1505/#1506 are implemented. */
+ * Canonical bytes are independent of mode. Production registration and replay
+ * explicitly select POSITIVE_RECURSION; historical wrappers remain ACYCLIC. */
 wyrelog_error_t wyl_fact_rule_pack_compile_with_mode (const gchar * text,
     gsize text_len, const wyl_fact_graph_program_relation_t * relations,
     gsize n_relations, wyl_fact_rule_pack_mode_t mode, gchar ** out_rules,
@@ -170,7 +169,7 @@ const gchar *wyl_fact_rule_pack_reject_name (wyl_fact_rule_pack_reject_t
  * cycle in ACYCLIC mode returns POLICY/UNSUPPORTED_RECURSION with the legacy
  * cycle indices; negative cycles retain NEGATIVE_CYCLE. Other compiler
  * diagnostics remain intact. Clear owned rejection fields before reuse.
- * Production replay/restore explicitly select ACYCLIC until #1506. */
+ * Production replay/restore explicitly select POSITIVE_RECURSION. */
 wyrelog_error_t wyl_fact_rule_pack_compile_stored (
   const wyl_policy_fact_rule_pack_info_t *pack,
   const wyl_fact_graph_program_relation_t *relations, gsize n_relations,

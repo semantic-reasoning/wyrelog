@@ -4,7 +4,9 @@
 #include <string.h>
 #include "wyrelog/wyl-engine-private.h"
 
-#define N 64
+#include "recursive-rule-test-support.h"
+
+#define N WYL_TEST_RECURSIVE_VERTICES
 
 typedef struct
 {
@@ -67,26 +69,7 @@ edge (Fixture *f, guint x, guint y, gboolean add)
 static void
 closure (Fixture *f, gboolean expected[N][N])
 {
-  memset (expected, 0, sizeof (gboolean) * N * N);
-  for (guint start = 0; start < N; start++) {
-    guint queue[N], head = 0, tail = 0;
-    for (guint v = 0; v < N; v++) {
-      if (f->edge[start][v]) {
-        expected[start][v] = TRUE;
-        queue[tail++] = v;
-      }
-    }
-    while (head < tail) {
-      guint v = queue[head++];
-      for (guint next = 0; next < N; next++) {
-        if (f->edge[v][next] && !expected[start][next]) {
-          expected[start][next] = TRUE;
-          g_assert_cmpuint (tail, <, N);
-          queue[tail++] = next;
-        }
-      }
-    }
-  }
+  wyl_test_recursive_closure (f->edge, expected);
 }
 
 static guint

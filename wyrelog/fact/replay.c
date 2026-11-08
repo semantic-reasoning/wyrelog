@@ -778,7 +778,8 @@ build_graph_program_with_rule_pack (GPtrArray *relations,
   g_autofree gchar *rules = NULL;
   wyl_fact_rule_pack_rejection_t rejection = { 0 };
   wyrelog_error_t rc = wyl_fact_rule_pack_compile_stored (pack, schemas,
-          relations->len, WYL_FACT_RULE_PACK_ACYCLIC, &rules, &rejection);
+          relations->len, WYL_FACT_RULE_PACK_POSITIVE_RECURSION,
+          &rules, &rejection);
   wyl_fact_rule_pack_rejection_clear (&rejection);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -824,8 +825,10 @@ wyl_fact_replay_register_rule_pack (wyl_policy_store_t *policy,
       graph_program_relations (relations);
   g_autofree gchar *rules = NULL;
   g_auto (GStrv) canonical = NULL;
-  rc = wyl_fact_rule_pack_compile_canonical (text, text_len,
-          program_relations, relations->len, &rules, &canonical, out_rejection);
+  rc = wyl_fact_rule_pack_compile_with_mode (text, text_len,
+          program_relations, relations->len,
+          WYL_FACT_RULE_PACK_POSITIVE_RECURSION,
+          &rules, &canonical, out_rejection);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (canonical[0] == NULL) {
@@ -1240,6 +1243,17 @@ replay_with_replay_store_and_snapshot (wyl_policy_store_t *policy,
     wyl_engine_set_fact_rule_pack (engine,
         policy_snapshot->rule_pack.pack_version,
         policy_snapshot->rule_pack.digest);
+    for (guint i = 0; i < relations->len; i++) {
+      ReplayRelation *rel = g_ptr_array_index (relations, i);
+      const wyl_fact_graph_program_relation_t schema = {
+        rel->namespace_id, rel->relation_name, rel->columns, rel->n_columns,
+      };
+      g_autoptr (GBytes) identity = wyl_fact_graph_program_schema_identity (
+        &schema, rel->schema_version);
+      g_autofree gchar *observed = g_strdup_printf ("%s_observed",
+              rel->wirelog_relation);
+      wyl_engine_set_fact_relation_schema (engine, observed, identity);
+    }
     wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
     if (replay_store != NULL)
       rc = replay_relations_into_engine (replay_store, graph_info, relations,

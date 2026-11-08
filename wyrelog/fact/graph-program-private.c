@@ -39,6 +39,23 @@ wyl_fact_graph_program_wire_type (const gchar *column_type)
   return NULL;
 }
 
+GBytes *
+wyl_fact_graph_program_schema_identity (
+  const wyl_fact_graph_program_relation_t *relation, guint32 version)
+{
+  GVariantBuilder columns;
+  g_variant_builder_init (&columns, G_VARIANT_TYPE ("a(ssbb)"));
+  for (gsize i = 0; i < relation->n_columns; i++) {
+    const wyl_policy_fact_relation_schema_column_t *col = &relation->columns[i];
+    g_variant_builder_add (&columns, "(ssbb)", col->column_name,
+        col->column_type, col->nullable, col->visible);
+  }
+  g_autoptr (GVariant) identity = g_variant_ref_sink (g_variant_new (
+            "(ssu@a(ssbb))", relation->namespace_id, relation->relation_name,
+            version, g_variant_builder_end (&columns)));
+  return g_variant_get_data_as_bytes (identity);
+}
+
 static gboolean
 append_declaration (GString *program, const gchar *name,
     const wyl_fact_graph_program_relation_t *rel)
