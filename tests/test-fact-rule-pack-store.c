@@ -562,6 +562,15 @@ backup_policy (wyl_policy_store_t *store, const gchar *path)
   g_assert_cmpint (sqlite3_backup_step (backup, -1), ==, SQLITE_DONE);
   g_assert_cmpint (sqlite3_backup_remaining (backup), ==, 0);
   g_assert_cmpint (sqlite3_backup_finish (backup), ==, SQLITE_OK);
+  /* Backup copies the source's WAL header, but not its WAL/SHM files.
+   * Apple's SQLite cannot read that standalone backup read-only. Finish the
+   * destination in DELETE mode before handing it to the unchanged reader. */
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (destination, "PRAGMA journal_mode=DELETE",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpstr ((const gchar *) sqlite3_column_text (stmt, 0), ==, "delete");
+  g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_close (destination), ==, SQLITE_OK);
 }
 
