@@ -163,6 +163,8 @@ PROTECTED_DIRECTIVE_DIGESTS = {
 }
 
 TEST_HEADER_INVENTORY = {
+    "tests/fixtures/rule-pack-reader-6201ee46/fact/graph-program-private.h",
+    "tests/fixtures/rule-pack-reader-6201ee46/fact/rule-pack-private.h",
     "tests/human-user-test-support.h",
     "tests/fact-artifact-transition-driver-fixture.h",
     "tests/fact-test-support.h",

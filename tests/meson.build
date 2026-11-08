@@ -2241,6 +2241,18 @@ test_fact_schema = executable('test-fact-schema',
 
 test('fact-schema', test_fact_schema)
 
+legacy_rule_pack_root = 'fixtures/rule-pack-reader-6201ee46'
+test_fact_rule_pack_legacy_reader = executable('test-fact-rule-pack-legacy-reader',
+  'test-fact-rule-pack-legacy-reader.c',
+  legacy_rule_pack_root / 'fact/rule-pack-private.c',
+  legacy_rule_pack_root / 'fact/graph-program-private.c',
+  include_directories : [include_directories(legacy_rule_pack_root),
+    include_directories('..'), include_directories('../wyrelog')],
+  dependencies : [glib_dep, gio_dep, sqlite_dep, wirelog_dep],
+)
+test('rule-pack-legacy-fixture-provenance', python3,
+  args : [files('check-rule-pack-legacy-fixture.py'), meson.project_source_root()])
+
 test_fact_rule_pack_store = executable('test-fact-rule-pack-store',
   'test-fact-rule-pack-store.c',
   'fact-test-support.c',
@@ -2249,7 +2261,8 @@ test_fact_rule_pack_store = executable('test-fact-rule-pack-store',
   dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
 )
 
-test('fact-rule-pack-store', test_fact_rule_pack_store)
+test('fact-rule-pack-store', test_fact_rule_pack_store,
+  args : [test_fact_rule_pack_legacy_reader], timeout : 120)
 
 if get_option('enable_fact_store').allowed()
   test_fact_provisioning = executable('test-fact-provisioning',

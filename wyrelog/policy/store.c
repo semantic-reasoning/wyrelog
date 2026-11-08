@@ -25934,13 +25934,14 @@ wyl_policy_store_register_fact_rule_pack (wyl_policy_store_t *store,
   for (gsize i = 0; i < n_rules; i++)
     if (rules[i] == NULL)
       return WYRELOG_E_INVALID;
-  gsize total_bytes = 0;
+  gsize total_bytes = n_rules - 1;
   for (gsize i = 0; i < n_rules; i++) {
-    total_bytes += strlen (rules[i]);
+    gsize len = strlen (rules[i]);
     if (rules[i][0] == '\0' || strpbrk (rules[i], "\r\n") != NULL
         || !g_utf8_validate (rules[i], -1, NULL)
-        || total_bytes > WYL_FACT_RULE_PACK_MAX_BYTES)
+        || len > WYL_FACT_RULE_PACK_MAX_BYTES - total_bytes)
       return WYRELOG_E_POLICY;
+    total_bytes += len;
   }
 
   guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
@@ -26040,15 +26041,24 @@ wyl_policy_store_load_fact_rule_pack (wyl_policy_store_t *store,
     return WYRELOG_E_IO;
   }
   g_autoptr (GPtrArray) rules = g_ptr_array_new_with_free_func (g_free);
+  gsize total_bytes = (gsize) rule_count - 1;
   while (rc == WYRELOG_E_OK && (step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    int row_bytes = sqlite3_column_bytes (stmt, 1);
+    if (rules->len >= (gsize) rule_count || row_bytes <= 0
+        || (gsize) row_bytes > WYL_FACT_RULE_PACK_MAX_BYTES - total_bytes) {
+      rc = WYRELOG_E_INTERNAL;
+      break;
+    }
     const gchar *text = (const gchar *) sqlite3_column_text (stmt, 1);
     if (text == NULL || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
         || sqlite3_column_type (stmt, 0) != SQLITE_INTEGER
         || (gsize) sqlite3_column_bytes (stmt, 1) != strlen (text)
         || sqlite3_column_int64 (stmt, 0) != (sqlite3_int64) rules->len + 1)
       rc = WYRELOG_E_INTERNAL;
-    else
+    else {
       g_ptr_array_add (rules, g_strdup (text));
+      total_bytes += (gsize) row_bytes;
+    }
   }
   if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
     rc = WYRELOG_E_IO;

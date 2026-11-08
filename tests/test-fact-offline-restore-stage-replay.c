@@ -89,7 +89,7 @@ query (duckdb_connection connection, const gchar *sql)
 
 static void
 fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed,
-    gboolean selected_schema)
+    gboolean selected_schema, guint pack_kind)
 {
   memset (f, 0, sizeof *f);
   f->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
@@ -120,6 +120,23 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed,
   wyl_policy_fact_relation_schema_options_t relation = schema ();
   g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (f->policy,
       &relation), ==, WYRELOG_E_OK);
+  if (pack_kind != 0) {
+    wyl_policy_fact_relation_schema_options_t derived = schema ();
+    derived.relation_name = "derived";
+    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (f->policy,
+        &derived), ==, WYRELOG_E_OK);
+    const gchar *rule = "derived(I,A,V,R):-items(I,A,V,R).";
+    guint32 version = 0;
+    g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (f->policy,
+        tenant, graph, &rule, 1, &version), ==, WYRELOG_E_OK);
+    if (pack_kind == 2) {
+      const gchar *recursive[] = { rule,
+                                   "derived(I,A,V,R):-derived(I,A,V,R)." };
+      g_assert_cmpint (wyl_policy_store_register_fact_rule_pack (f->policy,
+          tenant, graph, recursive, 2, &version), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (version, ==, 2);
+    }
+  }
   if (selected_schema) {
     const wyl_policy_fact_relation_schema_query_t selected_queries[] = {
       { "items_v2", "wr.datalog.query", 1000 },
@@ -288,7 +305,7 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed,
 static void
 fixture_init (Fixture *f, gboolean drop_projection)
 {
-  fixture_init_internal (f, drop_projection, TRUE, FALSE);
+  fixture_init_internal (f, drop_projection, TRUE, FALSE, FALSE);
 }
 
 static void
@@ -369,7 +386,7 @@ static void
 test_stage_replay_selected_schema (void)
 {
   Fixture f;
-  fixture_init_internal (&f, FALSE, TRUE, TRUE);
+  fixture_init_internal (&f, FALSE, TRUE, TRUE, FALSE);
   ReplayCall call = { .fixture = &f };
   g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_OK);
   g_assert_cmpstr (call.digest, ==, f.selected_schema_digest);
@@ -387,6 +404,55 @@ test_stage_replay_selected_schema (void)
   selection->schema_version = 3;
   g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_POLICY);
   g_assert_null (call.digest);
+  fixture_clear (&f);
+}
+
+static void
+test_stage_rule_pack_compatibility (void)
+{
+  Fixture f;
+  fixture_init_internal (&f, FALSE, TRUE, FALSE, TRUE);
+  wyl_policy_fact_rule_pack_info_t before = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (f.policy, tenant,
+      graph, &before), ==, WYRELOG_E_OK);
+  ReplayCall call = { .fixture = &f };
+  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (call.digest, ==, f.schema_digest);
+  g_clear_pointer (&call.digest, g_free);
+  wyl_policy_fact_rule_pack_info_t after = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (f.policy, tenant,
+      graph, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.pack_version, ==, before.pack_version);
+  g_assert_cmpmem (after.digest, sizeof after.digest, before.digest, sizeof before.digest);
+  g_assert_true (g_strv_equal ((const gchar * const *) after.rules,
+      (const gchar * const *) before.rules));
+  wyl_policy_fact_rule_pack_info_clear (&before);
+  wyl_policy_fact_rule_pack_info_clear (&after);
+  fixture_clear (&f);
+  /* Persist the synthetic recursive pack before sealing; the normal writer
+   * must not gain authority to replace a pack on a sealed graph. */
+  fixture_init_internal (&f, FALSE, TRUE, FALSE, 2);
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (f.policy, tenant,
+      graph, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_POLICY);
+  g_assert_null (call.digest);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (f.reader, f.bytes, f.checksum), ==, WYRELOG_E_OK);
+  g_autofree gchar *source = NULL;
+  gsize source_size = 0;
+  g_assert_true (g_file_get_contents (f.source_path, &source, &source_size, NULL));
+  g_autofree gchar *hex = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
+          (const guchar *) source, source_size);
+  g_autofree gchar *checksum = g_strconcat ("sha256:", hex, NULL);
+  g_assert_cmpstr (checksum, ==, f.checksum);
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (f.policy, tenant,
+      graph, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.pack_version, ==, before.pack_version);
+  g_assert_cmpmem (after.digest, sizeof after.digest, before.digest, sizeof before.digest);
+  g_assert_true (g_strv_equal ((const gchar * const *) after.rules,
+      (const gchar * const *) before.rules));
+  wyl_policy_fact_rule_pack_info_clear (&before);
+  wyl_policy_fact_rule_pack_info_clear (&after);
   fixture_clear (&f);
 }
 
@@ -456,7 +522,7 @@ test_stage_replay_failures (gconstpointer data)
 {
   const gchar *mode = data;
   Fixture f;
-  fixture_init_internal (&f, FALSE, !g_str_equal (mode, "unsealed"), FALSE);
+  fixture_init_internal (&f, FALSE, !g_str_equal (mode, "unsealed"), FALSE, FALSE);
   g_autoptr (GCancellable) cancel = g_cancellable_new ();
   ReplayCall call = { .fixture = &f, .cancellable = cancel };
   Probe probe = { .fixture = &f };
@@ -540,6 +606,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
 #ifndef G_OS_WIN32
   g_test_add_func ("/fact-stage-replay/success", test_stage_replay);
+  g_test_add_func ("/fact-stage-replay/rule-pack-compatibility",
+      test_stage_rule_pack_compatibility);
   g_test_add_func ("/fact-stage-replay/selected-schema",
       test_stage_replay_selected_schema);
   g_test_add_func ("/fact-stage-replay/missing-projection",

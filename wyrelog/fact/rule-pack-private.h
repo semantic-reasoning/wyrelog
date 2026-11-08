@@ -58,6 +58,14 @@ typedef enum
   WYL_FACT_RULE_PACK_REJECT_EMPTY,
   /* A recursive dependency component contains a negated edge. */
   WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE,
+  /* Stored version/count/rows/bytes/digest do not form a valid identity. */
+  WYL_FACT_RULE_PACK_REJECT_STORED_IDENTITY,
+  /* Digest-valid text differs from the compiler's canonical row bytes. */
+  WYL_FACT_RULE_PACK_REJECT_NONCANONICAL,
+  /* Positive recursion is valid, but the selected reader is acyclic. */
+  WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_RECURSION,
+  /* The caller requested an unknown private reader capability. */
+  WYL_FACT_RULE_PACK_REJECT_UNSUPPORTED_CAPABILITY,
 } wyl_fact_rule_pack_reject_t;
 
 /* Internal language capability, not stored metadata or authorization.
@@ -148,5 +156,25 @@ wyrelog_error_t wyl_fact_rule_pack_compile_with_mode (const gchar * text,
 /* Stable snake_case name of a reason, e.g. "rule_pack_cycle". */
 const gchar *wyl_fact_rule_pack_reject_name (wyl_fact_rule_pack_reject_t
     reason);
+
+/* Validate a counted immutable v1 pack against exact selected schemas and a
+ * reader capability. Rechecks version/count/byte budget/digest, then semantic
+ * safety and canonical row identity. The caller supplies n_rules valid C
+ * string pointers; no NULL sentinel is required. Loader failure must be
+ * handled before calling this function: missing indices/types cannot be
+ * reconstructed from an info structure. No store writes or engine publication
+ * occur. Only success transfers rendered rules; all failures leave it NULL.
+ *
+ * Unknown mode returns INVALID/UNSUPPORTED_CAPABILITY. Invalid identity or
+ * canonical rows return POLICY/STORED_IDENTITY or NONCANONICAL. A positive
+ * cycle in ACYCLIC mode returns POLICY/UNSUPPORTED_RECURSION with the legacy
+ * cycle indices; negative cycles retain NEGATIVE_CYCLE. Other compiler
+ * diagnostics remain intact. Clear owned rejection fields before reuse.
+ * Production replay/restore explicitly select ACYCLIC until #1506. */
+wyrelog_error_t wyl_fact_rule_pack_compile_stored (
+  const wyl_policy_fact_rule_pack_info_t *pack,
+  const wyl_fact_graph_program_relation_t *relations, gsize n_relations,
+  wyl_fact_rule_pack_mode_t mode, gchar **out_rules,
+  wyl_fact_rule_pack_rejection_t *out_rejection);
 
 G_END_DECLS;

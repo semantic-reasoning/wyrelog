@@ -773,22 +773,15 @@ build_graph_program_with_rule_pack (GPtrArray *relations,
   if (snapshot->rule_pack_status != WYRELOG_E_OK)
     return snapshot->rule_pack_status;
   const wyl_policy_fact_rule_pack_info_t *pack = &snapshot->rule_pack;
-  g_autofree gchar *text = g_strjoinv ("\n", pack->rules);
   g_autofree wyl_fact_graph_program_relation_t *schemas =
       graph_program_relations (relations);
   g_autofree gchar *rules = NULL;
-  g_auto (GStrv) canonical = NULL;
   wyl_fact_rule_pack_rejection_t rejection = { 0 };
-  wyrelog_error_t rc = wyl_fact_rule_pack_compile_canonical (text,
-          strlen (text), schemas, relations->len, &rules, &canonical, &rejection);
+  wyrelog_error_t rc = wyl_fact_rule_pack_compile_stored (pack, schemas,
+          relations->len, WYL_FACT_RULE_PACK_ACYCLIC, &rules, &rejection);
   wyl_fact_rule_pack_rejection_clear (&rejection);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (g_strv_length (canonical) != pack->n_rules)
-    return WYRELOG_E_POLICY;
-  for (gsize i = 0; i < pack->n_rules; i++)
-    if (g_strcmp0 (canonical[i], pack->rules[i]) != 0)
-      return WYRELOG_E_POLICY;
   *out_program = wyl_fact_graph_program_render (schemas, relations->len, rules);
   return *out_program != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
 }
