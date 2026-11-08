@@ -33,6 +33,7 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-engine-private.h"
 #include "wyrelog/audit/event-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
@@ -26462,8 +26463,9 @@ data_credential_rotate_in (ServiceDenialEnv *env, const gchar *owner,
 }
 
 static gchar *
-data_credential_query (ServiceDenialEnv *env, const gchar *token,
-    const gchar *tenant, const gchar *graph, guint expected_status)
+data_credential_relation_query (ServiceDenialEnv *env, const gchar *token,
+    const gchar *tenant, const gchar *graph, const gchar *query_body,
+    guint expected_status)
 {
   g_autofree gchar *path = g_strdup_printf ("/datalog/%s/%s/query", tenant,
           graph);
@@ -26471,15 +26473,33 @@ data_credential_query (ServiceDenialEnv *env, const gchar *token,
           "guard_loc_class=trusted&guard_risk=0", tenant);
   gchar *body = NULL;
   guint status = 0;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gint before = wyl_engine_fact_snapshot_count_for_test ();
+#endif
   g_assert_cmpint (send_raw_service_principal_bearer (env->session, "POST",
       env->base_url, path, query, token,
-      "{\"query\":\"rows(R,A)\",\"output\":\"json\",\"limit\":10}", &status,
+      query_body, &status,
       &body), ==, 0);
   if (status != expected_status)
     g_printerr ("data credential query %s: status=%u body=%s\n", path, status,
         body);
   g_assert_cmpuint (status, ==, expected_status);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (expected_status != 200)
+    g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
+  else
+    g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), >, before);
+#endif
   return body;
+}
+
+static gchar *
+data_credential_query (ServiceDenialEnv *env, const gchar *token,
+    const gchar *tenant, const gchar *graph, guint expected_status)
+{
+  return data_credential_relation_query (env, token, tenant, graph,
+             "{\"query\":\"rows(R,A)\",\"output\":\"json\",\"limit\":10}",
+             expected_status);
 }
 
 static gchar *
@@ -26661,11 +26681,20 @@ check_data_credential_read_contract (void)
       "row_id\tsymbol\tfalse\ttrue\n", TRUE);
   data_credential_admin_send (&env, admin, "/facts/rule-pack/register",
       "tenant=dc-1475&graph=g1&guard_timestamp=1&guard_loc_class=trusted&"
-      "guard_risk=0", "derived(R):-rows(R,_).", TRUE);
+      "guard_risk=0", "derived(R):-rows(R,_).\nderived(R):-derived(R).", TRUE);
   g_autofree gchar *both_secret = NULL;
   g_autofree gchar *both_id = data_credential_issue_for_use (&env, alice,
           "dc-1475", "query,infer", "g1", "3600", &both_secret);
   g_autofree gchar *both = data_credential_bearer (&env, both_id, both_secret);
+  const gchar *derived_query = "{\"query\":\"derived(R)\"}";
+  g_free (data_credential_relation_query (&env, query, "dc-1475", "g1",
+      derived_query, 403));
+  g_free (data_credential_relation_query (&env, infer, "dc-1475", "g1",
+      derived_query, 403));
+  g_autofree gchar *derived_rows = data_credential_relation_query (&env, both,
+          "dc-1475", "g1", derived_query, 200);
+  g_assert_nonnull (strstr (derived_rows, "\"row_count\":1"));
+
   g_free (data_credential_query (&env, query, "dc-1475", "g1", 403));
   g_free (data_credential_query (&env, infer, "dc-1475", "g1", 403));
   g_free (data_credential_query (&env, both, "dc-1475", "g1", 200));
@@ -26682,11 +26711,33 @@ check_data_credential_read_contract (void)
   g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
   g_free (data_credential_query (&env, both, "dc-1475", "g1", 200));
 
+  /* Both issuer permissions and issuer/tenant lifecycle gates remain live
+   * after publishing a recursive pack. Refusals must not enter evaluation. */
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (store,
+      "dc-alice", "wr.datalog.query", "dc-1475"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_free (data_credential_query (&env, both, "dc-1475", "g1", 403));
+  grant_armed_permission (store, "dc-alice", "wr.datalog.query", "dc-1475");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store, "dc-alice",
+      "locked"), ==, WYRELOG_E_OK);
+  g_free (data_credential_query (&env, both, "dc-1475", "g1", 403));
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store, "dc-alice",
+      "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "dc-1475",
+      TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_free (data_credential_query (&env, both, "dc-1475", "g1", 409));
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "dc-1475",
+      FALSE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_free (data_credential_query (&env, both, "dc-1475", "g1", 200));
+
   /* A sealed graph refuses a read through a credential as for anyone. */
   data_credential_admin_send (&env, admin, "/graphs/seal",
       "tenant=dc-1475&graph=g1&guard_timestamp=1&guard_loc_class=trusted&"
       "guard_risk=0", NULL, FALSE);
-  g_autofree gchar *graph_sealed = data_credential_query (&env, query,
+  g_autofree gchar *graph_sealed = data_credential_query (&env, both,
           "dc-1475", "g1", 409);
   g_assert_cmpstr (graph_sealed, ==, "{\"error\":\"graph_not_queryable\"}");
 
@@ -28042,6 +28093,10 @@ default_variant_checks (void)
 int
 main (void)
 {
+#ifdef WYL_TEST_RECURSIVE_CREDENTIALS
+  check_data_credential_read_contract ();
+  gint rc = 0;
+#else
   check_tenant_create_capability ();
   check_tenant_ownership_contract ();
   check_tenant_delete_contract ();
@@ -28063,6 +28118,7 @@ main (void)
   check_data_credential_lifecycle_user ();
 #endif
   gint rc = default_variant_checks ();
+#endif
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);
   return wyl_test_normalize_exit_status (rc);

@@ -438,6 +438,13 @@ wyrelog_error_t wyl_handle_snapshot_fact_graph_relations_guarded (
   const gchar *const *relations, gsize n_relations,
   wyl_fact_graph_tuple_cb cb, gpointer user_data,
   gboolean allow_inference, gboolean *out_inference_required);
+/* External query path: additionally bind its decoder to the pinned engine.
+ * Mismatch refuses before evaluation and never requests inference retry. */
+wyrelog_error_t wyl_handle_snapshot_fact_graph_relation_checked (
+  WylHandle *self, const gchar *tenant_id, const gchar *graph_id,
+  const gchar *relation, GBytes *schema_identity,
+  wyl_fact_graph_tuple_cb cb, gpointer user_data,
+  gboolean allow_inference, gboolean *out_inference_required);
 typedef wyrelog_error_t (*wyl_fact_graph_status_cb) (const
     wyl_fact_graph_status_t * status, gpointer user_data);
 wyrelog_error_t wyl_handle_foreach_fact_graph_status (WylHandle * self,

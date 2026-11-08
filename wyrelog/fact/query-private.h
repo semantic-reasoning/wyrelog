@@ -23,4 +23,10 @@ wyrelog_error_t wyl_fact_datalog_query_json (WylHandle * handle,
     const wyl_fact_datalog_query_options_t * opts, gchar ** out_json,
     gboolean * out_truncated, guint * out_row_count, gchar ** out_query_name);
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+/* Runs after decoder selection and before graph pin/admission. */
+void wyl_fact_datalog_query_set_pre_snapshot_hook_for_test (
+  void (*hook) (gpointer data), gpointer data);
+#endif
+
 G_END_DECLS;

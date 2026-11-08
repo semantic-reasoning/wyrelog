@@ -3571,6 +3571,7 @@ typedef struct
   gpointer user_data;
   gboolean allow_inference;
   gboolean *out_inference_required;
+  GBytes *schema_identity;
 } FactGraphSnapshotCtx;
 
 static void
@@ -3588,6 +3589,10 @@ fact_graph_snapshot_use (WylEngine *engine, gpointer user_data)
 {
   FactGraphSnapshotCtx *ctx = user_data;
   ctx->engine = engine;
+  if (ctx->schema_identity != NULL
+      && !wyl_engine_fact_relation_schema_matches (engine, ctx->relations[0],
+      ctx->schema_identity))
+    return WYRELOG_E_POLICY;
   if (!ctx->allow_inference && wyl_engine_has_fact_rule_pack (engine)) {
     if (ctx->out_inference_required != NULL)
       *ctx->out_inference_required = TRUE;
@@ -3612,12 +3617,13 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
              relations, relation != NULL ? 1 : 0, cb, user_data);
 }
 
-wyrelog_error_t
-wyl_handle_snapshot_fact_graph_relations_guarded (WylHandle *self,
+static wyrelog_error_t
+snapshot_fact_graph_relations_checked (WylHandle *self,
     const gchar *tenant_id, const gchar *graph_id,
     const gchar *const *relations, gsize n_relations,
     wyl_fact_graph_tuple_cb cb, gpointer user_data,
-    gboolean allow_inference, gboolean *out_inference_required)
+    gboolean allow_inference, gboolean *out_inference_required,
+    GBytes *schema_identity)
 {
   if (out_inference_required != NULL)
     *out_inference_required = FALSE;
@@ -3666,10 +3672,38 @@ wyl_handle_snapshot_fact_graph_relations_guarded (WylHandle *self,
     .n_relations = n_relations,
     .allow_inference = allow_inference,
     .out_inference_required = out_inference_required,
+    .schema_identity = schema_identity,
     .cb = cb,
     .user_data = user_data,
   };
   return wyl_fact_graph_snapshot_use (snapshot, fact_graph_snapshot_use, &ctx);
+}
+
+wyrelog_error_t
+wyl_handle_snapshot_fact_graph_relations_guarded (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id,
+    const gchar *const *relations, gsize n_relations,
+    wyl_fact_graph_tuple_cb cb, gpointer user_data,
+    gboolean allow_inference, gboolean *out_inference_required)
+{
+  return snapshot_fact_graph_relations_checked (self, tenant_id, graph_id,
+             relations, n_relations, cb, user_data, allow_inference,
+             out_inference_required, NULL);
+}
+
+wyrelog_error_t
+wyl_handle_snapshot_fact_graph_relation_checked (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *relation,
+    GBytes *schema_identity, wyl_fact_graph_tuple_cb cb, gpointer user_data,
+    gboolean allow_inference, gboolean *out_inference_required)
+{
+  if (out_inference_required != NULL)
+    *out_inference_required = FALSE;
+  if (schema_identity == NULL)
+    return WYRELOG_E_INVALID;
+  return snapshot_fact_graph_relations_checked (self, tenant_id, graph_id,
+             &relation, 1, cb, user_data, allow_inference, out_inference_required,
+             schema_identity);
 }
 
 /* Private trusted callers explicitly opt into evaluation. */

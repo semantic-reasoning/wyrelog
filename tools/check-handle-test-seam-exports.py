@@ -13,6 +13,9 @@ import sys
 
 
 PROTECTED = {
+    "wyl_engine_fact_snapshot_count_for_test",
+    "wyl_engine_set_fact_snapshot_hook_for_test",
+    "wyl_fact_datalog_query_set_pre_snapshot_hook_for_test",
     "wyl_audit_conn_duckdb_config_fail_once_for_test",
     "wyl_audit_conn_duckdb_config_snapshot_for_test",
     "wyl_handle_set_engine_session_checkpoint_for_test",

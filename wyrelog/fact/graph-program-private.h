@@ -34,6 +34,11 @@ gchar *wyl_fact_graph_program_relation_name (const gchar * namespace_id,
  * shared type. */
 const gchar *wyl_fact_graph_program_wire_type (const gchar * column_type);
 
+/* Owned, unambiguous identity for the exact query decoder of one immutable
+ * schema version. This is internal generation metadata, not a stored digest. */
+GBytes *wyl_fact_graph_program_schema_identity (
+  const wyl_fact_graph_program_relation_t *relation, guint32 version);
+
 /* Renders the program a graph engine is built from: per relation, a .decl for
  * the relation and for its _observed twin plus the identity rule between
  * them, in array order, followed by @rules verbatim when it is not NULL.

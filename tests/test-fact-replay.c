@@ -7,6 +7,10 @@
 #include <string.h>
 
 #include "fact-test-support.h"
+#include "recursive-rule-test-support.h"
+#include "wyrelog/fact/query-private.h"
+#include "wyrelog/fact/store-open-private.h"
+#include "wyrelog/fact/graph-program-private.h"
 #include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
@@ -22,7 +26,6 @@
 
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "wyrelog/fact/provisioning-run-private.h"
-#include "wyrelog/fact/store-open-private.h"
 #include "wyrelog/fact/secure-duckdb-bridge-private.h"
 #include "wyrelog/wyl-id-private.h"
 G_GNUC_INTERNAL wyrelog_error_t
@@ -582,7 +585,8 @@ test_restore_replay_uses_one_sealed_policy_snapshot (void)
   g_assert_nonnull (empty_engine);
   g_clear_pointer (&empty_engine, wyl_engine_close);
 
-  const gchar *restore_rule = "shipment-audit(R):-shipment-route(R).";
+  const gchar *restore_rule = "shipment-audit(R):-shipment-route(R).\n"
+      "shipment-audit(R):-shipment-audit(R).";
   wyl_policy_fact_rule_pack_info_t restore_pack = { 0 };
   wyl_fact_rule_pack_rejection_t restore_rejection = { 0 };
   g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy,
@@ -7113,6 +7117,777 @@ assert_guarded_rule_count (WylHandle *handle, gboolean allowed,
   g_assert_cmpuint (count, ==, allowed ? expected : 0);
 }
 
+#define REC_N WYL_TEST_RECURSIVE_VERTICES
+
+typedef struct
+{
+  gchar *root;
+  gchar *path;
+  WylHandle *handle;
+  guint batch;
+  gboolean edges[REC_N][REC_N];
+  gboolean durable[REC_N][REC_N];
+} RecursiveFixture;
+
+static const wyl_policy_fact_relation_schema_column_t recursive_columns[] = {
+  { "src", "symbol", FALSE, TRUE }, { "dst", "symbol", FALSE, TRUE },
+};
+static const gchar *recursive_linear =
+    "reachable(X,Y):-edge(X,Y).\n"
+    "reachable(X,Z):-reachable(X,Y),edge(Y,Z).\n";
+
+static void
+recursive_restart (RecursiveFixture *f)
+{
+  g_clear_object (&f->handle);
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = f->path, .fact_root = f->root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &f->handle), ==,
+      WYRELOG_E_OK);
+}
+
+static void
+recursive_register (RecursiveFixture *f, const gchar *tenant,
+    const gchar *graph, const gchar *pack)
+{
+  const wyl_policy_fact_graph_info_t info = {
+    .tenant_id = (gchar *) tenant, .graph_id = (gchar *) graph,
+  };
+  wyl_policy_fact_rule_pack_info_t stored = { 0 };
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (
+        wyl_handle_get_policy_store (f->handle), &info, pack, strlen (pack),
+        &stored, &rejection), ==, WYRELOG_E_OK);
+  wyl_policy_fact_rule_pack_info_clear (&stored);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (f->handle, &info, &status),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_status_clear (&status);
+}
+
+static void
+recursive_init (RecursiveFixture *f, const gchar *pack)
+{
+  memset (f, 0, sizeof (*f));
+  g_autoptr (GError) error = NULL;
+  f->root = wyl_test_make_secure_fact_root ("wyl-recursive-XXXXXX", &error);
+  g_assert_no_error (error);
+  f->path = g_build_filename (f->root, "policy.sqlite", NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (f->path, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  const gchar *tenants[] = { "tenant-a", "tenant-a", "tenant-b" };
+  const gchar *graphs[] = { "recursive", "sibling", "recursive" };
+  const gchar *relations[] = { "edge", "reachable", "p", "blocked" };
+  for (guint g = 0; g < G_N_ELEMENTS (graphs); g++) {
+    create_graph_with_schema (policy, f->root, tenants[g], graphs[g]);
+    for (guint r = 0; r < G_N_ELEMENTS (relations); r++) {
+      wyl_policy_fact_relation_schema_options_t schema = make_schema (
+        tenants[g], graphs[g], recursive_columns, 2);
+      schema.relation_name = relations[r];
+      g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+          &schema), ==, WYRELOG_E_OK);
+    }
+  }
+  /* Seed an unrelated declared relation before runtime ownership, matching
+   * the legacy store identity contract; recursive inputs remain empty. */
+  for (guint g = 0; g < G_N_ELEMENTS (graphs); g++)
+    append_order_batches (policy, f->root, tenants[g], graphs[g]);
+
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  recursive_restart (f);
+  if (pack != NULL)
+    for (guint g = 0; g < G_N_ELEMENTS (graphs); g++)
+      recursive_register (f, tenants[g], graphs[g], pack);
+}
+
+static void
+recursive_clear (RecursiveFixture *f)
+{
+  g_clear_object (&f->handle);
+  remove_tree (f->root);
+  g_free (f->path);
+  g_free (f->root);
+}
+
+static gchar *
+recursive_mutate (RecursiveFixture *f, const gchar *tenant,
+    const gchar *graph, const gchar *relation, wyl_fact_store_op_t op,
+    guint src, guint dst)
+{
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (f->handle);
+  g_autofree gchar *storage = lookup_graph_storage_path (policy, tenant, graph);
+  g_autofree gchar *path = g_build_filename (storage, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_legacy_graph (policy, path, f->root,
+      tenant, graph, TRUE, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (
+    tenant, graph, recursive_columns, 2);
+  schema.relation_name = relation;
+  g_autofree gchar *a = g_strdup_printf ("v%u", src);
+  g_autofree gchar *b = g_strdup_printf ("v%u", dst);
+  wyl_fact_value_t values[] = {
+    { .type = WYL_FACT_VALUE_SYMBOL, .as.text = a },
+    { .type = WYL_FACT_VALUE_SYMBOL, .as.text = b },
+  };
+  wyl_fact_row_t row = { values, 2 };
+  gchar *id = g_strdup_printf ("recursive-%u", ++f->batch);
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = id, .tenant_id = tenant, .graph_id = graph,
+    .namespace_id = "shop.ns", .relation_name = relation,
+    .schema_version = 1, .source = "test", .idempotency_key = id,
+    .op = op, .rows = &row, .n_rows = 1,
+  };
+  FullGraphInfoProbe target = { tenant, graph, { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, tenant,
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_handle_commit_fact_mutation (f->handle, &store,
+      &schema, &batch, &target.info, NULL, &inserted, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (outcome.mutation_class, ==, WYL_FACT_MUTATION_COMMITTED_READY);
+  g_assert_true (inserted);
+  g_assert_null (store);
+  clear_full_graph_info (&target.info);
+  if (g_str_equal (tenant, "tenant-a") && g_str_equal (graph, "recursive")) {
+    if (g_str_equal (relation, "edge"))
+      f->edges[src][dst] = op == WYL_FACT_STORE_OP_ASSERT;
+    if (g_str_equal (relation, "reachable"))
+      f->durable[src][dst] = op == WYL_FACT_STORE_OP_ASSERT;
+  }
+  return id;
+}
+
+typedef struct
+{
+  const gchar *relation;
+  gboolean rows[REC_N][REC_N];
+} RecursiveImage;
+
+static void
+recursive_capture (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint width, gpointer data)
+{
+  RecursiveImage *image = data;
+  g_assert_cmpstr (relation, ==, image->relation);
+  g_assert_cmpuint (width, ==, 2);
+  g_autofree gchar *a = wyl_engine_owned_dup_interned_symbol (engine, row[0]);
+  g_autofree gchar *b = wyl_engine_owned_dup_interned_symbol (engine, row[1]);
+  g_assert_nonnull (a); g_assert_nonnull (b);
+  g_assert_cmpint (a[0], ==, 'v'); g_assert_cmpint (b[0], ==, 'v');
+  guint src = (guint) g_ascii_strtoull (a + 1, NULL, 10);
+  guint dst = (guint) g_ascii_strtoull (b + 1, NULL, 10);
+  g_assert_cmpuint (src, <, REC_N); g_assert_cmpuint (dst, <, REC_N);
+  g_assert_false (image->rows[src][dst]);
+  image->rows[src][dst] = TRUE;
+}
+
+static void
+recursive_assert_set (RecursiveFixture *f, const gchar *tenant,
+    const gchar *graph, const gchar *relation, const gboolean expected[REC_N][REC_N])
+{
+  g_autofree gchar *wire = wyl_fact_replay_wirelog_relation_name (
+    "shop.ns", relation);
+  g_autofree gchar *observed = g_strconcat (wire, "_observed", NULL);
+  RecursiveImage image = { .relation = observed };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (f->handle,
+      tenant, graph, observed, recursive_capture, &image), ==, WYRELOG_E_OK);
+  for (guint a = 0; a < REC_N; a++)
+    for (guint b = 0; b < REC_N; b++) {
+      if (image.rows[a][b] != expected[a][b])
+        g_test_message ("batch=%u %s/%s %s v%u->v%u actual=%d expected=%d",
+            f->batch, tenant, graph, relation, a, b,
+            image.rows[a][b], expected[a][b]);
+      g_assert_cmpint (image.rows[a][b], ==, expected[a][b]);
+    }
+}
+
+static void
+recursive_assert_closure (RecursiveFixture *f)
+{
+  gboolean expected[REC_N][REC_N];
+  wyl_test_recursive_closure (f->edges, expected);
+  /* A durable head seeds the linear rule's left operand; only EDB edges
+   * extend it. It must not become an extra right-hand edge. */
+  gboolean edge_closure[REC_N][REC_N];
+  memcpy (edge_closure, expected, sizeof expected);
+  for (guint a = 0; a < REC_N; a++)
+    for (guint b = 0; b < REC_N; b++) {
+      expected[a][b] |= f->durable[a][b];
+      for (guint seed = 0; seed < REC_N; seed++)
+        expected[a][b] |= f->durable[a][seed] && edge_closure[seed][b];
+    }
+  recursive_assert_set (f, "tenant-a", "recursive", "reachable", expected);
+}
+
+static void
+recursive_forget (RecursiveFixture *f, const gchar *batch, const gchar *relation)
+{
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (f->handle);
+  g_autofree gchar *storage = lookup_graph_storage_path (policy,
+          "tenant-a", "recursive");
+  g_autofree gchar *path = g_build_filename (storage, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_legacy_graph (policy, path, f->root,
+      "tenant-a", "recursive", TRUE, &store), ==, WYRELOG_E_OK);
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (
+    "tenant-a", "recursive", recursive_columns, 2);
+  schema.relation_name = relation;
+  const wyl_fact_store_forget_options_t opts = {
+    .batch_id = batch, .operator_id = "test-owner", .reason = "test-erasure",
+  };
+  g_assert_cmpint (wyl_fact_store_forget (store, &schema, &opts, NULL), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  const wyl_policy_fact_graph_info_t graph = {
+    .tenant_id = "tenant-a", .graph_id = "recursive",
+  };
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (f->handle, &graph, &status),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_status_clear (&status);
+}
+
+static void
+test_recursive_durable_lifecycle (void)
+{
+  RecursiveFixture f;
+  recursive_init (&f, recursive_linear);
+  recursive_assert_closure (&f); /* empty seed */
+  g_autofree gchar *ab = recursive_mutate (&f, "tenant-a", "recursive",
+          "edge", WYL_FACT_STORE_OP_ASSERT, 0, 1);
+  g_autofree gchar *bc = recursive_mutate (&f, "tenant-a", "recursive",
+          "edge", WYL_FACT_STORE_OP_ASSERT, 1, 2);
+  recursive_assert_closure (&f);
+  recursive_assert_closure (&f); /* stable cached model */
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_RETRACT, 1, 2));
+  recursive_assert_closure (&f); /* unsupported a->c disappears */
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_ASSERT, 1, 2));
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_ASSERT, 0, 3));
+  g_autofree gchar *dc = recursive_mutate (&f, "tenant-a", "recursive",
+          "edge", WYL_FACT_STORE_OP_ASSERT, 3, 2);
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_RETRACT, 1, 2));
+  recursive_assert_closure (&f); /* alternate a->d->c remains */
+  g_autofree gchar *ac = recursive_mutate (&f, "tenant-a", "recursive",
+          "reachable", WYL_FACT_STORE_OP_ASSERT, 0, 2);
+  recursive_assert_closure (&f); /* same derived and durable tuple emitted once */
+  recursive_forget (&f, dc, "edge");
+  f.edges[3][2] = FALSE;
+  recursive_assert_closure (&f); /* durable head outlives derived support */
+  recursive_forget (&f, ac, "reachable");
+  f.durable[0][2] = FALSE;
+  recursive_assert_closure (&f);
+  recursive_forget (&f, ab, "edge");
+  f.edges[0][1] = FALSE;
+  recursive_assert_closure (&f); /* independent forgotten supporting batch */
+  recursive_restart (&f);
+  recursive_assert_closure (&f);
+  gboolean isolated[REC_N][REC_N] = { { FALSE } };
+  g_free (recursive_mutate (&f, "tenant-b", "recursive", "edge",
+      WYL_FACT_STORE_OP_ASSERT, 2, 0));
+  isolated[2][0] = TRUE;
+  recursive_assert_set (&f, "tenant-b", "recursive", "reachable", isolated);
+  recursive_assert_closure (&f);
+  memset (isolated, 0, sizeof isolated);
+  recursive_assert_set (&f, "tenant-a", "sibling", "reachable", isolated);
+  recursive_clear (&f);
+}
+
+static void
+test_recursive_program_forms (void)
+{
+  static const gchar *const packs[] = {
+    "reachable(X,Y):-edge(X,Y).\n"
+    "reachable(X,Z):-reachable(X,Y),reachable(Y,Z).",
+    "p(X,Y):-edge(X,Y).\nreachable(X,Y):-p(X,Y).\n"
+    "p(X,Z):-reachable(X,Y),edge(Y,Z).",
+  };
+  for (guint p = 0; p < G_N_ELEMENTS (packs); p++) {
+    RecursiveFixture f;
+    recursive_init (&f, packs[p]);
+    recursive_assert_closure (&f);
+    for (guint i = 0; i < 4; i++)
+      g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+          WYL_FACT_STORE_OP_ASSERT, i, (i + 1) % 4));
+    recursive_assert_closure (&f); /* cyclic EDB and fixed-point set semantics */
+    g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+        WYL_FACT_STORE_OP_RETRACT, 1, 2));
+    recursive_assert_closure (&f);
+    recursive_restart (&f);
+    recursive_assert_closure (&f);
+    recursive_clear (&f);
+  }
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean entered;
+  gboolean released;
+  gboolean fail;
+} RecursiveBarrier;
+
+static void
+recursive_barrier_init (RecursiveBarrier *b)
+{
+  memset (b, 0, sizeof (*b));
+  g_mutex_init (&b->mutex);
+  g_cond_init (&b->changed);
+}
+
+static void
+recursive_barrier_enter (gpointer data)
+{
+  RecursiveBarrier *b = data;
+  g_mutex_lock (&b->mutex);
+  b->entered = TRUE;
+  g_cond_broadcast (&b->changed);
+  gint64 deadline = g_get_monotonic_time () + 30 * G_TIME_SPAN_SECOND;
+  while (!b->released && g_cond_wait_until (&b->changed, &b->mutex, deadline));
+  g_assert_true (b->released);
+  g_mutex_unlock (&b->mutex);
+}
+
+static void
+recursive_barrier_wait (RecursiveBarrier *b)
+{
+  g_mutex_lock (&b->mutex);
+  gint64 deadline = g_get_monotonic_time () + 30 * G_TIME_SPAN_SECOND;
+  while (!b->entered && g_cond_wait_until (&b->changed, &b->mutex, deadline));
+  g_assert_true (b->entered);
+  g_mutex_unlock (&b->mutex);
+}
+
+static void
+recursive_barrier_release (RecursiveBarrier *b)
+{
+  g_mutex_lock (&b->mutex);
+  b->released = TRUE;
+  g_cond_broadcast (&b->changed);
+  g_mutex_unlock (&b->mutex);
+}
+
+static void
+recursive_barrier_clear (RecursiveBarrier *b)
+{
+  g_cond_clear (&b->changed);
+  g_mutex_clear (&b->mutex);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *query;
+  gboolean allow;
+  gboolean required;
+  wyrelog_error_t rc;
+  gchar *json;
+} RecursiveQuery;
+
+static gpointer
+recursive_query_thread (gpointer data)
+{
+  RecursiveQuery *q = data;
+  const wyl_fact_datalog_query_options_t opts = {
+    .tenant_id = "tenant-a", .graph_id = "recursive", .query = q->query,
+    .allow_inference = q->allow, .out_inference_required = &q->required,
+  };
+  q->rc = wyl_fact_datalog_query_json (q->handle, &opts, &q->json,
+          NULL, NULL, NULL);
+  return NULL;
+}
+
+static void
+test_recursive_generation_races (void)
+{
+  RecursiveFixture f;
+  recursive_init (&f, NULL);
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_ASSERT, 0, 1));
+  /* Query-only is sufficient for the actual no-pack generation. */
+  RecursiveQuery q = { .handle = f.handle, .query = "edge(X,Y)" };
+  recursive_query_thread (&q);
+  g_assert_cmpint (q.rc, ==, WYRELOG_E_OK);
+  g_assert_nonnull (strstr (q.json, "\"X\":\"v0\",\"Y\":\"v1\""));
+  g_clear_pointer (&q.json, g_free);
+  RecursiveBarrier barrier;
+  recursive_barrier_init (&barrier);
+  wyl_fact_datalog_query_set_pre_snapshot_hook_for_test (
+    recursive_barrier_enter, &barrier);
+  gint before = wyl_engine_fact_snapshot_count_for_test ();
+  GThread *thread = g_thread_new ("first-pack-query", recursive_query_thread, &q);
+  recursive_barrier_wait (&barrier);
+  recursive_register (&f, "tenant-a", "recursive", recursive_linear);
+  recursive_barrier_release (&barrier);
+  g_thread_join (thread);
+  wyl_fact_datalog_query_set_pre_snapshot_hook_for_test (NULL, NULL);
+  recursive_barrier_clear (&barrier);
+  g_assert_cmpint (q.rc, ==, WYRELOG_E_POLICY);
+  g_assert_true (q.required);
+  g_assert_null (q.json);
+  g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
+  q.allow = TRUE;
+  recursive_query_thread (&q);
+  g_assert_cmpint (q.rc, ==, WYRELOG_E_OK);
+  g_clear_pointer (&q.json, g_free);
+
+  /* The old two-symbol decoder pauses before pinning; publish an int64
+   * one-column version with a different pack while it is paused. */
+  q.query = "reachable(X,Y)";
+  recursive_barrier_init (&barrier);
+  wyl_fact_datalog_query_set_pre_snapshot_hook_for_test (
+    recursive_barrier_enter, &barrier);
+  before = wyl_engine_fact_snapshot_count_for_test ();
+  thread = g_thread_new ("schema-replacement-query", recursive_query_thread, &q);
+  recursive_barrier_wait (&barrier);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (f.handle);
+  const wyl_policy_fact_relation_schema_column_t column = {
+    "answer", "int64", FALSE, TRUE,
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (
+    "tenant-a", "recursive", &column, 1);
+  const wyl_policy_fact_relation_schema_query_t query_v2 = {
+    .query_name = "reachable_v2", .required_permission_id = "wr.datalog.query",
+    .max_rows = 1000,
+  };
+  schema.relation_name = "reachable";
+  schema.schema_version = 2;
+  schema.queries = &query_v2;
+  schema.n_queries = 1;
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &schema), ==, WYRELOG_E_OK);
+  WylPolicyAuthorityMutationResult ar;
+  g_assert_cmpint (wyl_policy_store_reserve_relation_activation (policy,
+      "tenant-a", "recursive", "shop.ns", "reachable", &ar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (policy,
+      "tenant-a", "recursive", "shop.ns", "reachable",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 2,
+      "none", &ar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (policy,
+      "tenant-a", "recursive", "shop.ns", "reachable",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, 1,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE, TRUE, 2, FALSE, 0,
+      "none", &ar), ==, WYRELOG_E_OK);
+  recursive_register (&f, "tenant-a", "recursive", "reachable(42):-edge(X,Y).");
+  recursive_barrier_release (&barrier);
+  g_thread_join (thread);
+  wyl_fact_datalog_query_set_pre_snapshot_hook_for_test (NULL, NULL);
+  recursive_barrier_clear (&barrier);
+  g_assert_cmpint (q.rc, ==, WYRELOG_E_POLICY);
+  g_assert_false (q.required);
+  g_assert_null (q.json);
+  g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
+  q.query = "reachable_v2(V)";
+  recursive_query_thread (&q);
+  g_assert_cmpint (q.rc, ==, WYRELOG_E_OK);
+  g_assert_nonnull (strstr (q.json, "\"row_count\":1"));
+  g_assert_nonnull (strstr (q.json, "\"rows\":[{\"V\":42}]"));
+  g_clear_pointer (&q.json, g_free);
+  recursive_clear (&f);
+}
+
+typedef struct
+{
+  WylEngine *engine;
+  RecursiveImage *image;
+} RecursiveEngineImage;
+
+static void
+recursive_engine_capture (const gchar *relation, const gint64 *row,
+    guint width, gpointer data)
+{
+  RecursiveEngineImage *capture = data;
+  recursive_capture (capture->engine, relation, row, width, capture->image);
+}
+
+static void
+test_recursive_restore_model (void)
+{
+  RecursiveFixture f;
+  recursive_init (&f, recursive_linear);
+  for (guint i = 0; i < 4; i++)
+    g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+        WYL_FACT_STORE_OP_ASSERT, i, (i + 1) % 4));
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_RETRACT, 1, 2));
+  gboolean expected[REC_N][REC_N];
+  wyl_test_recursive_closure (f.edges, expected);
+  recursive_assert_closure (&f);
+  g_clear_object (&f.handle);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (f.path, &policy), ==, WYRELOG_E_OK);
+  g_autofree gchar *storage = lookup_graph_storage_path (policy, "tenant-a", "recursive");
+  g_autofree gchar *path = g_build_filename (storage, "facts.duckdb", NULL);
+  /* A stopped-writer artifact copy, opened through the same supplied-store
+   * restore replay contract; secure stage-reader coverage lives separately. */
+  g_autofree gchar *copy = g_build_filename (f.root, "restored.duckdb", NULL);
+  g_autofree gchar *bytes = NULL;
+  gsize length = 0;
+  g_assert_true (g_file_get_contents (path, &bytes, &length, NULL));
+  g_assert_true (g_file_set_contents (copy, bytes, length, NULL));
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (copy, &store), ==, WYRELOG_E_OK);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "recursive", .schema_version = 1,
+    .sealed = TRUE,
+  };
+  info.sealed = FALSE;
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine_with_store_for_test (
+        policy, store, &info, &engine), ==, WYRELOG_E_OK);
+  g_autofree gchar *wire = wyl_fact_replay_wirelog_relation_name ("shop.ns", "reachable");
+  g_autofree gchar *observed = g_strconcat (wire, "_observed", NULL);
+  for (guint repeat = 0; repeat < 2; repeat++) {
+    RecursiveImage image = { .relation = observed };
+    RecursiveEngineImage capture = { engine, &image };
+    g_assert_cmpint (wyl_engine_snapshot (engine, observed, recursive_engine_capture,
+        &capture), ==, WYRELOG_E_OK);
+    for (guint a = 0; a < REC_N; a++)
+      for (guint b = 0; b < REC_N; b++)
+        g_assert_cmpint (image.rows[a][b], ==, expected[a][b]);
+  }
+  g_clear_pointer (&engine, wyl_engine_close);
+  g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
+      "recursive"), ==, WYRELOG_E_OK);
+  WylPolicyFactBackupSnapshot *backup = NULL;
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (policy,
+      "tenant-a", &backup), ==, WYRELOG_E_OK);
+  const gchar *digest = NULL;
+  for (guint i = 0; i < backup->graphs->len; i++) {
+    const WylPolicyFactBackupGraphSnapshot *g = g_ptr_array_index (backup->graphs, i);
+    if (g_str_equal (g->authority->graph_id, "recursive"))
+      digest = g->active_schema_digest;
+  }
+  g_assert_nonnull (digest);
+  info.sealed = TRUE;
+  RestoreReplayCall call = { .policy = policy, .store = store,
+                             .graph_info = &info, .expected_schema_digest = digest };
+  gint before = wyl_engine_fact_snapshot_count_for_test ();
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (call.observed_schema_digest, ==, digest);
+  g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
+  g_free (call.observed_schema_digest);
+  wyl_policy_fact_backup_snapshot_free (backup);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  recursive_clear (&f);
+}
+
+static void
+test_recursive_stratified_negation (void)
+{
+  RecursiveFixture f;
+  recursive_init (&f, "p(X,Y):-edge(X,Y).\n"
+      "p(X,Z):-p(X,Y),edge(Y,Z).\n"
+      "reachable(X,Y):-p(X,Y),!blocked(X,Y).");
+  for (guint i = 0; i < 8; i++)
+    g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+        WYL_FACT_STORE_OP_ASSERT, i, i + 1));
+  recursive_assert_closure (&f);
+  g_autofree gchar *blocked = recursive_mutate (&f, "tenant-a", "recursive",
+          "blocked", WYL_FACT_STORE_OP_ASSERT, 0, 8);
+  gboolean expected[REC_N][REC_N];
+  wyl_test_recursive_closure (f.edges, expected);
+  expected[0][8] = FALSE;
+  recursive_assert_set (&f, "tenant-a", "recursive", "reachable", expected);
+  recursive_restart (&f);
+  recursive_assert_set (&f, "tenant-a", "recursive", "reachable", expected);
+  recursive_forget (&f, blocked, "blocked");
+  recursive_assert_closure (&f);
+  g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+      WYL_FACT_STORE_OP_RETRACT, 3, 4));
+  recursive_assert_closure (&f);
+  recursive_clear (&f);
+}
+
+#ifdef WL_SESSION_TEST_HOOKS
+extern uint32_t wl_columnar_eval_serial_test_iteration_limit;
+extern uint32_t wl_columnar_session_test_iteration_limit;
+
+static void
+test_recursive_lazy_retry (void)
+{
+  RecursiveFixture f;
+  recursive_init (&f, "p(X,Y):-edge(X,Y).\nreachable(X,Y):-p(X,Y).\n"
+      "p(X,Z):-reachable(X,Y),edge(Y,Z).");
+  for (guint i = 0; i < 13; i++)
+    g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+        WYL_FACT_STORE_OP_ASSERT, i, i + 1));
+  WylFactGraphRuntimeStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (f.handle,
+      "tenant-a", "recursive", &before), ==, WYRELOG_E_OK);
+  /* Both base and derived snapshots evaluate the entire program. No partial
+   * JSON escapes an actual provider cap; the same published engine retries. */
+  const gchar *queries[] = { "edge(X,Y)", "reachable(X,Y)" };
+  for (guint i = 0; i < G_N_ELEMENTS (queries); i++) {
+    wl_columnar_eval_serial_test_iteration_limit = 1;
+    wl_columnar_session_test_iteration_limit = 1;
+    RecursiveQuery q = { .handle = f.handle, .query = queries[i], .allow = TRUE };
+    recursive_query_thread (&q);
+    wl_columnar_eval_serial_test_iteration_limit = 0;
+    wl_columnar_session_test_iteration_limit = 0;
+    g_assert_cmpint (q.rc, ==, WYRELOG_E_EXEC);
+    g_assert_null (q.json);
+    g_assert_false (q.required);
+  }
+  recursive_assert_closure (&f);
+  recursive_assert_closure (&f);
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (f.handle,
+      "tenant-a", "recursive", &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.engine_generation, ==, before.engine_generation);
+  g_assert_cmpuint (after.active_engine_calls, ==, 0);
+  g_assert_cmpuint (after.active_snapshots, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_status_clear (&after);
+  recursive_clear (&f);
+}
+#endif
+
+static wyrelog_error_t
+recursive_evaluation_barrier (WylEngine *engine, gpointer data)
+{
+  (void) engine;
+  RecursiveBarrier *b = data;
+  recursive_barrier_enter (b);
+  return b->fail ? WYRELOG_E_EXEC : WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyrelog_error_t rc;
+} RecursiveSeal;
+
+static gpointer
+recursive_seal_thread (gpointer data)
+{
+  RecursiveSeal *s = data;
+  g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+  s->rc = wyl_service_auth_authority_acquire_write (
+    wyl_handle_get_service_auth_authority (s->handle), s->handle, NULL, &lease);
+  if (s->rc != WYRELOG_E_OK)
+    return NULL;
+  const wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "recursive",
+  };
+  WylFactGraphSealOutcome outcome = { 0 };
+  s->rc = wyl_handle_seal_fact_graph (s->handle, lease, &info,
+          20 * G_TIME_SPAN_SECOND, &outcome);
+  wyl_fact_graph_seal_outcome_clear (&outcome);
+  return NULL;
+}
+
+static void
+test_recursive_query_seal_barrier (void)
+{
+  for (guint fail = 0; fail < 2; fail++) {
+    RecursiveFixture f;
+    recursive_init (&f, recursive_linear);
+    g_free (recursive_mutate (&f, "tenant-a", "recursive", "edge",
+        WYL_FACT_STORE_OP_ASSERT, 0, 1));
+    RecursiveBarrier barrier;
+    recursive_barrier_init (&barrier);
+    barrier.fail = fail;
+    wyl_engine_set_fact_snapshot_hook_for_test (recursive_evaluation_barrier,
+        &barrier);
+    RecursiveQuery q = { .handle = f.handle, .query = "reachable(X,Y)",
+                         .allow = TRUE };
+    GThread *reader = g_thread_new ("recursive-query", recursive_query_thread, &q);
+    recursive_barrier_wait (&barrier);
+    RecursiveSeal seal = { .handle = f.handle };
+    GThread *writer = g_thread_new ("recursive-seal", recursive_seal_thread, &seal);
+    gboolean closed = FALSE;
+    gint64 deadline = g_get_monotonic_time () + 10 * G_TIME_SPAN_SECOND;
+    do {
+      WylFactGraphRuntimeStatus status = { 0 };
+      g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (f.handle,
+          "tenant-a", "recursive", &status), ==, WYRELOG_E_OK);
+      closed = status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED;
+      if (closed) {
+        g_assert_cmpuint (status.active_engine_calls, ==, 1);
+        g_assert_cmpuint (status.active_snapshots, ==, 1);
+      }
+      wyl_fact_graph_runtime_status_clear (&status);
+      if (!closed) g_thread_yield ();
+    } while (!closed && g_get_monotonic_time () < deadline);
+    g_assert_true (closed); /* observed barrier, not a timing assumption */
+    gint before = wyl_engine_fact_snapshot_count_for_test ();
+    g_autofree gchar *wire = wyl_fact_replay_wirelog_relation_name ("shop.ns", "reachable");
+    g_autofree gchar *observed = g_strconcat (wire, "_observed", NULL);
+    RecursiveImage image = { .relation = observed };
+    g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (f.handle,
+        "tenant-a", "recursive", observed, recursive_capture, &image), !=,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
+    recursive_barrier_release (&barrier);
+    g_thread_join (reader);
+    g_thread_join (writer);
+    wyl_engine_set_fact_snapshot_hook_for_test (NULL, NULL);
+    recursive_barrier_clear (&barrier);
+    g_assert_cmpint (seal.rc, ==, WYRELOG_E_OK);
+    g_assert_cmpint (q.rc, ==, fail ? WYRELOG_E_EXEC : WYRELOG_E_OK);
+    if (fail) g_assert_null (q.json);
+    else g_assert_nonnull (strstr (q.json, "\"rows\":[{\"X\":\"v0\",\"Y\":\"v1\"}]"));
+    g_clear_pointer (&q.json, g_free);
+    before = wyl_engine_fact_snapshot_count_for_test ();
+    recursive_query_thread (&q);
+    g_assert_cmpint (q.rc, !=, WYRELOG_E_OK);
+    g_assert_null (q.json);
+    g_assert_cmpint (wyl_engine_fact_snapshot_count_for_test (), ==, before);
+    WylFactTenantAdmissionState state;
+    guint readers = 99, waiters = 99;
+    g_assert_cmpint (wyl_handle_get_fact_tenant_admission_for_test (f.handle,
+        "tenant-a", &state, &readers, &waiters), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (readers, ==, 0);
+    g_assert_cmpuint (waiters, ==, 0);
+    recursive_clear (&f);
+  }
+}
+
+static void
+test_recursive_pack_activation (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root (
+    "wyl-recursive-activation-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *path = g_build_filename (root, "policy.sqlite", NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+  const wyl_policy_fact_graph_info_t graph = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  const gchar *pack = "orders-rel(O,A,E):-orders-rel(O,A,E).";
+  wyl_policy_fact_rule_pack_info_t info = { 0 };
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph,
+      pack, strlen (pack), &info, &rejection), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (info.pack_version, ==, 1);
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &graph,
+      &engine), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_engine_has_fact_rule_pack (engine));
+  wyl_policy_fact_rule_pack_info_clear (&info);
+  g_clear_object (&engine);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
 static void
 test_register_rule_pack_checks_then_stores (void)
 {
@@ -7164,18 +7939,18 @@ test_register_rule_pack_checks_then_stores (void)
   wyl_policy_fact_rule_pack_info_clear (&info);
   assert_stored_rule_pack (policy, "orders", 1, stored);
   append_order_batches (policy, root, "tenant-a", "orders");
-  /* The internal recursive compiler capability must not activate production
-   * registration. Rejected replacements preserve the stored identity. */
+  /* Unsafe negative recursion still preserves the stored identity. */
   const gchar *recursive_packs[] = {
-    "big(O):-big(O).",
-    "big(O):-orders-rel(O,_,_).\norders-rel(O,22,false):-big(O).",
+    "big(O):-orders-rel(O,_,_),!big(O).",
+    "big(O):-orders-rel(O,_,_).\n"
+    "orders-rel(O,22,false):-big(O),!orders-rel(O,22,false).",
   };
   for (guint i = 0; i < G_N_ELEMENTS (recursive_packs); i++) {
     const gchar *recursive = recursive_packs[i];
     g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph,
         recursive, strlen (recursive), &info, &rejection), ==, WYRELOG_E_POLICY);
-    g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_CYCLE);
-    g_assert_cmpuint (rejection.rule_index, ==, 1);
+    g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_NEGATIVE_CYCLE);
+    g_assert_cmpuint (rejection.rule_index, ==, i + 1);
     g_assert_cmpuint (rejection.n_cycle_rules, ==, i + 1);
     g_assert_cmpuint (info.pack_version, ==, 0);
     g_assert_null (info.rules);
@@ -7268,7 +8043,7 @@ test_register_rule_pack_checks_then_stores (void)
    * replacement keeps the previous engine and its inference requirement. */
   wyl_policy_store_t *live = wyl_handle_get_policy_store (handle);
   const gchar *invalid[] = {
-    "big(O):-missing(O).", "big(O):-big(O).",
+    "big(O):-missing(O).", "big(O):-orders-rel(O,_,_),!big(O).",
     "big(O) :- orders-rel(O,_,_).", "big(O):-orders-rel(O,_).",
     "big(O):-orders-rel(O,true,_).",
   };
@@ -7285,8 +8060,8 @@ test_register_rule_pack_checks_then_stores (void)
     assert_guarded_rule_count (handle, TRUE, 1);
     assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
   }
-  /* A real recursive latest version also fails graph-locally on restart,
-   * leaving the unrelated ordinary graph queryable and stored data intact. */
+  /* A recursive latest version now survives restart, with the other tenant
+   * remaining independent and canonical stored identity unchanged. */
   const gchar *recursive_latest[] = {
     "big(O):-orders-rel(O,_,_).", "big(O):-big(O).",
   };
@@ -7297,7 +8072,8 @@ test_register_rule_pack_checks_then_stores (void)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   GraphGenerations bad = capture_generations (handle, "tenant-a", "orders");
-  g_assert_false (bad.queryable);
+  g_assert_true (bad.queryable);
+  assert_guarded_rule_count (handle, TRUE, 1);
   assert_handle_replayed_order_b_only (handle, "tenant-b", "orders");
   live = wyl_handle_get_policy_store (handle);
   const gchar *const recursive_stored[] = {
@@ -7667,6 +8443,22 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-replay/tenant-delete-restart", test_tenant_delete_restart);
   g_test_add_func ("/fact-replay/tenant-seal-scope-outcomes", test_tenant_seal_scope_outcomes);
   g_test_add_func ("/fact-replay/user-delete-restart", test_user_delete_restart);
+  g_test_add_func ("/fact-replay/recursive/durable-lifecycle",
+      test_recursive_durable_lifecycle);
+  g_test_add_func ("/fact-replay/recursive/program-forms",
+      test_recursive_program_forms);
+  g_test_add_func ("/fact-replay/recursive/restore-model", test_recursive_restore_model);
+  g_test_add_func ("/fact-replay/recursive/stratified-negation",
+      test_recursive_stratified_negation);
+#ifdef WL_SESSION_TEST_HOOKS
+  g_test_add_func ("/fact-replay/recursive/lazy-retry", test_recursive_lazy_retry);
+#endif
+  g_test_add_func ("/fact-replay/recursive/generation-races",
+      test_recursive_generation_races);
+  g_test_add_func ("/fact-replay/recursive/query-seal",
+      test_recursive_query_seal_barrier);
+  g_test_add_func ("/fact-replay/recursive/activation",
+      test_recursive_pack_activation);
   g_test_add_func ("/fact-replay/register-rule-pack",
       test_register_rule_pack_checks_then_stores);
   g_test_add_func ("/fact-replay/graph-program-pinned",
