@@ -1,42 +1,42 @@
 [
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 1303,
+    "line": 1396,
     "api": "TerminateProcess",
     "expression": "process.hProcess, TEMP_TOKEN_CHILD_ERROR",
     "platform": "windows"
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 1312,
+    "line": 1405,
     "api": "TerminateProcess",
     "expression": "process.hProcess, TEMP_TOKEN_CHILD_ERROR",
     "platform": "windows"
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 1369,
+    "line": 1462,
     "api": "TerminateProcess",
     "expression": "child, 0x660",
     "platform": "windows"
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 1692,
+    "line": 1785,
     "api": "TerminateProcess",
     "expression": "child, 0xC000013A",
     "platform": "windows"
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 4881,
+    "line": 4976,
     "api": "_exit",
     "expression": "run_lease_child (argv[2], argv[3])",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 4883,
+    "line": 4978,
     "api": "_exit",
     "expression": "run_temp_token_child (argv[2], argv[3], argv[4])",
     "platform": "posix-normalized-wrapper"

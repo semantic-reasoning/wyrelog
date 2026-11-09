@@ -506,6 +506,7 @@ wyl_fact_artifact_io_session_open_sidecar (
 wyrelog_error_t
 wyl_fact_artifact_io_session_open_reader_wal (
   WylFactArtifactMutationLease *lease,
+  WylFactArtifactName wal,
   WylFactArtifactIoSession **out_session)
 {
   WylFactArtifactReaderWalBinding *binding = NULL;
@@ -517,7 +518,8 @@ wyl_fact_artifact_io_session_open_reader_wal (
   if (lease == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  rc = wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease, &binding, &fd);
+  rc = wyl_fact_artifact_reader_guard_open_existing_wal_binding (lease, wal,
+          &binding, &fd);
   if (rc != WYRELOG_E_OK)
     return rc;
 

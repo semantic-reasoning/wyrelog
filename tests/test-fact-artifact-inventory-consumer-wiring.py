@@ -47,7 +47,7 @@ ARTIFACT_LOCK_DIAGNOSTIC = (
     "state for that graph"
 )
 EXPECTED_POSIX_OPENAT_PROFILE_SHA256 = (
-    "e53298e179e2c767efd021602bda7a69ae88ab46b28320d6f10dbb3ec86c0e17"
+    "8784fa854e9d9a16a61961693c244e3538d6e06a14038018e0098f35b385208d"
 )
 EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
     "cd2142b6b47c0fe29c2aa4089e40cce8b130ac83cd62ec0d9982bd98900ca86f"
@@ -56,13 +56,13 @@ EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "4f2f3b11aa41425e3666013af9e388cbfcd0be444899e0bfbfd1749444213873"
+    "fb13923eb65e4feb5f1aca1e32d055c069fb5cd211e31ca78a178218f152077e"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "8d785fbd87bdb72a224655e93308f848e4ca660674f802e27b5f2ee929fb3a0e"
+    "fb84756ba37bedae4dff4c0b861013cab1bc7e01f38131b1b75d4089a11e3fe0"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
-    "1671c10b11d69533b250a21c784e90c5b7bf61199ebfab5ffd78a47b23b9981d"
+    "2f2b4867cabb105b5088fe7ecb7c9b45162b34d39e34fd2d6f38cef19c8b6079"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS = (
     13, 7, 10, 8, 2, 3, 4, 41, 6, 5, 3,
@@ -71,10 +71,10 @@ EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256 = (
     "ed456a57146cad081cfdcc1b62a726be031200ad753043561806f79370ec8c90"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS = (
-    1326, 130, 65, 98, 109, 474, 532, 1835, 120, 315, 525,
+    1329, 130, 65, 98, 109, 474, 532, 1835, 120, 315, 525,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "93cc5156559e5aa2a538ac2a314e3f423ca24b3a4a97fc4c6a089fe0b3659b14"
+    "d5c6d1bbd3768aa68a549115b6ebf0da7fff4f60a2120068dff9156248069b69"
 )
 POSIX_CALL_CALLEE_PATTERN = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
@@ -722,7 +722,7 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 31769)
+        artifact_lock_require(len(semantic_tokens) == 31797)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256

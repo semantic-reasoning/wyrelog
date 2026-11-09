@@ -209,11 +209,13 @@ wyrelog_error_t wyl_fact_artifact_reader_main_binding_close
   (WylFactArtifactReaderMainBinding *, gint * working_fd);
 void wyl_fact_artifact_reader_main_binding_free
   (WylFactArtifactReaderMainBinding *);
-/* Binds the existing fixed live WAL only for validate-only reader I/O.  It
- * accepts a reader guard, never creates a sidecar, and returns a pinned
- * O_RDONLY/CLOEXEC/NOFOLLOW/NONBLOCK descriptor for facts.duckdb.wal. */
+/* Binds an existing WAL only for validate-only reader I/O: the live WAL or
+ * the checkpoint WAL, which DuckDB replays on a read-only attach after a
+ * checkpoint marker (#1518); any other name is POLICY.  It accepts a reader
+ * guard only, never creates and never writes, and returns a pinned
+ * O_RDONLY/CLOEXEC/NOFOLLOW/NONBLOCK descriptor. */
 wyrelog_error_t wyl_fact_artifact_reader_guard_open_existing_wal_binding
-  (WylFactArtifactMutationLease *,
+  (WylFactArtifactMutationLease *, WylFactArtifactName wal,
     WylFactArtifactReaderWalBinding ** out_binding, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_reader_wal_binding_revalidate
   (WylFactArtifactReaderWalBinding *);

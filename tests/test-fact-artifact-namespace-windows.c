@@ -782,6 +782,99 @@ test_existing_sidecar_writable_truncate (void)
   remove_tree_for_test (path);
 }
 
+/* #1518: a read-only DuckDB replays the checkpoint WAL after a checkpoint
+ * marker.  The reader WAL session opens it through the same existing-only,
+ * read-only sidecar authority as the live WAL; pin that a reader guard can
+ * read it and cannot write it. */
+static void
+test_reader_guard_checkpoint_wal_is_read_only (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = wyl_test_make_secure_fact_root
+        ("wyl-win-reader-checkpoint-XXXXXX", &error);
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  gchar buffer[5] = { 0 };
+  gsize n = 0;
+
+  g_assert_no_error (error);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_reader (namespace_,
+      &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, FALSE, FALSE, &sidecar), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_null (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "ckpt",
+      4, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_reader (namespace_,
+      &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, FALSE, TRUE, &sidecar), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (sidecar);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, FALSE, FALSE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, buffer,
+      4, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 4);
+  g_assert_cmpint (memcmp (buffer, "ckpt", 4), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "z", 1,
+      &n), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+
+  /* The reader io-session wrapper the bridge uses names exactly the live and
+   * checkpoint WALs: drop CHECKPOINT from its allow-list and this open
+   * fails; drop the check and RECOVERY opens. */
+  WylFactArtifactIoSession *reader = NULL;
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_reader_wal (lease,
+      WYL_FACT_ARTIFACT_CHECKPOINT, &reader), ==, WYRELOG_E_OK);
+  memset (buffer, 0, sizeof buffer);
+  g_assert_cmpint (wyl_fact_artifact_io_session_read (reader, 0, buffer, 4,
+      &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 4);
+  g_assert_cmpint (memcmp (buffer, "ckpt", 4), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_io_session_write (reader, 0, "z", 1,
+      &n), !=, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_io_session_finish (reader), ==,
+      WYRELOG_E_OK);
+  reader = NULL;
+  g_assert_cmpint (wyl_fact_artifact_io_session_open_reader_wal (lease,
+      WYL_FACT_ARTIFACT_RECOVERY, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader);
+
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+}
+
 /* A read that starts at or past end-of-file is a short read, not an I/O
  * failure.  POSIX pread answers 0 bytes with success and every caller is
  * written to that contract -- DuckDB's magic-byte probe reads 16 bytes from a
@@ -4796,6 +4889,8 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_reader_guard_opens_main_read_only},
   {"/fact/artifact-namespace/windows/reader-guard/sidecar-read-only",
    test_reader_guard_sidecar_is_read_only},
+  {"/fact/artifact-namespace/windows/reader-guard/checkpoint-wal-read-only",
+   test_reader_guard_checkpoint_wal_is_read_only},
   {"/fact/artifact-namespace/windows/sidecar/neutral-authorities",
    test_neutral_sidecar_authorities_forward},
   {"/fact/artifact-namespace/windows/sidecar/existing-writable-truncate",

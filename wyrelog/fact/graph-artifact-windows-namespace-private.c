@@ -302,10 +302,11 @@ wyl_fact_artifact_reader_main_binding_close (
 
 wyrelog_error_t
 wyl_fact_artifact_reader_guard_open_existing_wal_binding (
-  WylFactArtifactMutationLease *l, WylFactArtifactReaderWalBinding **b,
-  gint *out_fd)
+  WylFactArtifactMutationLease *l, WylFactArtifactName wal,
+  WylFactArtifactReaderWalBinding **b, gint *out_fd)
 {
   (void) l;
+  (void) wal;
   if (b != NULL)
     *b = NULL;
   if (out_fd != NULL)

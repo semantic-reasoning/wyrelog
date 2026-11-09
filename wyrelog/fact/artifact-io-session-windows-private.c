@@ -178,6 +178,7 @@ wyl_fact_artifact_io_session_open_sidecar (
 wyrelog_error_t
 wyl_fact_artifact_io_session_open_reader_wal (
   WylFactArtifactWinLease *lease,
+  WylFactArtifactName wal,
   WylFactArtifactIoSession **out_session)
 {
   WylFactArtifactWinSidecarBinding *binding = NULL;
@@ -189,9 +190,12 @@ wyl_fact_artifact_io_session_open_reader_wal (
   if (lease == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  /* The reader WAL session is an existing-only, read-only open. */
-  rc = wyl_fact_artifact_win_lease_open_sidecar (lease, WYL_FACT_ARTIFACT_WAL,
-          FALSE, FALSE, &binding);
+  /* The reader WAL session is an existing-only, read-only open of the live
+   * WAL or the checkpoint WAL (#1518). */
+  if (wal != WYL_FACT_ARTIFACT_WAL && wal != WYL_FACT_ARTIFACT_CHECKPOINT)
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_artifact_win_lease_open_sidecar (lease, wal, FALSE, FALSE,
+          &binding);
   if (rc != WYRELOG_E_OK)
     return rc;
 
