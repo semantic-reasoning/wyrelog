@@ -543,7 +543,8 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
         io_reject ("validate-only non-WAL sidecar");
       WylFactArtifactIoSession *session = nullptr;
       const auto open_result =
-          wyl_fact_artifact_io_session_open_reader_wal (lease_, &session);
+          wyl_fact_artifact_io_session_open_reader_wal (lease_,
+          WYL_FACT_ARTIFACT_WAL, &session);
       pending.emplace (health_, session);
       if (is_missing (open_result) && flags.ReturnNullIfNotExists ())
         return nullptr;
@@ -989,7 +990,8 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string & path,
     if (logical.artifact != WYL_FACT_ARTIFACT_WAL)
       io_reject ("validate-only sidecar existence");
     WylFactArtifactIoSession *session = nullptr;
-    result = wyl_fact_artifact_io_session_open_reader_wal (lease_, &session);
+    result = wyl_fact_artifact_io_session_open_reader_wal (lease_,
+        WYL_FACT_ARTIFACT_WAL, &session);
     if (result == WYRELOG_E_OK) {
       result = wyl_fact_artifact_io_session_finish (session);
     }

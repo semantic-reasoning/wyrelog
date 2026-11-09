@@ -200,9 +200,10 @@ wyl_fact_artifact_reader_main_binding_free (WylFactArtifactReaderMainBinding *b)
 
 wyrelog_error_t
 wyl_fact_artifact_reader_guard_open_existing_wal_binding
-  (WylFactArtifactMutationLease * l, WylFactArtifactReaderWalBinding ** b,
-    gint * fd) {
+  (WylFactArtifactMutationLease * l, WylFactArtifactName wal,
+    WylFactArtifactReaderWalBinding ** b, gint * fd) {
   (void) l;
+  (void) wal;
   if (b)
     *b = NULL;
   if (fd)
@@ -921,6 +922,7 @@ struct WylFactArtifactReaderMainBinding
 struct WylFactArtifactReaderWalBinding
 {
   WylFactArtifactMutationLease *lease;
+  WylFactArtifactName wal;
   gint pin_fd;
   guint64 device, inode;
   gboolean active;
@@ -2442,7 +2444,7 @@ reader_wal_binding_matches_unlocked (WylFactArtifactReaderWalBinding *binding)
       || (guint64) pinned.st_uid != namespace_->owner
       || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
-      || fstatat (namespace_->fd, name_for (WYL_FACT_ARTIFACT_WAL), &named,
+      || fstatat (namespace_->fd, name_for (binding->wal), &named,
       AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
       || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
       || (guint64) named.st_uid != namespace_->owner
@@ -2488,13 +2490,16 @@ reader_wal_binding_revalidate_fd_unlocked
 
 wyrelog_error_t
 wyl_fact_artifact_reader_guard_open_existing_wal_binding
-  (WylFactArtifactMutationLease * lease,
+  (WylFactArtifactMutationLease * lease, WylFactArtifactName wal,
     WylFactArtifactReaderWalBinding ** out_binding, gint * out_fd) {
   if (out_binding)
     *out_binding = NULL;
   if (out_fd)
     *out_fd = -1;
-  if (!lease || !out_binding || !out_fd || lease->exclusive)
+  /* DuckDB replays the main WAL and, after a checkpoint marker, the
+   * checkpoint WAL on a read-only attach (#1518); nothing else is a WAL. */
+  if (!lease || !out_binding || !out_fd || lease->exclusive
+      || (wal != WYL_FACT_ARTIFACT_WAL && wal != WYL_FACT_ARTIFACT_CHECKPOINT))
     return WYRELOG_E_POLICY;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = lease_revalidate_unlocked (lease);
@@ -2505,11 +2510,11 @@ wyl_fact_artifact_reader_guard_open_existing_wal_binding
   if (namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_READER_WAL_BINDING_PRE_OPEN_FIFO)){
     result = namespace_test_substitute_fifo (lease->namespace_,
-            name_for (WYL_FACT_ARTIFACT_WAL));
+            name_for (wal));
     if (result != WYRELOG_E_OK)
       goto done;
   }
-  gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_WAL),
+  gint fd = openat (lease->namespace_->fd, name_for (wal),
           O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
     result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
@@ -2529,6 +2534,7 @@ wyl_fact_artifact_reader_guard_open_existing_wal_binding
   WylFactArtifactReaderWalBinding *binding = g_new0
         (WylFactArtifactReaderWalBinding, 1);
   binding->lease = mutation_lease_ref (lease);
+  binding->wal = wal;
   binding->pin_fd = pin_fd;
   binding->device = pinned.st_dev;
   binding->inode = pinned.st_ino;

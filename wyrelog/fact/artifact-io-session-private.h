@@ -36,8 +36,11 @@ wyrelog_error_t wyl_fact_artifact_io_session_open_sidecar (
   gboolean writable,
   WylFactArtifactIoSession **out_session);
 
+/* Opens an existing WAL or checkpoint WAL read-only through a reader guard;
+ * any other name is POLICY (#1518). */
 wyrelog_error_t wyl_fact_artifact_io_session_open_reader_wal (
   WylFactArtifactMutationLease *lease,
+  WylFactArtifactName wal,
   WylFactArtifactIoSession **out_session);
 
 wyrelog_error_t wyl_fact_artifact_io_session_create_temp_root (

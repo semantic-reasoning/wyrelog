@@ -584,7 +584,7 @@ INVENTORY: tuple[InventoryRow, ...] = (
         "wyl_fact_artifact_win_locator_open",
         "wyl_fact_artifact_win_sidecar_binding_free",
         None,
-        identity="WAL FileId",
+        identity="WAL or checkpoint WAL FileId",
         owner="returned read-only I/O session",
     ),
     row(
