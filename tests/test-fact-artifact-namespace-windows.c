@@ -720,6 +720,68 @@ test_reader_guard_sidecar_is_read_only (void)
   remove_tree_for_test (path);
 }
 
+/* #1518: DuckDB's MergeIntoRecoveryWAL opens a recovery WAL that may already
+ * exist with FILE_CREATE_NEW, which the bridge serves by opening the existing
+ * sidecar writable and truncating it.  Pin that the exclusive authority binds
+ * the existing entry writable, truncates it to zero through the session, and
+ * keeps its identity. */
+static void
+test_existing_sidecar_writable_truncate (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = wyl_test_make_secure_fact_root
+        ("wyl-win-recovery-truncate-XXXXXX", &error);
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  guint64 size = 0;
+  gsize n = 0;
+
+  g_assert_no_error (error);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0,
+      "stale-longer-content", 20, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+      WYL_FACT_ARTIFACT_RECOVERY, FALSE, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (size, ==, 20);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_truncate (session, 0), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (size, ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "new",
+      3, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_revalidate (session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  remove_tree_for_test (path);
+}
+
 /* A read that starts at or past end-of-file is a short read, not an I/O
  * failure.  POSIX pread answers 0 bytes with success and every caller is
  * written to that contract -- DuckDB's magic-byte probe reads 16 bytes from a
@@ -4736,6 +4798,8 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_reader_guard_sidecar_is_read_only},
   {"/fact/artifact-namespace/windows/sidecar/neutral-authorities",
    test_neutral_sidecar_authorities_forward},
+  {"/fact/artifact-namespace/windows/sidecar/existing-writable-truncate",
+   test_existing_sidecar_writable_truncate},
   {"/fact/artifact-namespace/windows/io-session/mutation-gate",
    test_session_blocks_mutation_until_finish},
   {"/fact/artifact-namespace/windows/io-session/retains-lease",

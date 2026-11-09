@@ -40,6 +40,16 @@ DuckDB's later close is then a no-op. Ambiguous replacement, revalidation,
 checked-close, retirement, or terminal-cleanup failure poisons the shared
 filesystem state, so subsequent operations cannot retry with stale authority.
 
+WAL recovery after a failed checkpoint opens two sidecars through spellings
+that only that path uses. When the unclean checkpoint left no checkpoint WAL, a
+writable attach truncates the marker off the WAL through an open with
+`FILE_FLAGS_WRITE` alone (#1516). When it left a checkpoint WAL, DuckDB merges
+both into the recovery WAL, opened with `FILE_FLAGS_WRITE |
+FILE_FLAGS_FILE_CREATE_NEW`; the adapter creates that file when it is absent
+and truncates it when it is present, under the exclusive lease, as
+LocalFileSystem does (#1518). That create-or-truncate is admitted for the
+recovery WAL only.
+
 Call `wyl_secure_duckdb_bridge_finalize()` when cleanup success is part of the
 caller-visible result. It destroys the connection and database, then returns
 the retained filesystem health after handle and temporary-root cleanup.

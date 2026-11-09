@@ -554,13 +554,21 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
       wyrelog_error_t open_result = WYRELOG_E_NOT_FOUND;
       const bool strict_create = flags.ExclusiveCreate ()
           || flags.CreatePrivateFile ();
+      /* FILE_CREATE_NEW is DuckDB 2.0's MergeIntoRecoveryWAL open of the
+       * recovery WAL (#1518).  LocalFileSystem creates the file when it is
+       * absent and truncates it when it is present; do the same under the
+       * exclusive lease.  validate_flags admits it for the recovery WAL
+       * only, and no other sidecar may be truncated this way. */
+      const bool overwrite = flags.OverwriteExistingFile ();
+      if (overwrite && logical.artifact != WYL_FACT_ARTIFACT_RECOVERY)
+        io_reject ("overwrite of a sidecar other than the recovery WAL");
       if (!strict_create) {
         open_result = wyl_fact_artifact_io_session_open_sidecar (
           lease_, logical.artifact, FALSE, flags.OpenForWriting (), &session);
         pending.emplace (health_, session);
       }
       if (is_missing (open_result)
-          && (flags.CreateFileIfNotExists () || strict_create)) {
+          && (flags.CreateFileIfNotExists () || strict_create || overwrite)) {
         pending.reset ();
         session = nullptr;
         open_result = wyl_fact_artifact_io_session_open_sidecar (
@@ -576,6 +584,8 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
         RequireOk (open_result, "open writer sidecar");
       }
       result = make_handle (logical.artifact);
+      if (overwrite)
+        result->TruncateTo (0);
     }
   } else if (logical.kind == LogicalKind::TEMP_CHILD) {
     if (read_only_)
