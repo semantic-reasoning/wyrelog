@@ -240,6 +240,8 @@ EXPECTED_GATE_STEP = r"""      - name: Test focused checkpoint seam
             duckdb-fixed-wal-successful-checkpoint \
             duckdb-fixed-wal-pre-move-abort-reopen \
             duckdb-fixed-wal-interrupted-recovery \
+            duckdb-fixed-wal-read-only-interrupted \
+            duckdb-fixed-wal-read-only-completed \
             duckdb-after-walstart-boundary \
             duckdb-transaction-control-boundary \
             duckdb-test-seam-wiring \
@@ -325,6 +327,8 @@ EXPECTED_REPEAT_STEP = r"""      - name: Repeat fixed WAL lifecycle evidence
               duckdb-fixed-wal-successful-checkpoint \
               duckdb-fixed-wal-pre-move-abort-reopen \
               duckdb-fixed-wal-interrupted-recovery \
+              duckdb-fixed-wal-read-only-interrupted \
+              duckdb-fixed-wal-read-only-completed \
               --print-errorlogs
           done
 """

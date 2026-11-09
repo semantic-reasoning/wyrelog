@@ -176,6 +176,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "duckdb-fixed-wal-successful-checkpoint",
         "duckdb-fixed-wal-pre-move-abort-reopen",
         "duckdb-fixed-wal-interrupted-recovery",
+        "duckdb-fixed-wal-read-only-interrupted",
+        "duckdb-fixed-wal-read-only-completed",
     )
     for token in required_windows_tests:
         if token not in windows_test_step:

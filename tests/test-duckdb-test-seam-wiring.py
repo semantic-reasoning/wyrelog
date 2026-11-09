@@ -87,6 +87,8 @@ for workflow_name in ("ci-pr.yml", "ci-main.yml"):
         "duckdb-fixed-wal-successful-checkpoint",
         "duckdb-fixed-wal-pre-move-abort-reopen",
         "duckdb-fixed-wal-interrupted-recovery",
+        "duckdb-fixed-wal-read-only-interrupted",
+        "duckdb-fixed-wal-read-only-completed",
         "duckdb-fixed-wal-lifecycle-boundary",
         "Repeat fixed WAL lifecycle evidence",
         "for iteration in 1 2 3 4 5",

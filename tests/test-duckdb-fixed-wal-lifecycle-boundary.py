@@ -77,6 +77,8 @@ named_tests = (
     "duckdb-fixed-wal-successful-checkpoint",
     "duckdb-fixed-wal-pre-move-abort-reopen",
     "duckdb-fixed-wal-interrupted-recovery",
+    "duckdb-fixed-wal-read-only-interrupted",
+    "duckdb-fixed-wal-read-only-completed",
 )
 for token in named_tests:
     if meson.count(token) != 1:
