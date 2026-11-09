@@ -1435,6 +1435,143 @@ test_checkpoint_wal_merge_recovery (void)
   remove_scratch (scratch);
 }
 
+/* #1518: after a checkpoint marker a read-only attach probes the checkpoint
+ * WAL with READ|NULL_IF_NOT_EXISTS (129) and, when it exists, replays it.  A
+ * validate-only bridge answers the probe: nothing when absent, a read-only
+ * handle when present.  No other sidecar opens, and nothing is written. */
+static void
+test_read_only_checkpoint_probe (void)
+{
+  const duckdb::FileOpenFlags probe (129, duckdb::FileLockType::NO_LOCK,
+      duckdb::FileCompressionType::UNCOMPRESSED);
+  {
+    Fixture fixture;
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, true);
+    auto absent = filesystem.OpenFile ("facts.duckdb.wal.checkpoint", probe,
+        nullptr);
+    g_assert_true (absent == nullptr);
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+  }
+  {
+    Fixture fixture;
+    g_autofree gchar *checkpoint_path = g_build_filename (fixture.graph_path,
+        "facts.duckdb.wal.checkpoint", nullptr);
+    g_assert_true (g_file_set_contents (checkpoint_path, "ckpt", 4, nullptr));
+    g_assert_cmpint (g_chmod (checkpoint_path, 0600), ==, 0);
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, true);
+    auto present = filesystem.OpenFile ("facts.duckdb.wal.checkpoint", probe,
+        nullptr);
+    g_assert_true (present != nullptr);
+    char contents[5] = { 0 };
+    filesystem.Read (*present, contents, 4, 0);
+    g_assert_cmpstr (contents, ==, "ckpt");
+    bool write_refused = false;
+    try {
+      filesystem.Write (*present, contents, 1, 0);
+    } catch (const std::exception &) {
+      write_refused = true;
+    }
+    g_assert_true (write_refused);
+    present->Close ();
+    present.reset ();
+    g_assert_true (read_graph_file (fixture.graph_path,
+        "facts.duckdb.wal.checkpoint") == "ckpt");
+    std::string message;
+    try {
+      (void) filesystem.OpenFile ("facts.duckdb.wal.recovery", probe, nullptr);
+    } catch (const duckdb::IOException &error) {
+      message = error.what ();
+    }
+    g_assert_nonnull (strstr (message.c_str (), "validate-only"));
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+    /* Only the open is widened; the existence probe stays WAL-only. */
+    bool exists_refused = false;
+    try {
+      (void) filesystem.FileExists ("facts.duckdb.wal.checkpoint", nullptr);
+    } catch (const duckdb::IOException &) {
+      exists_refused = true;
+    }
+    g_assert_true (exists_refused);
+  }
+}
+
+/* The #1516 graph before any writable reopen: a read-only attach replays the
+ * WAL past its marker without truncating it, and the writable attach that
+ * follows still recovers. */
+static void
+test_read_only_failed_checkpoint_marker (void)
+{
+  Fixture fixture;
+  {
+    SecureDatabase secure (fixture.namespace_, false);
+    assert_query_ok (*secure.connection, "INSERT INTO seed VALUES (100)");
+    assert_query_ok (*secure.connection,
+        "SET debug_checkpoint_abort='before_header'");
+    auto checkpoint = secure.connection->Query ("CHECKPOINT");
+    g_assert_true (checkpoint->HasError ());
+  }
+  const std::string wal_before = read_graph_file (fixture.graph_path,
+      "facts.duckdb.wal");
+  std::string rows;
+  std::string reopen_error;
+  try {
+    SecureDatabase reader (fixture.namespace_, true);
+    rows = seed_values (*reader.connection);
+  } catch (const std::exception &error) {
+    reopen_error = error.what ();
+  }
+  if (!reopen_error.empty ())
+    g_test_message ("read-only reopen: %s", reopen_error.c_str ());
+  g_assert_true (reopen_error.empty ());
+  g_assert_cmpstr (rows.c_str (), ==, "1,100");
+  g_assert_true (read_graph_file (fixture.graph_path, "facts.duckdb.wal")
+      == wal_before);
+  g_autofree gchar *checkpoint_wal = g_build_filename (fixture.graph_path,
+      "facts.duckdb.wal.checkpoint", nullptr);
+  g_assert_false (g_file_test (checkpoint_wal, G_FILE_TEST_EXISTS));
+  SecureDatabase writer (fixture.namespace_, false);
+  g_assert_cmpstr (seed_values (*writer.connection).c_str (), ==, "1,100");
+}
+
+/* With a checkpoint WAL present, a read-only attach replays both WALs, so
+ * the value only the checkpoint WAL holds appears, and it leaves every
+ * artifact as it found it. */
+static void
+test_read_only_checkpoint_wal_replay (void)
+{
+  Fixture fixture;
+  gchar *scratch = plant_checkpoint_wal (fixture);
+  const std::string wal_before = read_graph_file (fixture.graph_path,
+      "facts.duckdb.wal");
+  const std::string checkpoint_before = read_graph_file (fixture.graph_path,
+      "facts.duckdb.wal.checkpoint");
+  std::string rows;
+  std::string reopen_error;
+  try {
+    SecureDatabase reader (fixture.namespace_, true);
+    rows = seed_values (*reader.connection);
+  } catch (const std::exception &error) {
+    reopen_error = error.what ();
+  }
+  if (!reopen_error.empty ())
+    g_test_message ("read-only reopen: %s", reopen_error.c_str ());
+  g_assert_true (reopen_error.empty ());
+  g_assert_cmpstr (rows.c_str (), ==, "1,100,200");
+  g_assert_true (read_graph_file (fixture.graph_path, "facts.duckdb.wal")
+      == wal_before);
+  g_assert_true (read_graph_file (fixture.graph_path,
+      "facts.duckdb.wal.checkpoint") == checkpoint_before);
+  g_autofree gchar *recovery = g_build_filename (fixture.graph_path,
+      "facts.duckdb.wal.recovery", nullptr);
+  g_assert_false (g_file_test (recovery, G_FILE_TEST_EXISTS));
+  {
+    SecureDatabase writer (fixture.namespace_, false);
+    g_assert_cmpstr (seed_values (*writer.connection).c_str (), ==,
+        "1,100,200");
+  }
+  remove_scratch (scratch);
+}
+
 static void
 test_real_temp_spill_cleanup (void)
 {
@@ -3040,6 +3177,13 @@ main (int argc, char **argv)
       test_recovery_wal_create_new);
   g_test_add_func ("/secure-duckdb-filesystem/checkpoint-wal-merge-recovery",
       test_checkpoint_wal_merge_recovery);
+  g_test_add_func ("/secure-duckdb-filesystem/read-only-checkpoint-probe",
+      test_read_only_checkpoint_probe);
+  g_test_add_func
+    ("/secure-duckdb-filesystem/read-only-failed-checkpoint-marker",
+      test_read_only_failed_checkpoint_marker);
+  g_test_add_func ("/secure-duckdb-filesystem/read-only-checkpoint-wal-replay",
+      test_read_only_checkpoint_wal_replay);
   g_test_add_func ("/secure-duckdb-filesystem/temp-owner-marker-and-block-probe",
       test_temp_owner_marker_and_block_probe);
   g_test_add_func ("/secure-duckdb-filesystem/temp-spill-cleanup",
