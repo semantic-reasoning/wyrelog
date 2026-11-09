@@ -151,9 +151,18 @@ namespace {
           || exact_flags (flags, writer_main_create_flag_bits,
           duckdb::FileLockType::WRITE_LOCK)));
     } else if (logical.kind == LogicalKind::SIDECAR) {
+      /* WAL with 2 (FILE_FLAGS_WRITE alone, no lock) is DuckDB 2.0's
+       * truncate_failed_checkpoint_marker open in wal_replay.cpp: when an
+       * unclean checkpoint left no checkpoint WAL, a writable attach cuts its
+       * marker off the WAL before replaying it (#1516).  It confers nothing
+       * beyond the 2090 WAL open: both bind the existing sidecar under the
+       * exclusive mutation lease.  This check pins DuckDB's grammar; it is
+       * not a phase gate. */
       accepted = exact_flags (flags, 129, duckdb::FileLockType::NO_LOCK)
           || (logical.artifact == WYL_FACT_ARTIFACT_WAL
           && exact_flags (flags, 1, duckdb::FileLockType::NO_LOCK))
+          || (!read_only && logical.artifact == WYL_FACT_ARTIFACT_WAL
+          && exact_flags (flags, 2, duckdb::FileLockType::NO_LOCK))
           || (!read_only
           && (exact_flags (flags, 2090, duckdb::FileLockType::WRITE_LOCK)
           || (logical.artifact == WYL_FACT_ARTIFACT_RECOVERY

@@ -1113,6 +1113,133 @@ test_temp_owner_marker_and_block_probe (void)
   g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
 }
 
+/* #1516: a checkpoint that fails after writing its WAL marker, with no
+ * concurrent writes, leaves no checkpoint WAL.  On the next writable attach
+ * DuckDB 2.0 truncates the marker off the WAL before replaying it, opening
+ * the WAL with FILE_FLAGS_WRITE alone and no lock (wal_replay.cpp,
+ * truncate_failed_checkpoint_marker).  The graph must reopen with its
+ * committed rows. */
+static void
+test_failed_checkpoint_marker_recovery (void)
+{
+  Fixture fixture;
+  {
+    SecureDatabase secure (fixture.namespace_, false);
+    assert_query_ok (*secure.connection,
+        "CREATE TABLE marker(v BIGINT); INSERT INTO marker VALUES (7)");
+    assert_query_ok (*secure.connection,
+        "SET debug_checkpoint_abort='before_header'");
+    auto checkpoint = secure.connection->Query ("CHECKPOINT");
+    g_assert_true (checkpoint->HasError ());
+  }
+  g_autofree gchar *wal = g_build_filename (fixture.graph_path,
+      "facts.duckdb.wal", nullptr);
+  g_autofree gchar *checkpoint_wal = g_build_filename (fixture.graph_path,
+      "facts.duckdb.wal.checkpoint", nullptr);
+  g_autofree gchar *recovery_wal = g_build_filename (fixture.graph_path,
+      "facts.duckdb.wal.recovery", nullptr);
+  /* Only the marker-truncation branch: no checkpoint or recovery WAL. */
+  g_assert_true (g_file_test (wal, G_FILE_TEST_IS_REGULAR));
+  g_assert_false (g_file_test (checkpoint_wal, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (recovery_wal, G_FILE_TEST_EXISTS));
+
+  std::string reopen_error;
+  try {
+    SecureDatabase secure (fixture.namespace_, false);
+    auto value = secure.connection->Query ("SELECT v FROM marker");
+    g_assert_false (value->HasError ());
+    g_assert_cmpstr (value->Collection ().GetValue (0, 0).ToString ().c_str (),
+        ==, "7");
+    assert_query_ok (*secure.connection, "INSERT INTO marker VALUES (8)");
+  } catch (const std::exception &error) {
+    reopen_error = error.what ();
+  }
+  if (!reopen_error.empty ())
+    g_test_message ("writable reopen: %s", reopen_error.c_str ());
+  g_assert_true (reopen_error.empty ());
+
+  SecureDatabase reader (fixture.namespace_, true);
+  auto values = reader.connection->Query ("SELECT v FROM marker ORDER BY v");
+  g_assert_false (values->HasError ());
+  g_assert_cmpuint (values->RowCount (), ==, 2);
+  g_assert_cmpstr (values->Collection ().GetValue (0, 1).ToString ().c_str (),
+      ==, "8");
+}
+
+/* The truncate tuple is admitted for exactly the WAL of a writable bridge.
+ * Every other spelling is refused by the tuple check itself, and a refusal
+ * never poisons the filesystem. */
+static void
+expect_tuple_rejection (WylSecureDuckdbFileSystem &filesystem,
+    const std::string &path, duckdb::idx_t flags, duckdb::FileLockType lock)
+{
+  std::string message;
+  try {
+    (void) filesystem.OpenFile (path, duckdb::FileOpenFlags (flags, lock,
+        duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+  } catch (const duckdb::IOException &error) {
+    message = error.what ();
+  }
+  g_assert_nonnull (strstr (message.c_str (),
+      "non-source-pinned open tuple"));
+  g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+}
+
+static void
+test_wal_truncate_tuple_admission (void)
+{
+  {
+    Fixture fixture;
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    auto created = filesystem.OpenFile ("facts.duckdb.wal",
+        writer_sidecar_flags (), nullptr);
+    char bytes[16] = "0123456789abcde";
+    filesystem.Write (*created, bytes, sizeof bytes, 0);
+    created->Close ();
+    created.reset ();
+    auto truncate = filesystem.OpenFile ("facts.duckdb.wal",
+        duckdb::FileOpenFlags (2, duckdb::FileLockType::NO_LOCK,
+        duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+    g_assert_cmpint (filesystem.GetFileSize (*truncate), ==, 16);
+    filesystem.Truncate (*truncate, 5);
+    filesystem.FileSync (*truncate);
+    g_assert_cmpint (filesystem.GetFileSize (*truncate), ==, 5);
+    truncate->Close ();
+    truncate.reset ();
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==, WYRELOG_E_OK);
+    expect_tuple_rejection (filesystem, "facts.duckdb.wal", 2,
+        duckdb::FileLockType::WRITE_LOCK);
+    expect_tuple_rejection (filesystem, "facts.duckdb", 2,
+        duckdb::FileLockType::NO_LOCK);
+    expect_tuple_rejection (filesystem, "facts.duckdb.wal.checkpoint", 2,
+        duckdb::FileLockType::NO_LOCK);
+    expect_tuple_rejection (filesystem, "facts.duckdb.wal.recovery", 2,
+        duckdb::FileLockType::NO_LOCK);
+  }
+  {
+    Fixture fixture;
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, true);
+    expect_tuple_rejection (filesystem, "facts.duckdb.wal", 2,
+        duckdb::FileLockType::NO_LOCK);
+  }
+  {
+    /* The tuple never creates: an absent WAL is an authority failure. */
+    Fixture fixture;
+    WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
+    bool threw = false;
+    try {
+      (void) filesystem.OpenFile ("facts.duckdb.wal",
+          duckdb::FileOpenFlags (2, duckdb::FileLockType::NO_LOCK,
+          duckdb::FileCompressionType::UNCOMPRESSED), nullptr);
+    } catch (const std::exception &) {
+      threw = true;
+    }
+    g_assert_true (threw);
+    g_assert_cmpint (filesystem.SharedHealth ()->Status (), ==,
+        WYRELOG_E_NOT_FOUND);
+  }
+}
+
 static void
 test_real_temp_spill_cleanup (void)
 {
@@ -2709,6 +2836,11 @@ main (int argc, char **argv)
       test_checked_finalize_reports_cleanup_failure);
   g_test_add_func ("/secure-duckdb-filesystem/wal-crash-recovery-locking",
       test_wal_crash_recovery_and_locking);
+  g_test_add_func
+    ("/secure-duckdb-filesystem/failed-checkpoint-marker-recovery",
+      test_failed_checkpoint_marker_recovery);
+  g_test_add_func ("/secure-duckdb-filesystem/wal-truncate-tuple-admission",
+      test_wal_truncate_tuple_admission);
   g_test_add_func ("/secure-duckdb-filesystem/temp-owner-marker-and-block-probe",
       test_temp_owner_marker_and_block_probe);
   g_test_add_func ("/secure-duckdb-filesystem/temp-spill-cleanup",

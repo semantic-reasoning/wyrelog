@@ -133,7 +133,7 @@ CXX_SOURCE_DIGESTS = {
     "wyrelog/fact/secure-duckdb-file-handle-private.hpp":
         "260beeedcd799a2e02d8a562a5c46faf311331276eb62d4f29bcd4dc7e5892d7",
     "wyrelog/fact/secure-duckdb-filesystem-private.cc":
-        "c2544dfda3bf1fc2d4053203a05c64c5be9017d904840c1a64b0fa1d34bf7997",
+        "1c3fd7ba7b1a0dcef5eb93e1cae2286d898bd44d220c0c282802602a8b782d25",
     "wyrelog/fact/secure-duckdb-filesystem-private.hpp":
         "e8efccd0df7a7da5438edc11e223c7765a793d94ff2d80f8e733f44abc2f44c9",
 }
