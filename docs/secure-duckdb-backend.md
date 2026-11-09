@@ -102,8 +102,9 @@ An upgrade is a security-contract change, not a dependency-only update.
 1. Update every pinned source and prebuilt wrap together, including hashes.
 2. Regenerate the source-recording fixture for the proposed DuckDB release.
    Review every open flag/lock tuple, logical artifact name, WAL recovery
-   transition, temporary-child grammar, directory operation, home/secret
-   probe, sync, close, and cleanup event.
+   transition (writable and read-only, including the checkpoint-WAL probe),
+   temporary-child grammar, directory operation, home/secret probe, sync,
+   close, and cleanup event.
 3. Update the closed adapter vocabulary and provider capabilities only from
    that reviewed evidence. Never add a suffix allowlist or LocalFileSystem
    fallback to make a trace pass.

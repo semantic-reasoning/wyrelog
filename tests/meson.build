@@ -2882,6 +2882,24 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     ],
     timeout : 30,
   )
+  # #1518: read-only attaches of a WAL ending in an interrupted or completed
+  # checkpoint marker probe and replay the checkpoint WAL.
+  test('duckdb-fixed-wal-read-only-interrupted',
+    test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/read-only-interrupted-checkpoint',
+    ],
+    timeout : 30,
+  )
+  test('duckdb-fixed-wal-read-only-completed',
+    test_duckdb_after_walstart,
+    args : [
+      '-p',
+      '/secure-duckdb-bridge/recording-filesystem/read-only-completed-checkpoint',
+    ],
+    timeout : 30,
+  )
 endif
 
 test_policy_store_toctou = executable('test-policy-store-toctou',

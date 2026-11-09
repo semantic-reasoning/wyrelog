@@ -6488,7 +6488,242 @@ test_recording_filesystem_concurrent_checkpoint_move (void)
       path_from_utf8 (path_with_suffix (wal, ".recovery"))));
   remove_tree (sandbox);
 }
+
+/* #1518: a read-only attach of a WAL that ends in a checkpoint marker probes
+ * and reads the checkpoint WAL.  Record the exact source grammar for both the
+ * interrupted (header not written) and completed (header written, WAL not
+ * finished) checkpoint, so the secure bridge's read-only vocabulary follows
+ * reviewed evidence. */
+#define M(operation, flags, lock, outcome) \
+  { operation, TracePathRole::MAIN, flags, duckdb::FileLockType::lock, outcome, "" }
+#define W(operation, flags, lock, outcome) \
+  { operation, TracePathRole::WAL, flags, duckdb::FileLockType::lock, outcome, "" }
+#define C(operation, flags, lock, outcome) \
+  { operation, TracePathRole::CHECKPOINT, flags, duckdb::FileLockType::lock, outcome, "" }
+static void
+assert_read_only_interrupted_checkpoint_exact_trace (
+    const std::vector<Event> &events, const fs::path &database)
+{
+  static const ExactTraceToken tokens[] = {
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 2433, READ_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), C ("size", 0, NO_LOCK, -1),
+    C ("read", 0, NO_LOCK, -1), C ("reset", 0, NO_LOCK, -1),
+    C ("read", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    C ("close", 129, NO_LOCK, -1), W ("close", 129, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("close", 2433, READ_LOCK, -1),
+  };
+  assert_exact_trace ("read-only-interrupted-checkpoint", events, database,
+      tokens, G_N_ELEMENTS (tokens));
+}
+
+static void
+assert_read_only_completed_checkpoint_exact_trace (
+    const std::vector<Event> &events, const fs::path &database)
+{
+  static const ExactTraceToken tokens[] = {
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 2433, READ_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
+    C ("size", 0, NO_LOCK, -1), C ("read", 0, NO_LOCK, -1),
+    C ("reset", 0, NO_LOCK, -1), C ("read", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), C ("close", 129, NO_LOCK, -1),
+    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("close", 2433, READ_LOCK, -1),
+  };
+  assert_exact_trace ("read-only-completed-checkpoint", events, database,
+      tokens, G_N_ELEMENTS (tokens));
+}
+
+#undef M
+#undef W
+#undef C
+
+static void
+exercise_read_only_checkpoint_recovery (const char *child_mode)
+{
+  assert_duckdb_pinned ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox =
+      g_dir_make_tmp ("wyl-duckdb-read-only-recovery-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+  const fs::path wal =
+      path_from_utf8 (path_with_suffix (database, ".wal"));
+  const fs::path checkpoint =
+      path_from_utf8 (path_with_suffix (database, ".wal.checkpoint"));
+  const fs::path recovery =
+      path_from_utf8 (path_with_suffix (database, ".wal.recovery"));
+  create_fixed_wal_fixture (root, database);
+  run_fixed_wal_abort_child (root, child_mode);
+  g_assert_true (fs::exists (wal));
+  g_assert_true (fs::exists (checkpoint));
+  g_assert_false (fs::exists (recovery));
+  const FileIdentity main_before = snapshot_file (database);
+  const FileIdentity wal_before = snapshot_file (wal);
+  const FileIdentity checkpoint_before = snapshot_file (checkpoint);
+
+  auto recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, database, recorder, {
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2433, duckdb::FileLockType::READ_LOCK) });
+    config.options.access_mode = duckdb::AccessMode::READ_ONLY;
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    assert_fixed_wal_rows (connection);
+  }
+  if (g_strcmp0 (child_mode, "--fixed-wal-abort-before-wal-finish") == 0)
+    assert_read_only_completed_checkpoint_exact_trace (recorder->events,
+        database);
+  else
+    assert_read_only_interrupted_checkpoint_exact_trace (recorder->events,
+        database);
+  /* A read-only attach repairs nothing: every artifact is untouched and no
+   * recovery WAL appears. */
+  assert_same_file (main_before, snapshot_file (database));
+  assert_same_file (wal_before, snapshot_file (wal));
+  assert_same_file (checkpoint_before, snapshot_file (checkpoint));
+  g_assert_false (fs::exists (recovery));
+  remove_tree (sandbox);
+}
+
+static void
+test_recording_filesystem_read_only_interrupted_checkpoint (void)
+{
+  exercise_read_only_checkpoint_recovery ("--fixed-wal-abort-before-header");
+}
+
+static void
+test_recording_filesystem_read_only_completed_checkpoint (void)
+{
+  exercise_read_only_checkpoint_recovery (
+      "--fixed-wal-abort-before-wal-finish");
+}
 #endif
+
+/* #1518: a checkpoint aborted before its header with no concurrent commit
+ * leaves a WAL that ends in its marker and no checkpoint WAL.  A read-only
+ * attach probes for the checkpoint WAL, gets nothing, and replays the WAL
+ * without truncating the marker (only a writable attach does that, #1516). */
+#define M(operation, flags, lock, outcome) \
+  { operation, TracePathRole::MAIN, flags, duckdb::FileLockType::lock, outcome, "" }
+#define W(operation, flags, lock, outcome) \
+  { operation, TracePathRole::WAL, flags, duckdb::FileLockType::lock, outcome, "" }
+#define C(operation, flags, lock, outcome) \
+  { operation, TracePathRole::CHECKPOINT, flags, duckdb::FileLockType::lock, outcome, "" }
+static void
+assert_read_only_failed_marker_exact_trace (const std::vector<Event> &events,
+    const fs::path &database)
+{
+  static const ExactTraceToken tokens[] = {
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("open", 129, NO_LOCK, -1), M ("size", 0, NO_LOCK, -1),
+    M ("read-at", 0, NO_LOCK, -1), M ("close", 129, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("canonicalize", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 129, NO_LOCK, -1),
+    M ("size", 0, NO_LOCK, -1), M ("read-at", 0, NO_LOCK, -1),
+    M ("close", 129, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
+    M ("separator", 0, NO_LOCK, -1), M ("open", 2433, READ_LOCK, -1),
+    W ("separator", 0, NO_LOCK, -1), W ("separator", 0, NO_LOCK, -1),
+    W ("open", 129, NO_LOCK, -1), W ("size", 0, NO_LOCK, -1),
+    W ("read", 0, NO_LOCK, -1), C ("separator", 0, NO_LOCK, -1),
+    C ("separator", 0, NO_LOCK, -1), C ("open", 129, NO_LOCK, -1),
+    W ("reset", 0, NO_LOCK, -1), W ("read", 0, NO_LOCK, -1),
+    W ("close", 129, NO_LOCK, -1), M ("on-disk", 0, NO_LOCK, -1),
+    M ("on-disk", 0, NO_LOCK, -1), M ("close", 2433, READ_LOCK, -1),
+  };
+  assert_exact_trace ("read-only-failed-checkpoint-marker", events, database,
+      tokens, G_N_ELEMENTS (tokens));
+}
+
+#undef M
+#undef W
+#undef C
+
+static void
+test_recording_filesystem_read_only_failed_checkpoint_marker (void)
+{
+  assert_duckdb_pinned ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox =
+      g_dir_make_tmp ("wyl-duckdb-read-only-marker-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (path_from_utf8 (sandbox));
+  const fs::path database = root / "facts.duckdb";
+  const fs::path wal = path_from_utf8 (path_with_suffix (database, ".wal"));
+  const fs::path checkpoint =
+      path_from_utf8 (path_with_suffix (database, ".wal.checkpoint"));
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, database, recorder, {
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2315, duckdb::FileLockType::WRITE_LOCK),
+        source_pinned_open_flags (2090, duckdb::FileLockType::WRITE_LOCK) });
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    auto result = connection.Query (
+        "CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42);"
+        "SET debug_checkpoint_abort='before_header'");
+    g_assert_false (result->HasError ());
+    auto aborted = connection.Query ("CHECKPOINT");
+    g_assert_true (aborted->HasError ());
+  }
+  g_assert_true (fs::exists (wal));
+  g_assert_false (fs::exists (checkpoint));
+  const FileIdentity main_before = snapshot_file (database);
+  const FileIdentity wal_before = snapshot_file (wal);
+
+  auto recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, database, recorder, {
+        source_pinned_open_flags (129),
+        source_pinned_open_flags (2433, duckdb::FileLockType::READ_LOCK) });
+    config.options.access_mode = duckdb::AccessMode::READ_ONLY;
+    duckdb::DuckDB db (path_to_utf8 (database), &config);
+    duckdb::Connection connection (db);
+    auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
+    g_assert_false (rows->HasError ());
+    g_assert_cmpuint (rows->RowCount (), ==, 1);
+    assert_value_text (rows->Collection ().GetValue (0, 0), "42");
+  }
+  assert_read_only_failed_marker_exact_trace (recorder->events, database);
+  assert_same_file (main_before, snapshot_file (database));
+  assert_same_file (wal_before, snapshot_file (wal));
+  g_assert_false (fs::exists (checkpoint));
+  remove_tree (sandbox);
+}
 
 static void
 test_recording_filesystem_explicit_checkpoint_discovery (void)
@@ -6764,6 +6999,8 @@ main (int argc, char **argv)
       test_recording_filesystem_explicit_checkpoint_discovery);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/checkpoint-crash-phase-a",
       test_recording_filesystem_checkpoint_crash_phase_a);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/read-only-failed-checkpoint-marker",
+      test_recording_filesystem_read_only_failed_checkpoint_marker);
 #ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/concurrent-checkpoint-move",
       test_recording_filesystem_concurrent_checkpoint_move);
@@ -6771,6 +7008,10 @@ main (int argc, char **argv)
       test_recording_filesystem_completed_checkpoint_recovery_move);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/incomplete-checkpoint-recovery-move",
       test_recording_filesystem_incomplete_checkpoint_recovery_move);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/read-only-interrupted-checkpoint",
+      test_recording_filesystem_read_only_interrupted_checkpoint);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/read-only-completed-checkpoint",
+      test_recording_filesystem_read_only_completed_checkpoint);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-no-wal",
       test_recording_filesystem_after_wal_start_no_wal);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/after-wal-start-rendezvous",

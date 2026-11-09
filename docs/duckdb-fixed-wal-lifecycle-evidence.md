@@ -19,14 +19,23 @@ concurrent commit populates that WAL before the checkpoint resumes. No
 filesystem callback, payload size, sleep, polling loop, or scheduler-fairness
 window controls the phase.
 
-Three separate finite grammars are asserted:
+Five separate finite grammars are asserted:
 
 1. a successful live checkpoint performs
    `.wal.checkpoint -> .wal`;
 2. a `BEFORE_WAL_FINISH` abort leaves a completed checkpoint whose reopen
    performs `.wal.checkpoint -> .wal`;
 3. a `BEFORE_HEADER` abort leaves an incomplete checkpoint whose reopen merges
-   both WALs and performs `.wal.recovery -> .wal`.
+   both WALs and performs `.wal.recovery -> .wal`;
+4. a read-only attach of that incomplete checkpoint probes and reads
+   `.wal.checkpoint` after the main WAL, replays both, and modifies nothing
+   (#1518);
+5. a read-only attach of the completed checkpoint reads only `.wal.checkpoint`
+   and modifies nothing (#1518).
+
+A sixth grammar runs without the seam: a `BEFORE_HEADER` abort with no
+concurrent commit leaves no checkpoint WAL, and a read-only attach probes for
+it, gets nothing, and replays the main WAL without truncating its marker.
 
 The successful, recovery, and reopen grammars fix every relevant handle's
 stable identity, artifact role, open flags, I/O, sync, close, and destruction.
@@ -39,7 +48,7 @@ destruction may follow the move; any post-move I/O fails the test.
 
 The abort strings, committed rows, intermediate sidecars, second reopen, and
 final main-only artifact set are also exact assertions. Linux and macOS run
-the three named tests repeatedly through the non-installed seam target.
+the five named tests repeatedly through the non-installed seam target.
 Windows continues to use the regular dependency and has no runtime requirement
 from this evidence.
 
@@ -72,6 +81,8 @@ updating the structural boundary:
 - `WALStartCheckpoint()` and `WALFinishCheckpoint()` ordering;
 - successful-checkpoint, completed-checkpoint recovery, and
   incomplete-checkpoint recovery event grammars;
+- the read-only completed- and incomplete-checkpoint grammars and the
+  read-only failed-marker grammar;
 - every handle ID, role, flags tuple, I/O sequence, close, and destruction;
 - the complete live-handle snapshots at both replacement pairs;
 - exact `BEFORE_HEADER` and `BEFORE_WAL_FINISH` errors;
