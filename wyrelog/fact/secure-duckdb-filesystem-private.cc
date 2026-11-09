@@ -539,12 +539,17 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string & path,
     result = make_handle (WYL_FACT_ARTIFACT_MAIN);
   } else if (logical.kind == LogicalKind::SIDECAR) {
     if (read_only_) {
-      if (logical.artifact != WYL_FACT_ARTIFACT_WAL)
-        io_reject ("validate-only non-WAL sidecar");
+      /* A read-only attach replays the WAL and, after a checkpoint marker,
+       * probes and replays the checkpoint WAL (wal_replay.cpp; #1518).  Both
+       * bind existing-only and read-only under the reader guard; no other
+       * sidecar is opened by a validate-only bridge. */
+      if (logical.artifact != WYL_FACT_ARTIFACT_WAL
+          && logical.artifact != WYL_FACT_ARTIFACT_CHECKPOINT)
+        io_reject ("validate-only sidecar outside WAL replay");
       WylFactArtifactIoSession *session = nullptr;
       const auto open_result =
           wyl_fact_artifact_io_session_open_reader_wal (lease_,
-          WYL_FACT_ARTIFACT_WAL, &session);
+          logical.artifact, &session);
       pending.emplace (health_, session);
       if (is_missing (open_result) && flags.ReturnNullIfNotExists ())
         return nullptr;

@@ -50,6 +50,15 @@ and truncates it when it is present, under the exclusive lease, as
 LocalFileSystem does (#1518). That create-or-truncate is admitted for the
 recovery WAL only.
 
+A validate-only bridge serves the read-only side of the same recovery. After a
+checkpoint marker DuckDB probes the checkpoint WAL with `FILE_FLAGS_READ |
+FILE_FLAGS_NULL_IF_NOT_EXISTS` and replays it when it exists, so the reader
+guard binds the checkpoint WAL exactly as it binds the live WAL: existing only,
+read only, revalidated against its name at every I/O boundary. An absent
+checkpoint WAL answers the probe with no handle; every other sidecar is still
+refused, and a read-only attach writes, truncates, moves and removes nothing
+(#1518).
+
 Call `wyl_secure_duckdb_bridge_finalize()` when cleanup success is part of the
 caller-visible result. It destroys the connection and database, then returns
 the retained filesystem health after handle and temporary-root cleanup.
