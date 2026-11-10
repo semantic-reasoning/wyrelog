@@ -317,6 +317,42 @@ jobs:
             fact-store-duckdb-hardening-boundary-self-test \
             --print-errorlogs
 
+      - name: Qualify recursive packs with prebuilt DuckDB
+        run: |
+          meson test -C build-fact --no-rebuild \
+            engine-recursion fact-rule-pack fact-recursive-replay \
+            daemon-http-recursive-credentials recursive-rule-packs-e2e \
+            --logbase recursive-prebuilt --print-errorlogs
+          git rev-parse HEAD > build-fact/meson-logs/recursive-prebuilt.provenance.txt
+          cat subprojects/wirelog.wrap >> build-fact/meson-logs/recursive-prebuilt.provenance.txt
+          meson configure build-fact >> build-fact/meson-logs/recursive-prebuilt.provenance.txt
+          meson test -C build-fact --no-rebuild --suite wyrelog \
+            --num-processes 2 --logbase recursive-full --print-errorlogs
+
+      - name: Qualify recursive packs with source secure DuckDB
+        run: |
+          meson compile -C build-secure-duckdb -j 3 \
+            wyrelogd wyctl test-engine-recursion test-fact-rule-pack \
+            test-fact-replay test-daemon-http-recursive-credentials
+          meson test -C build-secure-duckdb --no-rebuild \
+            engine-recursion fact-rule-pack fact-recursive-replay \
+            daemon-http-recursive-credentials recursive-rule-packs-e2e \
+            --logbase recursive-secure --print-errorlogs
+          git rev-parse HEAD > build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
+          cat subprojects/wirelog.wrap >> build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
+          meson configure build-secure-duckdb >> build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
+
+      - name: Upload recursive qualification evidence
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: recursive-qualification-${{ matrix.os }}
+          path: |
+            build-fact/meson-logs/recursive-prebuilt.*
+            build-fact/meson-logs/recursive-full.*
+            build-secure-duckdb/meson-logs/recursive-secure.*
+          if-no-files-found: error
+
       - name: Test opposing fact lifecycle wrappers with secure DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 3 \
@@ -1206,6 +1242,8 @@ jobs:
           meson compile -C build-fact-mutation-sanitizer \
             test-fact-replay \
             test-fact-runtime \
+            test-engine-recursion \
+            test-daemon-http-recursive-credentials \
             test-fact-store \
             test-daemon-http-facts
 
@@ -1217,9 +1255,13 @@ jobs:
         run: |
           meson test -C build-fact-mutation-sanitizer --no-rebuild \
             fact-replay \
+            fact-recursive-replay \
+            engine-recursion \
+            daemon-http-recursive-credentials \
             fact-runtime \
             fact-store \
             daemon-http-facts \
+            --logbase recursive-sanitizer \
             --num-processes 2 \
             --timeout-multiplier 3 \
             --print-errorlogs
@@ -1236,6 +1278,29 @@ jobs:
             --repeat 5 \
             --timeout-multiplier 3 \
             --print-errorlogs
+
+      - name: Qualify real recursive iteration failure and retry
+        run: |
+          meson setup build-recursive-hooks --force-fallback-for=wirelog \
+            -Ddefault_library=static -Dc_args=-DWL_SESSION_TEST_HOOKS=1 \
+            -Denable_tpm=disabled -Denable_client=enabled \
+            -Denable_fact_store=enabled -Denable_audit=enabled \
+            -Dduckdb_source=prebuilt -Db_sanitize=address,undefined \
+            -Dwirelog:b_sanitize=address,undefined -Dwirelog:b_lto=false
+          meson compile -C build-recursive-hooks -j 3 test-engine-recursion test-fact-replay
+          meson test -C build-recursive-hooks --no-rebuild \
+            engine-recursion fact-recursive-replay --num-processes 2 \
+            --timeout-multiplier 3 --logbase recursive-hooks --print-errorlogs
+
+      - name: Upload recursive sanitizer evidence
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: recursive-sanitizer-evidence
+          path: |
+            build-fact-mutation-sanitizer/meson-logs/recursive-sanitizer.*
+            build-recursive-hooks/meson-logs/recursive-hooks.*
+          if-no-files-found: error
 
       - name: Show sccache statistics
         if: ${{ runner.environment == 'github-hosted' && (always()) }}
@@ -1659,6 +1724,38 @@ jobs:
           '@
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Qualify recursive packs on native Windows
+        if: matrix.fact_store != 'disabled'
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
+          if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
+          set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          git rev-parse HEAD > builddir\meson-logs\recursive-windows.provenance.txt
+          type subprojects\wirelog.wrap >> builddir\meson-logs\recursive-windows.provenance.txt
+          meson configure builddir >> builddir\meson-logs\recursive-windows.provenance.txt
+          if errorlevel 1 goto :fail
+          meson test -C builddir engine-recursion fact-rule-pack fact-recursive-replay daemon-http-recursive-credentials --logbase recursive-windows --print-errorlogs
+          if errorlevel 1 goto :fail
+          exit /b 0
+          :fail
+          exit /b 1
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows recursive qualification evidence
+        if: ${{ runner.environment == 'github-hosted' && (always() && matrix.fact_store != 'disabled') }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: recursive-qualification-windows${{ matrix.job_suffix }}
+          path: builddir/meson-logs/recursive-windows.*
+          if-no-files-found: error
 
       - name: Test audit DuckDB hardening (clang-cl)
         shell: powershell

@@ -213,12 +213,18 @@ STATUS_APPVERIFIER_UPLOAD = (
     + "always() && matrix.secure_bridge == 'enabled'"
     + HOSTED_STATUS_SUFFIX
 )
+STATUS_RECURSIVE_WINDOWS_UPLOAD = (
+    HOSTED_STATUS_PREFIX
+    + "always() && matrix.fact_store != 'disabled'"
+    + HOSTED_STATUS_SUFFIX
+)
 STATUS_NOT_CANCELLED = (
     HOSTED_STATUS_PREFIX + "!cancelled()" + HOSTED_STATUS_SUFFIX
 )
 
 COMMON_CI_STATUS_HANDLERS = {
     "build-posix": (
+        ("Upload recursive qualification evidence", STATUS_ALWAYS),
         ("Remove secure DuckDB compile swap", STATUS_ALWAYS_LINUX),
         ("Show sccache statistics", STATUS_ALWAYS),
         ("Upload meson logs on failure", STATUS_FAILURE),
@@ -245,6 +251,7 @@ COMMON_CI_STATUS_HANDLERS = {
         ("Upload leak detection logs on failure", STATUS_FAILURE),
     ),
     "fact-mutation-focused-sanitizer": (
+        ("Upload recursive sanitizer evidence", STATUS_ALWAYS),
         ("Show sccache statistics", STATUS_ALWAYS),
         ("Upload fact mutation sanitizer logs on failure", STATUS_FAILURE),
     ),
@@ -255,6 +262,7 @@ COMMON_CI_STATUS_HANDLERS = {
         ),
     ),
     "build-windows": (
+        ("Upload Windows recursive qualification evidence", STATUS_RECURSIVE_WINDOWS_UPLOAD),
         ("Upload Windows Application Verifier evidence", STATUS_APPVERIFIER_UPLOAD),
         ("Show sccache statistics", STATUS_NOT_CANCELLED),
         ("Upload meson logs on failure", STATUS_ALWAYS),
@@ -338,6 +346,7 @@ COMMON_ACTIONS = {
         ("Check out source", CHECKOUT_ACTION),
         ("Restore meson packagecache", CACHE_RESTORE_ACTION),
         ("Set up sccache", SCCACHE_ACTION),
+        ("Upload recursive sanitizer evidence", UPLOAD_ACTION),
         ("Upload fact mutation sanitizer logs on failure", UPLOAD_ACTION),
     ),
     "daemon-http-shared-fact-audit-disabled": actions(
@@ -358,6 +367,7 @@ PR_ACTIONS = {
         ("Check out source", CHECKOUT_ACTION),
         ("Restore meson packagecache", CACHE_RESTORE_ACTION),
         ("Set up sccache", SCCACHE_ACTION),
+        ("Upload recursive qualification evidence", UPLOAD_ACTION),
         ("Upload meson logs on failure", UPLOAD_ACTION),
     ),
     "duckdb-linux-link-closure": actions(
@@ -379,6 +389,7 @@ PR_ACTIONS = {
         ("Save vcpkg installed tree", CACHE_SAVE_ACTION),
         ("Restore meson packagecache", CACHE_RESTORE_ACTION),
         ("Save meson packagecache", CACHE_SAVE_ACTION),
+        ("Upload Windows recursive qualification evidence", UPLOAD_ACTION),
         ("Upload Windows Application Verifier evidence", UPLOAD_ACTION),
         ("Upload meson logs on failure", UPLOAD_ACTION),
     ),
@@ -390,6 +401,7 @@ MAIN_ACTIONS = {
         ("Check out source", CHECKOUT_ACTION),
         ("Cache meson packagecache", CACHE_ACTION),
         ("Set up sccache", SCCACHE_ACTION),
+        ("Upload recursive qualification evidence", UPLOAD_ACTION),
         ("Upload meson logs on failure", UPLOAD_ACTION),
     ),
     "duckdb-linux-link-closure": actions(
@@ -409,6 +421,7 @@ MAIN_ACTIONS = {
         ("Restore vcpkg installed tree", CACHE_RESTORE_ACTION),
         ("Save vcpkg installed tree", CACHE_SAVE_ACTION),
         ("Cache meson packagecache", CACHE_ACTION),
+        ("Upload Windows recursive qualification evidence", UPLOAD_ACTION),
         ("Upload Windows Application Verifier evidence", UPLOAD_ACTION),
         ("Upload meson logs on failure", UPLOAD_ACTION),
     ),

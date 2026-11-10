@@ -1905,6 +1905,9 @@ target option, `4` when the daemon denies the caller (`403 schema_denied`),
 
 ### Rule packs
 
+For reproducible acceptance commands, platform evidence and workload observations,
+see [recursive product qualification](recursive-engine-qualification.md#product-qualification-1507).
+
 A rule pack is a set of rules, including positive recursive rules, that derive a graph's relations
 from its other relations. Registration stores a new version and immediately
 refreshes that graph's engine. Startup replay and restore also load the latest
@@ -3363,6 +3366,10 @@ and read the `BOOT` log lines, which name the graph and the reason directly.
    `0700 wyrelog:wyrelog` as defined by
    `packaging/tmpfiles.d/wyrelog.conf`; preserve the existing metadata of
    subordinate directories and files as well.
+   When restoring into an existing provisioned tree, restore file contents
+   in place and retain its directories; replacing those directories can
+   invalidate the stored artifact bindings. The recursive qualification
+   fixture exercises this in-place recovery on the source/secure profile.
 
 4. Before restarting, run the production `--check` command for each enabled
    profile with its restored policy store, KeyProvider, audit store, and
