@@ -1428,6 +1428,109 @@ out:
   return rc;
 }
 
+
+/* #1499: a COMMIT error from DuckDB 2.0 does not say whether the
+ * transaction is durable.  A durable commit whose WAL-path autocheckpoint
+ * fails reports a FATAL error naming it durable; on the skip-WAL path the
+ * checkpoint error is reported as FATAL without that text, and the
+ * transaction is lost or kept depending on how far the checkpoint got.
+ * Each case runs on a fresh database file; *out_fatal, *out_durable_text
+ * and *out_rows describe the failed COMMIT and what a reopen finds. */
+static gint
+autocheckpoint_failure_outcome (const gchar *arm, gboolean *out_fatal,
+    gboolean *out_durable_text, gint64 *out_rows)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-audit-ckpt-XXXXXX", NULL);
+  if (tmpdir == NULL)
+    return 1480;
+  g_autofree gchar *path = g_build_filename (tmpdir, "ckpt.db", NULL);
+  g_autofree gchar *wal = g_strconcat (path, ".wal", NULL);
+  duckdb_database db = NULL;
+  duckdb_connection h = NULL;
+  gint rc = 0;
+  *out_fatal = FALSE;
+  *out_durable_text = FALSE;
+  *out_rows = -1;
+  if (duckdb_open (path, &db) != DuckDBSuccess
+      || duckdb_connect (db, &h) != DuckDBSuccess
+      || !abort_query_ok (h, "CREATE TABLE ckpt_t (k INTEGER);")
+      || !abort_query_ok (h, arm)
+      || !abort_query_ok (h, "BEGIN TRANSACTION;")
+      || !abort_query_ok (h, "INSERT INTO ckpt_t SELECT range FROM range(4);")) {
+    rc = 1481;
+    goto out;
+  }
+  duckdb_result result;
+  if (duckdb_query (h, "COMMIT;", &result) == DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    rc = 1482;
+    goto out;
+  }
+  *out_fatal = duckdb_result_error_type (&result) == DUCKDB_ERROR_FATAL;
+  *out_durable_text = strstr (duckdb_result_error (&result),
+          "COMMIT succeeded and is durable") != NULL;
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&h);
+  duckdb_close (&db);
+  if (duckdb_open (path, &db) != DuckDBSuccess
+      || duckdb_connect (db, &h) != DuckDBSuccess) {
+    rc = 1483;
+    goto out;
+  }
+  *out_rows = abort_count (h, "SELECT count(*) FROM ckpt_t;");
+out:
+  if (h != NULL)
+    duckdb_disconnect (&h);
+  if (db != NULL)
+    duckdb_close (&db);
+  g_unlink (wal);
+  g_autofree gchar *checkpoint_wal = g_strconcat (path, ".wal.checkpoint",
+          NULL);
+  g_autofree gchar *recovery_wal = g_strconcat (path, ".wal.recovery", NULL);
+  g_unlink (checkpoint_wal);
+  g_unlink (recovery_wal);
+  g_unlink (path);
+  g_rmdir (tmpdir);
+  return rc;
+}
+
+static gint
+check_duckdb_autocheckpoint_failure_outcomes (void)
+{
+  static const struct
+  {
+    const gchar *arm;
+    gboolean durable_text;
+    gint64 rows;
+  } cases[] = {
+    /* WAL path: the commit is in the WAL before the checkpoint fails. */
+    { "SET auto_checkpoint_skip_wal_threshold=9999999999;"
+      "SET wal_autocheckpoint_entries=1;"
+      "SET debug_checkpoint_abort='before_header';", TRUE, 4 },
+    /* Skip-WAL path, aborted before the header: nothing became durable. */
+    { "SET auto_checkpoint_skip_wal_threshold=1;"
+      "SET wal_autocheckpoint_entries=1;"
+      "SET debug_checkpoint_abort='before_header';", FALSE, 0 },
+    /* Skip-WAL path, aborted after the header: the commit is durable, and
+     * the error still does not say so. */
+    { "SET auto_checkpoint_skip_wal_threshold=1;"
+      "SET wal_autocheckpoint_entries=1;"
+      "SET debug_checkpoint_abort='before_truncate';", FALSE, 4 },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    gboolean fatal = FALSE, durable_text = FALSE;
+    gint64 rows = -1;
+    gint rc = autocheckpoint_failure_outcome (cases[i].arm, &fatal,
+            &durable_text, &rows);
+    if (rc != 0)
+      return rc;
+    if (!fatal || durable_text != cases[i].durable_text
+        || rows != cases[i].rows)
+      return 1484 + (gint) i;
+  }
+  return 0;
+}
+
 int
 main (void)
 {
@@ -1488,6 +1591,8 @@ main (void)
   if ((rc = check_duckdb_transaction_abort_contract ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_duckdb_failed_commit_ends_transaction ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_duckdb_autocheckpoint_failure_outcomes ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);
 }
