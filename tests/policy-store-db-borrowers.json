@@ -29,7 +29,7 @@
     "tests/test-fact-replay.c": 7,
     "tests/test-fact-rule-pack-store.c": 1,
     "tests/test-fact-store-forget-transaction-provision-helper.c": 1,
-    "tests/test-fact-store-provisioned.c": 1,
+    "tests/test-fact-store-provisioned.c": 2,
     "tests/test-handle-engine-pair.c": 3,
     "tests/test-human-user-session.c": 1,
     "tests/test-human-user-store.c": 4,

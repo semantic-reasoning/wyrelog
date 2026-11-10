@@ -50,6 +50,11 @@ typedef struct
   WylFactStoreConnectionSession *session;
   WylFactStoreTransactionKind kind;
   gboolean open;
+  /* Set when COMMIT was issued and DuckDB reported it failed.  Such a
+   * transaction may be durable: DuckDB 2.0 reports a durable commit whose
+   * autocheckpoint failed as an error (#1499), and neither the error type
+   * nor, on the skip-WAL path, its text tells durable from lost. */
+  gboolean commit_outcome_unknown;
 } WylFactStoreTransaction;
 
 wyrelog_error_t wyl_fact_store_connection_session_begin
