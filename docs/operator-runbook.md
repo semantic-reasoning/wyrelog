@@ -2898,7 +2898,13 @@ files and any filesystem preallocation), so a settle charges only its growth
 past the highest observation already charged to the graph: `committed_bytes`
 is the sum of each graph's high-water allocation. A smaller observation, for
 example after a checkpoint shrinks the WAL, lowers nothing; a graph's charge is
-released only when its tenant is deleted. When the
+released only when its tenant is deleted. A COMMIT that DuckDB reports as
+failed may still be durable, and the error does not reliably say which, so
+the mutation answers with an internal error and its reservation is settled
+from the observation in the same way; the charge is right whether or not the
+commit landed. If such a commit was lost, a retry under the same idempotency
+key meets the settled reservation and is refused with a conflict; resubmit
+it under a new key. When the
 post-commit observation cannot be taken, the reservation's bytes move to
 `reconciling_bytes`, which keeps counting against the limit and is never
 lowered by unverified evidence. This dimension is enforced only by builds
