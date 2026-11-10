@@ -39,18 +39,27 @@ the prebuilt build and in the secure bridge's source build alike.
   lose every write in the transaction while reporting success. This is the
   hazard the inventory looks for at every COMMIT.
 - **F3. A COMMIT that fails when it commits leaves no transaction.** A
-  primary-key conflict found at commit time, for example, ends the
-  transaction before the error is reported, so a ROLLBACK issued next fails
-  with "no transaction is active" and the connection is usable again
+  primary-key conflict found at commit time, for example, ends the transaction
+  before the error is reported, so a ROLLBACK issued next fails with "no
+  transaction is active" and the connection is usable again
   (`src/transaction/transaction_context.cpp`, `Commit()`). One commit-time
   failure means the opposite of what it says: "Transaction COMMIT succeeded
   and is durable, but the autocheckpoint failed"
-  (`src/transaction/duck_transaction_manager.cpp`). wyrelog treats every
-  COMMIT error as "not committed". In the fact store a commit-time failure
-  therefore also fails the ROLLBACK that `wyl_fact_store_transaction_finish`
-  issues next, which poisons the store and returns an internal error, and
-  `initialize_identity_unlocked` returns an internal error rather than an
-  open error. Both fail closed, as intended.
+  (`src/transaction/duck_transaction_manager.cpp`). For the initial database,
+  as wyrelog opens its stores, that error is FATAL and invalidates the
+  database instance. It is also not the only durable failure: when a large
+  commit skips the WAL and checkpoints directly, a checkpoint error is
+  reported as FATAL without that text, and the transaction is lost or kept
+  depending on whether the checkpoint got past its header.
+  `check_duckdb_autocheckpoint_failure_outcomes` in `tests/test-audit-conn.c`
+  pins all three outcomes. Neither the error type nor its text therefore tells
+  a durable commit from a lost one, so a COMMIT error has an unknown outcome.
+  wyrelog treats every COMMIT error as "not committed" for the transaction
+  itself. In the fact store a commit-time failure therefore also fails the
+  ROLLBACK that `wyl_fact_store_transaction_finish` issues next, which poisons
+  the store and returns an internal error, and `initialize_identity_unlocked`
+  returns an internal error rather than an open error. Both fail closed, as
+  intended.
 - **F4. A ROLLBACK ends the transaction** (`TransactionContext::Rollback()`
   clears it before rolling back), provided the ROLLBACK reaches the
   transaction: it does not if the database has already been invalidated by a
@@ -166,9 +175,14 @@ transaction can be open on that connection.
 These are not statements carried on in an aborted transaction, so they are
 outside #1453, but the audit surfaced them:
 
-- **A durable COMMIT reported as failed** (#1499). After F3's autocheckpoint
-  failure the fact store poisons itself, which fails closed, but its callers
-  also cancel the physical quota reservation of bytes that are on disk.
+- **A durable COMMIT reported as failed** (#1499, resolved). After F3's
+  autocheckpoint failure the fact store poisons itself, which fails closed.
+  `WylFactStoreTransaction.commit_outcome_unknown` records that the COMMIT
+  was issued and failed, and the fact store then settles the physical quota
+  reservation from the observed artifacts instead of parking it in
+  `reconciling_bytes`; the observation is right whether or not the commit
+  landed. A retry of a commit that was lost, under the same idempotency key,
+  still meets the settled reservation and is refused with a conflict.
 - **A late interrupt carries over** (#1500). The replay store wires
   `duckdb_interrupt` to the fact store connection it borrows. An interrupt
   that lands after its statement has returned stays set and fails the next
