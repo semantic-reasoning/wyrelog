@@ -617,6 +617,221 @@ test_malformed_darwin_evidence_fails_before_filesystem (void)
 }
 #endif
 
+/* The Windows artifact namespace cannot export physical-quota evidence yet
+ * (it fails closed with POLICY), so a Windows store has no physical admission
+ * to settle; these cases run where the evidence exists. */
+#ifndef G_OS_WIN32
+/* #1499: a COMMIT that DuckDB reports as failed has an unknown outcome.  The
+ * durable-autocheckpoint error says the transaction is durable; a commit that
+ * DuckDB reverts is not.  Either way the physical quota must
+ * settle from what is on disk instead of parking the reservation's whole
+ * headroom in reconciling_bytes, which no later operation releases. */
+typedef struct
+{
+  const gchar *name;
+  const gchar *arm;
+  gboolean durable;
+  /* Run through the graph-wide update path instead of the append path. */
+  gboolean update;
+} CommitOutcomeCase;
+
+static const CommitOutcomeCase commit_outcome_cases[] = {
+  { "durable-commit-reported-failed",
+    "SET auto_checkpoint_skip_wal_threshold=9999999999;"
+    "SET wal_autocheckpoint_entries=1;"
+    "SET debug_checkpoint_abort='before_header'", TRUE, FALSE },
+  { "commit-failure-not-durable",
+    "SET debug_force_commit_failure=true", FALSE, FALSE },
+  { "durable-update-reported-failed",
+    "SET auto_checkpoint_skip_wal_threshold=9999999999;"
+    "SET wal_autocheckpoint_entries=1;"
+    "SET debug_checkpoint_abort='before_header'", TRUE, TRUE },
+};
+
+static sqlite3 *
+policy_db (wyl_policy_store_t *policy_store)
+{
+  return wyl_policy_store_get_db (policy_store);
+}
+
+static gint64
+graph_charge (wyl_policy_store_t *policy_store)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db (policy_store),
+      "SELECT COALESCE(SUM(charged_bytes),0) FROM "
+      "fact_physical_quota_graph_charges WHERE tenant_id='tenant-provision'",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gint64 charged = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return charged;
+}
+
+static void
+assert_physical_settled (wyl_policy_store_t *policy_store,
+    WylPolicyFactPhysicalQuotaStatus *out_status)
+{
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status
+        (policy_store, tenant_id, out_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (out_status->pending_bytes, ==, 0);
+  g_assert_cmpuint (out_status->reconciling_bytes, ==, 0);
+  g_assert_cmpuint (out_status->committed_bytes, ==,
+      (guint64) graph_charge (policy_store));
+}
+
+/* The reservation's state: an uncertain cancel parks it in "reconciling", a
+ * definite one in "cancelled"; only a settle from observation leaves it
+ * "settled" with the graph charged for what is on disk. */
+static gchar *
+reservation_state (wyl_policy_store_t *policy_store, const gchar *request)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db (policy_store),
+      "SELECT state FROM fact_physical_quota_reservations WHERE request_id=?1",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, request, -1, SQLITE_STATIC),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gchar *state = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+  return state;
+}
+
+static wyrelog_error_t
+commit_outcome_apply (wyl_fact_store_t *store, const CommitOutcomeCase *c,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted)
+{
+  if (!c->update)
+    return wyl_fact_store_append_batch (store, schema, batch, out_inserted);
+  wyl_fact_store_batch_t update = *batch;
+  update.op = WYL_FACT_STORE_OP_UPDATE;
+  const wyl_fact_store_update_part_t part = {.schema = schema,.batch = &update };
+  return wyl_fact_store_update_graph_batches (store, &part, 1, out_inserted);
+}
+
+static void
+test_commit_outcome_settles_physical_quota (gconstpointer data)
+{
+  const CommitOutcomeCase *c = data;
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-store-commit-outcome-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy_store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy_store), ==,
+      WYRELOG_E_OK);
+  seed_graph (policy_store);
+  const WylPolicyGraphProvisioningInput input = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .store_uuid = store_uuid,
+    .format_version = 1,
+    .path_encoding_version = 1,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (policy_store, &input, root,
+      &record), ==, WYRELOG_E_OK);
+  wyl_policy_graph_provisioning_record_free (record);
+  WylPolicyFactQuotaConfig limit = {
+    .has_limit = TRUE,
+    .hard_limit = G_GUINT64_CONSTANT (1) << 30,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (policy_store,
+      tenant_id, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &limit), ==,
+      WYRELOG_E_OK);
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop",
+    .relation_name = "item",
+    .schema_version = 1,
+    .relation_visible = TRUE,
+    .columns = columns,
+    .n_columns = G_N_ELEMENTS (columns),
+  };
+  wyl_fact_value_t values[2] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "baseline" },
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "outcome" },
+  };
+  const wyl_fact_row_t rows[2] = {
+    {.values = &values[0],.n_values = 1 },
+    {.values = &values[1],.n_values = 1 },
+  };
+  wyl_fact_store_batch_t baseline = {
+    .batch_id = "baseline",
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop",
+    .relation_name = "item",
+    .schema_version = 1,
+    .source = "unit-test",
+    .request_id = "baseline",
+    .idempotency_key = "baseline",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = &rows[0],
+    .n_rows = 1,
+  };
+  wyl_fact_store_batch_t batch = baseline;
+  batch.batch_id = "outcome";
+  batch.request_id = "outcome";
+  batch.idempotency_key = "outcome";
+  batch.rows = &rows[1];
+
+  wyl_fact_store_t *store = NULL;
+  g_assert_cmpint (open_live (policy_store, root, TRUE, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &baseline,
+      &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  WylPolicyFactPhysicalQuotaStatus before = { 0 };
+  assert_physical_settled (policy_store, &before);
+  g_assert_cmpuint (before.committed_bytes, >, 0);
+
+  g_assert_true (exec_ok (store, c->arm));
+  /* The store poisons itself: the ROLLBACK after the failed COMMIT finds no
+   * transaction. */
+  g_assert_cmpint (commit_outcome_apply (store, c, &schema, &batch,
+      &inserted), ==, WYRELOG_E_INTERNAL);
+  WylPolicyFactPhysicalQuotaStatus after = { 0 };
+  assert_physical_settled (policy_store, &after);
+  g_assert_cmpuint (after.committed_bytes, >=, before.committed_bytes);
+  g_autofree gchar *state = reservation_state (policy_store, "outcome");
+  g_assert_cmpstr (state, ==, "settled");
+  wyl_fact_store_close (store);
+
+  /* Reopen: the batch is present exactly when the commit was durable, and the
+   * identical retry is then a replay that leaves the accounting alone. */
+  store = NULL;
+  g_assert_cmpint (open_live (policy_store, root, TRUE, &store), ==,
+      WYRELOG_E_OK);
+  gint64 present = -1;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id='outcome';",
+      &present), ==, WYRELOG_E_OK);
+  g_assert_cmpint (present, ==, c->durable ? 1 : 0);
+  if (c->durable) {
+    g_assert_cmpint (commit_outcome_apply (store, c, &schema, &batch,
+        &inserted), ==, WYRELOG_E_OK);
+    g_assert_false (inserted);
+    WylPolicyFactPhysicalQuotaStatus replay = { 0 };
+    assert_physical_settled (policy_store, &replay);
+    g_assert_cmpuint (replay.committed_bytes, ==, after.committed_bytes);
+  }
+  wyl_fact_store_close (store);
+  remove_root (root);
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -638,6 +853,15 @@ main (int argc, char *argv[])
     g_test_add_data_func (name, &metadata_cases[i],
         test_leased_open_rejects_corruption);
   }
+#ifndef G_OS_WIN32
+  for (gsize i = 0; i < G_N_ELEMENTS (commit_outcome_cases); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact/store-provisioned/physical-quota/%s",
+            commit_outcome_cases[i].name);
+    g_test_add_data_func (name, &commit_outcome_cases[i],
+        test_commit_outcome_settles_physical_quota);
+  }
+#endif
 #ifdef __APPLE__
   g_test_add_func (
     "/fact/store-provisioned/malformed-darwin-evidence-fails-before-filesystem",

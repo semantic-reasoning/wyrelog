@@ -1755,8 +1755,10 @@ wyl_fact_store_transaction_finish (WylFactStoreTransaction *transaction,
   if (primary_rc == WYRELOG_E_OK) {
     primary_rc = transaction_test_hook_unlocked (store, transaction->kind,
             WYL_FACT_STORE_TRANSACTION_BEFORE_COMMIT);
-    if (primary_rc == WYRELOG_E_OK)
+    if (primary_rc == WYRELOG_E_OK) {
       primary_rc = exec_sql (connection, "COMMIT;");
+      transaction->commit_outcome_unknown = primary_rc != WYRELOG_E_OK;
+    }
     if (primary_rc == WYRELOG_E_OK) {
       transaction->open = FALSE;
       return WYRELOG_E_OK;
@@ -2874,7 +2876,7 @@ fact_store_physical_quota_reserve (wyl_fact_store_t *store,
 static wyrelog_error_t
 fact_store_physical_quota_finish (wyl_fact_store_t *store,
     const wyl_fact_store_batch_t *batch,
-    WylFactPhysicalQuotaAdmission *admission, gboolean mutation_committed)
+    WylFactPhysicalQuotaAdmission *admission, gboolean settle_observed)
 {
   if (admission == NULL || !admission->active)
     return WYRELOG_E_OK;
@@ -2890,7 +2892,7 @@ fact_store_physical_quota_finish (wyl_fact_store_t *store,
           (admission->reservation_evidence),
   };
   WylPolicyFactPhysicalOperationStatus operation_status = { 0 };
-  if (!mutation_committed)
+  if (!settle_observed)
     return wyl_policy_store_cancel_fact_physical_quota
              (store->physical_quota_policy, &operation, FALSE, &operation_status);
   g_autoptr (WylFactArtifactPhysicalQuotaEvidence) observed = NULL;
@@ -3075,8 +3077,11 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   rc = wyl_fact_store_transaction_finish (&transaction, rc);
   wyl_fact_store_connection_session_end (&session);
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  /* A COMMIT whose outcome is unknown settles from the observed artifacts,
+   * which are right whether or not it landed (#1499). */
   wyrelog_error_t physical_rc = fact_store_physical_quota_finish (store, batch,
-          &physical_admission, rc == WYRELOG_E_OK);
+          &physical_admission, rc == WYRELOG_E_OK
+          || transaction.commit_outcome_unknown);
   if (rc == WYRELOG_E_OK && physical_rc != WYRELOG_E_OK)
     rc = physical_rc;
   g_clear_pointer (&physical_admission.reservation_evidence,
@@ -3374,8 +3379,11 @@ wyl_fact_store_update_graph_batches_delta (wyl_fact_store_t *store,
   rc = wyl_fact_store_transaction_finish (&transaction, rc);
   wyl_fact_store_connection_session_end (&session);
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  /* A COMMIT whose outcome is unknown settles from the observed artifacts,
+   * which are right whether or not it landed (#1499). */
   wyrelog_error_t physical_rc = fact_store_physical_quota_finish (store, first,
-          &physical_admission, rc == WYRELOG_E_OK);
+          &physical_admission, rc == WYRELOG_E_OK
+          || transaction.commit_outcome_unknown);
   if (rc == WYRELOG_E_OK && physical_rc != WYRELOG_E_OK)
     rc = physical_rc;
   g_clear_pointer (&physical_admission.reservation_evidence,
