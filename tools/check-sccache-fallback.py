@@ -110,9 +110,13 @@ def main() -> int:
         # still pass if a suite were dropped from the run.
         require(mutation,
             "            fact-replay \\\n"
+            "            fact-recursive-replay \\\n"
+            "            engine-recursion \\\n"
+            "            daemon-http-recursive-credentials \\\n"
             "            fact-runtime \\\n"
             "            fact-store \\\n"
             "            daemon-http-facts \\\n"
+            "            --logbase recursive-sanitizer \\\n"
             "            --num-processes 2 \\\n"
             "            --timeout-multiplier 3 \\\n", path)
         # The repeat step is this issue's query/mutation race deliverable, so

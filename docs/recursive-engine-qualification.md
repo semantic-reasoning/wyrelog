@@ -146,7 +146,8 @@ meson test -C builddir-recursion-hooks engine-recursion --print-errorlogs
 ```
 
 Repeat the static configuration in another directory with
-`-Db_sanitize=address,undefined` and run with:
+`-Db_sanitize=address,undefined -Dwirelog:b_sanitize=address,undefined`
+and `-Dwirelog:b_lto=false` so the provider is instrumented too, and run with:
 
 ```sh
 ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:print_summary=1 \
@@ -304,3 +305,117 @@ the same published generation after restoring limits. Synthetic snapshot
 failure in the seal test proves admission cleanup only. No test or publication
 step moves inference ahead of authorization, and no automatic rollback after
 lazy evaluation failure is promised.
+
+## Product qualification (#1507)
+
+The product qualification baseline is Wyrelog
+`6e052590f8e8fd57cf6d41f6c9be0b9e615e3f76` (including merged #1506 and the
+subsequent checkpoint-WAL fixes). The Wirelog pin above is unchanged, with both
+wrap patches applied. The test and workflow changes in the #1507 PR are part
+of the candidate: baseline binaries alone do not exercise the new test.
+
+`recursive-rule-packs-e2e` launches the actual production daemon and uses
+`wyctl` and its linked client for graph/schema registration, fact mutations,
+pack replacement and queries. The only direct HTTP operations are bootstrap
+and authentication. It checks response graph/relation/columns, rejects
+truncation and duplicate rows, and compares every tuple with an independent
+BFS expected set. Queries use the registered allowlisted name (`reachable`);
+rule definitions may qualify it as `shop.reachable`.
+
+The fixture creates owner-only temporary keys and stores, clears ambient
+`WIRELOG_*` evaluator settings, bounds child calls and readiness, and stops
+and reaps the daemon before removing the complete temporary tree. Its stopped
+backup includes the matching policy store, key, audit store and entire fact
+root. It changes both facts and the active pack before restoring to the
+original paths in place (retaining provisioned directory bindings), then proves the earlier facts and recursive behavior returned.
+This exercises the runbook's **file-level disaster recovery**, not the separate
+journaled `fact restore commit` protocol. The latter remains covered by the
+secure restore suites and their platform restrictions.
+
+### Reproducible commands and acceptance mapping
+
+Use a feature-enabled build; missing test registrations are failures, not
+qualification passes. A standard prebuilt profile is:
+
+```sh
+meson setup build-qualification --force-fallback-for=wirelog \
+  -Denable_tpm=disabled -Denable_client=enabled \
+  -Denable_fact_store=enabled -Denable_audit=enabled \
+  -Denable_fault_injection=enabled -Dduckdb_source=prebuilt
+meson compile -C build-qualification
+meson test -C build-qualification --no-rebuild \
+  engine-recursion fact-rule-pack fact-rule-pack-store fact-recursive-replay \
+  fact-runtime daemon-http-facts daemon-http-recursive-credentials \
+  recursive-rule-packs-e2e --logbase recursive-focused --print-errorlogs
+meson test -C build-qualification --suite wyrelog \
+  --logbase recursive-full --print-errorlogs
+python3 tools/report-inactive-suites.py build-qualification
+sh tools/check-format.sh --ledger
+```
+
+For source/secure qualification, configure another directory with
+`-Dduckdb_source=subproject -Denable_secure_duckdb_bridge=enabled` and the same
+feature flags, then also run `fact-offline-restore-stage-replay` and the full
+suite. `report-inactive-suites.py --strict` must pass in this profile; the
+prebuilt profile intentionally omits the secure bridge and cannot qualify its
+restore routes. Run the static hook configuration above, including
+`fact-recursive-replay`, separately with and without ASan/UBSan. Sanitizer
+instrumentation of Wyrelog does not imply instrumentation of prebuilt DuckDB.
+
+| Required behavior | Concrete test / exact assertion |
+|---|---|
+| Direct, mutual, nonlinear recursion; empty, duplicate, cyclic inputs; nontrivial chain | `engine-recursion`: independent BFS for 64 vertices, workers 0/1/2; `fact-recursive-replay` `/recursive/program-forms`, `/recursive/durable-lifecycle` |
+| Stratified negation and rejected negative SCC diagnostics | `fact-rule-pack`; `/fact-replay/recursive/stratified-negation`; E2E requires `rule_pack_negative_cycle` and no consumed version |
+| Two edges produce exactly three reachable tuples | E2E literal expected set `{(a,b),(b,c),(a,c)}`, plus base relation query |
+| Retraction, alternate support, durable heads, forget, unchanged queries | E2E checks exact sets after each operation; durable replay additionally checks relation-qualified internal callbacks |
+| Concurrent replacement and failed prepublication build | `/fact-replay/recursive/generation-races`, `fact-runtime`; pinned generation and previous usable engine assertions |
+| Real lazy iteration failure, no successful incomplete response, retry | Static hook `engine-recursion` iteration-cap cases and `/fact-replay/recursive/lazy-retry`; absent hooks are not equivalent evidence |
+| Startup and matching backup/restore | E2E stopped backup, changed live facts/pack, restored earlier model; `/fact-replay/recursive/restore-model`; secure `fact-offline-restore-stage-replay` |
+| Downgrade and stored identity | `fact-rule-pack-store` with frozen legacy-reader executable; `rule-pack-legacy-fixture-provenance` |
+| Human/data query and infer permissions, base reads, issuer checks | `daemon-http-facts`, `daemon-http-recursive-credentials`; denial asserts evaluator-entry counter unchanged, positive control increments it |
+| Graph/tenant isolation and seal coordination | `/fact-replay/recursive/durable-lifecycle`, `/recursive/query-seal`, credential tests; deterministic barriers cover success and error drain |
+| Growth and tenant-seal observations | E2E JSON records for chain/cycle/fanout at 8/16/32 vertices; exact sets checked before and after seal/unseal |
+
+### Platform and backend evidence policy
+
+Both `ci-pr.yml` and `ci-main.yml` explicitly run recursive tests in the POSIX
+prebuilt and source/secure profiles and in feature-enabled Windows profiles.
+The prebuilt profile also runs the full feature-enabled suite.
+They retain `recursive-full`, `recursive-prebuilt`, `recursive-secure`, `recursive-windows`,
+`recursive-sanitizer` and `recursive-hooks` Meson logs on success and failure.
+The focused sanitizer job now includes the separately registered
+`fact-recursive-replay`; `fact-replay` alone deliberately excludes that group.
+A separate static hook build runs real iteration failure/retry under sanitizers.
+
+| Platform/profile | Required evidence and limitations |
+|---|---|
+| Linux prebuilt, bridge off | Native semantic/credential tests, executable lifecycle, full feature-enabled suite; secure bridge tests are intentionally absent |
+| Linux source, secure bridge on | Same recursive group plus secure restore validation; full feature-enabled suite |
+| macOS prebuilt and source/secure | Named recursive group and executable lifecycle in hosted CI; Linux results cannot fill these rows |
+| Windows prebuilt and source/secure | Named engine, compiler, durable replay and credential tests in native hosted CI. The subprocess lifecycle fixture is currently registered only on POSIX; native Windows daemon/wyctl lifecycle evidence remains incomplete |
+| Hook-enabled static Linux | Real serial/TDD iteration-cap failures and complete retry, including production lazy retry |
+| ASan/UBSan Linux | Focused recursive group and static hook run; any conditional skip is reported explicitly |
+
+**Qualification is incomplete until actual hosted outcomes and the remaining
+native Windows executable-lifecycle evidence are attached to #1502/#1507.**
+CI wiring is a requirement to collect evidence, not a successful run. Do not
+close either issue merely because local Linux checks pass. Journaled restore
+commit remains Linux-only; macOS begin/prepare does not establish commit or
+resume support. See the [restore runbook](fact-offline-restore-runbook.md).
+
+### Interpreting the measurements
+
+Each JSON record includes shape, vertex count, seed/result cardinalities,
+configured production worker count (one), first query, unchanged query and
+sequential tenant-seal elapsed seconds. Query time includes `wyctl` startup,
+client/HTTP, authorization and result serialization. The fanout is a star;
+chain results grow as `n*(n-1)/2`, cycle results as `n*n`, and fanout results as
+`n-1`. Exact expected sets, not those formulas, determine test success.
+
+Graphs accumulate in the dedicated tenant during this run, so seal timing
+includes all graphs created so far. These are sequential observations, not
+worst-case latency bounds or proof of cancellation during inference. The
+separate deterministic query/seal barrier fixture supplies overlap evidence.
+No timing threshold is asserted; subprocess and Meson timeouts are watchdogs.
+Unchanged queries may reuse a model. Neither fast repeated reads nor the
+registration size/response limits bound intermediate evaluation work.
