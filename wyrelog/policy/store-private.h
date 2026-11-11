@@ -95,6 +95,11 @@ void wyl_policy_store_set_encrypted_replacement_retry_hook_for_test
  * Test use only; declared unconditionally, defined only in the seams build. */
 void wyl_policy_store_fail_next_fact_logical_settle_for_test
   (wyl_policy_store_t *store);
+/* Make the next physical quota settlement on this store fail with E_IO,
+ * once.  Test use only; declared unconditionally, defined only in the seams
+ * build. */
+void wyl_policy_store_fail_next_fact_physical_settle_for_test
+  (wyl_policy_store_t *store);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum

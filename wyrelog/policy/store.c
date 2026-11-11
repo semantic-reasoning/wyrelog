@@ -169,6 +169,7 @@ struct wyl_policy_store_t
   WylPolicyStoreEncryptedReplacementRetryHook encrypted_replacement_retry_hook;
   gpointer encrypted_replacement_retry_hook_data;
   gboolean fact_logical_settle_fail_once;
+  gboolean fact_physical_settle_fail_once;
 #endif
   gchar *canonical_path;
   gchar *work_path;
@@ -10644,6 +10645,14 @@ wyl_policy_store_fail_next_fact_logical_settle_for_test
 }
 
 void
+wyl_policy_store_fail_next_fact_physical_settle_for_test
+  (wyl_policy_store_t *store)
+{
+  if (store != NULL)
+    store->fact_physical_settle_fail_once = TRUE;
+}
+
+void
 wyl_policy_store_set_image_release_observer_for_test (wyl_policy_store_t *store,
     WylPolicyStoreImageReleaseObserver observer, gpointer data)
 {
@@ -20351,6 +20360,14 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && (!found || !matches))
     rc = found ? WYRELOG_E_CONFLICT : WYRELOG_E_NOT_FOUND;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  /* One-shot settlement failure, so a test can drive the fact store's
+   * fallback when a settle fails (#1523). */
+  if (rc == WYRELOG_E_OK && store->fact_physical_settle_fail_once) {
+    store->fact_physical_settle_fail_once = FALSE;
+    rc = WYRELOG_E_IO;
+  }
+#endif
   if (rc == WYRELOG_E_OK && current.state ==
       WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING) {
     guint64 committed = 0, pending = 0, reconciling = 0, charged = 0;
