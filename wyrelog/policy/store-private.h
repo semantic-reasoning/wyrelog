@@ -2969,13 +2969,37 @@ wyrelog_error_t wyl_policy_store_get_fact_physical_quota_status
   (wyl_policy_store_t *store, const gchar *tenant_id,
     WylPolicyFactPhysicalQuotaStatus *out_status);
 /* Physical reservation keys are scoped to tenant and graph. Inventory
- * evidence and requested bytes must still match for a same-scope replay. */
+ * evidence and requested bytes must still match for a same-scope replay.
+ * A replay is reported whatever the matching row's state, so a fact store
+ * reserving for a mutation must use the _attempt form below, which never
+ * replays (#1523). */
 wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota
   (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,
     guint64 requested_bytes,
     WylPolicyFactPhysicalOperationStatus *out_status);
 wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota_evidence
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *request_id,
+    const WylFactArtifactPhysicalQuotaEvidence *evidence,
+    guint64 requested_bytes,
+    WylPolicyFactPhysicalOperationStatus *out_status);
+/* #1523: reserve for a new attempt at a request.  Precondition: the caller
+ * has shown, under the graph's exclusive mutation lease, that no stored batch
+ * matches the batch or batches being written (by batch_id or
+ * idempotency_key).  A settled or cancelled reservation under
+ * the key is then reopened as pending under the same admission rule as a
+ * fresh one and never reported as a replay; a pending or reconciling one
+ * conflicts.  If the precondition is violated, the only effect is that the
+ * earlier attempt's informational evidence and applied_bytes are overwritten:
+ * charges are per-graph high-water marks, so there is no double charge and no
+ * admission bypass. */
+wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota_attempt
+  (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    guint64 requested_bytes,
+    WylPolicyFactPhysicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota_attempt_evidence
   (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
     const gchar *request_id,
     const WylFactArtifactPhysicalQuotaEvidence *evidence,

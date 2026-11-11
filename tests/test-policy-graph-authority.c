@@ -8083,6 +8083,164 @@ test_fact_physical_quota_graph_charges_rejects_malformed (void)
 }
 
 
+/* #1523: the three physical-ledger invariants. */
+static void
+assert_physical_ledger (wyl_policy_store_t *store, sqlite3 *db,
+    const gchar *tenant_id)
+{
+  WylPolicyFactPhysicalQuotaStatus quota = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      tenant_id, &quota), ==, WYRELOG_E_OK);
+  g_autofree gchar *pending_sql = g_strdup_printf ("SELECT "
+          "COALESCE(SUM(requested_bytes),0) FROM fact_physical_quota_reservations "
+          "WHERE tenant_id='%s' AND state='pending'", tenant_id);
+  g_autofree gchar *reconciling_sql = g_strdup_printf ("SELECT "
+          "COALESCE(SUM(applied_bytes),0) FROM fact_physical_quota_reservations "
+          "WHERE tenant_id='%s' AND state='reconciling'", tenant_id);
+  g_autofree gchar *charged_sql = g_strdup_printf ("SELECT "
+          "COALESCE(SUM(charged_bytes),0) FROM fact_physical_quota_graph_charges "
+          "WHERE tenant_id='%s'", tenant_id);
+  g_assert_cmpint ((gint64) quota.pending_bytes, ==, scalar_int64 (db,
+      pending_sql));
+  g_assert_cmpint ((gint64) quota.reconciling_bytes, ==, scalar_int64 (db,
+      reconciling_sql));
+  g_assert_cmpint ((gint64) quota.committed_bytes, ==, scalar_int64 (db,
+      charged_sql));
+}
+
+/* #1523: a fact store that has shown, under the graph's mutation lease, that
+ * a request's batch is not durable reserves it as a new attempt.  A settled
+ * or cancelled reservation under that key belongs to an earlier attempt that
+ * left nothing, so it is reopened as pending under the same admission rule as
+ * a fresh one, never treated as a replay; a pending or reconciling one is
+ * still live and conflicts. */
+static void
+test_fact_physical_quota_attempt (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "at-a",
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,"
+      "schema_version,owner_scope,sealed,created_at,updated_at) VALUES "
+      "('at-a','g1','file:///at-a/g1','/at-a/g1',1,'at-a',0,1,1);");
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "at-a",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 1000 }),
+      ==, WYRELOG_E_OK);
+  WylPolicyFactPhysicalQuotaOperation op = {
+    .tenant_id = "at-a",
+    .graph_id = "g1",
+    .request_id = "at-1",
+    .inventory_generation = "generation-1",
+    .inventory_digest =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  };
+  WylPolicyFactPhysicalQuotaOperation retry = op;
+  retry.inventory_generation = "generation-2";
+  retry.inventory_digest =
+      "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+  WylPolicyFactPhysicalOperationStatus st = { 0 };
+
+  /* (f) No row: the attempt reserves like a fresh reservation. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &op, 30, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (st.state, ==, WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING);
+  g_assert_false (st.replay);
+  assert_physical_ledger (store, db, "at-a");
+
+  /* (d) A pending row is live: another attempt conflicts, usage unchanged. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &retry, 60, &st), ==, WYRELOG_E_CONFLICT);
+  assert_physical_ledger (store, db, "at-a");
+  g_assert_cmpint (scalar_int64 (db, "SELECT pending_bytes FROM "
+      "fact_tenant_physical_quota_usage WHERE tenant_id='at-a'"), ==, 30);
+
+  /* (a) Settled, then a new attempt with new evidence and a new bound:
+   * reopened as pending with the new evidence and applied_bytes reset; its
+   * settle then charges only growth past the graph's charge. */
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &op, 40,
+      TRUE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (st.applied_bytes, ==, 40);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &retry, 60, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (st.state, ==, WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING);
+  g_assert_false (st.replay);
+  g_assert_cmpuint (st.requested_bytes, ==, 60);
+  g_autofree gchar *reopened = scalar_text (db, "SELECT state||':'||"
+          "inventory_generation||':'||requested_bytes||':'||applied_bytes "
+          "FROM fact_physical_quota_reservations WHERE request_id='at-1'");
+  g_assert_cmpstr (reopened, ==, "pending:generation-2:60:0");
+  assert_physical_ledger (store, db, "at-a");
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &retry,
+      55, TRUE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (st.applied_bytes, ==, 15);
+  assert_physical_ledger (store, db, "at-a");
+  g_assert_cmpint (scalar_int64 (db, "SELECT committed_bytes FROM "
+      "fact_tenant_physical_quota_usage WHERE tenant_id='at-a'"), ==, 55);
+
+  /* (e) The generic reserve keeps its query-like replay of a matching row. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store, &retry,
+      60, &st), ==, WYRELOG_E_OK);
+  g_assert_true (st.replay);
+
+  /* (b) Cancelled with identical evidence and bound: reopened, not replayed,
+   * and applied_bytes (which a cancel sets to the request) is reset. */
+  WylPolicyFactPhysicalQuotaOperation other = op;
+  other.request_id = "at-2";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &other, 20, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_physical_quota (store, &other,
+      TRUE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &other, 20, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (st.state, ==, WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING);
+  g_assert_false (st.replay);
+  g_autofree gchar *cancel_reopened = scalar_text (db, "SELECT state||':'||"
+          "applied_bytes FROM fact_physical_quota_reservations "
+          "WHERE request_id='at-2'");
+  g_assert_cmpstr (cancel_reopened, ==, "pending:0");
+  assert_physical_ledger (store, db, "at-a");
+
+  /* (d) A reconciling row is live too. */
+  g_assert_cmpint (wyl_policy_store_cancel_fact_physical_quota (store, &other,
+      FALSE, &st), ==, WYRELOG_E_OK);
+  g_assert_cmpint (st.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &other, 20, &st), ==, WYRELOG_E_CONFLICT);
+  assert_physical_ledger (store, db, "at-a");
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store, &other,
+      55, TRUE, &st), ==, WYRELOG_E_OK);
+  assert_physical_ledger (store, db, "at-a");
+
+  /* (c) A reopen goes through admission: over the limit it is refused and
+   * the row stays settled with usage untouched. */
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "at-a",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 60 }),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_attempt
+        (store, &op, 10, &st), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *refused = scalar_text (db, "SELECT state FROM "
+          "fact_physical_quota_reservations WHERE request_id='at-1'");
+  g_assert_cmpstr (refused, ==, "settled");
+  g_assert_cmpint (scalar_int64 (db, "SELECT pending_bytes FROM "
+      "fact_tenant_physical_quota_usage WHERE tenant_id='at-a'"), ==, 0);
+  assert_physical_ledger (store, db, "at-a");
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (store_root, store_path);
+}
+
 static void
 test_fact_physical_quota_scoped_keys (void)
 {
@@ -9226,6 +9384,8 @@ main (int argc, char **argv)
       test_fact_physical_quota_ledger);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-high-water",
       test_fact_physical_quota_high_water);
+  g_test_add_func ("/policy/graph-authority/fact-physical-quota-attempt",
+      test_fact_physical_quota_attempt);
   g_test_add_func
     ("/policy/graph-authority/graph-quota-reservation-reopen",
       test_graph_quota_reservation_survives_reopen);

@@ -34,7 +34,7 @@
     "tests/test-human-user-session.c": 1,
     "tests/test-human-user-store.c": 4,
     "tests/test-login-projection.c": 3,
-    "tests/test-policy-graph-authority.c": 147,
+    "tests/test-policy-graph-authority.c": 148,
     "tests/test-policy-service-namespace.c": 4,
     "tests/test-policy-store-data-credential.c": 10,
     "tests/test-policy-store-lease.c": 2,
