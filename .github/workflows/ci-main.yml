@@ -263,7 +263,7 @@ jobs:
             --logbase recursive-prebuilt --print-errorlogs
           git rev-parse HEAD > build-fact/meson-logs/recursive-prebuilt.provenance.txt
           cat subprojects/wirelog.wrap >> build-fact/meson-logs/recursive-prebuilt.provenance.txt
-          meson configure build-fact >> build-fact/meson-logs/recursive-prebuilt.provenance.txt
+          meson introspect --buildoptions build-fact >> build-fact/meson-logs/recursive-prebuilt.provenance.txt
           meson test -C build-fact --no-rebuild --suite wyrelog \
             --num-processes 2 --logbase recursive-full --print-errorlogs
 
@@ -278,7 +278,7 @@ jobs:
             --logbase recursive-secure --print-errorlogs
           git rev-parse HEAD > build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
           cat subprojects/wirelog.wrap >> build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
-          meson configure build-secure-duckdb >> build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
+          meson introspect --buildoptions build-secure-duckdb >> build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
 
       - name: Upload recursive qualification evidence
         if: ${{ runner.environment == 'github-hosted' && (always()) }}
@@ -1646,7 +1646,7 @@ jobs:
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           git rev-parse HEAD > builddir\meson-logs\recursive-windows.provenance.txt
           type subprojects\wirelog.wrap >> builddir\meson-logs\recursive-windows.provenance.txt
-          meson configure builddir >> builddir\meson-logs\recursive-windows.provenance.txt
+          meson introspect --buildoptions builddir >> builddir\meson-logs\recursive-windows.provenance.txt
           if errorlevel 1 goto :fail
           meson test -C builddir engine-recursion fact-rule-pack fact-recursive-replay daemon-http-recursive-credentials --logbase recursive-windows --print-errorlogs
           if errorlevel 1 goto :fail
