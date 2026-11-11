@@ -2909,10 +2909,18 @@ new attempt, admitted against the current headroom and charged only its own
 growth (#1523). Do not resubmit under a new key first: after a durable commit,
 a new key with a new `batch_id` duplicates the batch. A
 `409 fact_batch_conflict` on the retry means the key was reused with
-different content. When the
-post-commit observation cannot be taken, the reservation's bytes move to
-`reconciling_bytes`, which keeps counting against the limit and is never
-lowered by unverified evidence. This dimension is enforced only by builds
+different content. A mutation that fails before its COMMIT is issued
+settles from the observation in the same way, normally charging nothing, so
+it holds no headroom back (#1523). When the observation cannot be taken, or
+the settle fails (other than with a busy policy store, which leaves the
+reservation pending), a mutation that never issued COMMIT is cancelled
+outright; one whose COMMIT was issued, whether it then failed or succeeded,
+moves its reservation's bytes to `reconciling_bytes`, which keeps counting
+against the limit and is never lowered by unverified evidence. Such a hold
+refuses later mutations with `429` and `physical_bytes` until an operator
+raises the limit, and even then a same-key retry of that mutation meets the
+held reservation and fails with `500`: if the batch is not stored, resubmit
+it under a new key and `batch_id`. This dimension is enforced only by builds
 with the secure DuckDB bridge; other builds accept the configuration and
 report it, but never refuse on it.
 

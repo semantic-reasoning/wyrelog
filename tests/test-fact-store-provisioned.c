@@ -740,20 +740,35 @@ commit_outcome_apply (wyl_fact_store_t *store, const CommitOutcomeCase *c,
   return wyl_fact_store_update_graph_batches (store, &part, 1, out_inserted);
 }
 
-static void
-test_commit_outcome_settles_physical_quota (gconstpointer data)
+/* A provisioned graph with a physical limit and one committed baseline
+ * batch; the batch under test and a second, unrelated one are prepared. */
+typedef struct
 {
-  const CommitOutcomeCase *c = data;
+  gchar *root;
+  wyl_policy_store_t *policy_store;
+  wyl_policy_fact_relation_schema_column_t columns[1];
+  wyl_policy_fact_relation_schema_options_t schema;
+  wyl_fact_value_t values[3];
+  wyl_fact_row_t rows[3];
+  wyl_fact_store_batch_t baseline;
+  wyl_fact_store_batch_t batch;
+  wyl_fact_store_batch_t other;
+  wyl_fact_store_t *store;
+} PhysicalFixture;
+
+static void
+physical_fixture_init (PhysicalFixture *fx)
+{
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = wyl_test_make_secure_fact_root
+  *fx = (PhysicalFixture) { 0 };
+  fx->root = wyl_test_make_secure_fact_root
         ("wyl-fact-store-commit-outcome-XXXXXX", &error);
   g_assert_no_error (error);
-  g_autoptr (wyl_policy_store_t) policy_store = NULL;
-  g_assert_cmpint (wyl_policy_store_open (NULL, &policy_store), ==,
+  g_assert_cmpint (wyl_policy_store_open (NULL, &fx->policy_store), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_create_schema (policy_store), ==,
+  g_assert_cmpint (wyl_policy_store_create_schema (fx->policy_store), ==,
       WYRELOG_E_OK);
-  seed_graph (policy_store);
+  seed_graph (fx->policy_store);
   const WylPolicyGraphProvisioningInput input = {
     .tenant_id = tenant_id,
     .graph_id = graph_id,
@@ -762,39 +777,37 @@ test_commit_outcome_settles_physical_quota (gconstpointer data)
     .path_encoding_version = 1,
   };
   WylPolicyGraphProvisioningRecord *record = NULL;
-  g_assert_cmpint (wyl_fact_graph_provisioning_run (policy_store, &input, root,
-      &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (fx->policy_store, &input,
+      fx->root, &record), ==, WYRELOG_E_OK);
   wyl_policy_graph_provisioning_record_free (record);
   WylPolicyFactQuotaConfig limit = {
     .has_limit = TRUE,
     .hard_limit = G_GUINT64_CONSTANT (1) << 30,
   };
-  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (policy_store,
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (fx->policy_store,
       tenant_id, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &limit), ==,
       WYRELOG_E_OK);
-
-  const wyl_policy_fact_relation_schema_column_t columns[] = {
-    {"k", "symbol", FALSE, TRUE},
+  fx->columns[0] = (wyl_policy_fact_relation_schema_column_t) {
+    "k", "symbol", FALSE, TRUE
   };
-  const wyl_policy_fact_relation_schema_options_t schema = {
+  fx->schema = (wyl_policy_fact_relation_schema_options_t) {
     .tenant_id = tenant_id,
     .graph_id = graph_id,
     .namespace_id = "shop",
     .relation_name = "item",
     .schema_version = 1,
     .relation_visible = TRUE,
-    .columns = columns,
-    .n_columns = G_N_ELEMENTS (columns),
+    .columns = fx->columns,
+    .n_columns = G_N_ELEMENTS (fx->columns),
   };
-  wyl_fact_value_t values[2] = {
-    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "baseline" },
-    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "outcome" },
-  };
-  const wyl_fact_row_t rows[2] = {
-    {.values = &values[0],.n_values = 1 },
-    {.values = &values[1],.n_values = 1 },
-  };
-  wyl_fact_store_batch_t baseline = {
+  const gchar *texts[3] = { "baseline", "outcome", "other" };
+  for (gsize i = 0; i < 3; i++) {
+    fx->values[i].type = WYL_FACT_VALUE_SYMBOL;
+    fx->values[i].as.text = texts[i];
+    fx->rows[i].values = &fx->values[i];
+    fx->rows[i].n_values = 1;
+  }
+  fx->baseline = (wyl_fact_store_batch_t) {
     .batch_id = "baseline",
     .tenant_id = tenant_id,
     .graph_id = graph_id,
@@ -805,23 +818,48 @@ test_commit_outcome_settles_physical_quota (gconstpointer data)
     .request_id = "baseline",
     .idempotency_key = "baseline",
     .op = WYL_FACT_STORE_OP_ASSERT,
-    .rows = &rows[0],
+    .rows = &fx->rows[0],
     .n_rows = 1,
   };
-  wyl_fact_store_batch_t batch = baseline;
-  batch.batch_id = "outcome";
-  batch.request_id = "outcome";
-  batch.idempotency_key = "outcome";
-  batch.rows = &rows[1];
-
-  wyl_fact_store_t *store = NULL;
-  g_assert_cmpint (open_live (policy_store, root, TRUE, &store), ==,
-      WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  fx->batch = fx->baseline;
+  fx->batch.batch_id = "outcome";
+  fx->batch.request_id = "outcome";
+  fx->batch.idempotency_key = "outcome";
+  fx->batch.rows = &fx->rows[1];
+  fx->other = fx->baseline;
+  fx->other.batch_id = "other";
+  fx->other.request_id = "other";
+  fx->other.idempotency_key = "other";
+  fx->other.rows = &fx->rows[2];
+  g_assert_cmpint (open_live (fx->policy_store, fx->root, TRUE, &fx->store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (fx->store), ==, WYRELOG_E_OK);
   gboolean inserted = FALSE;
-  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &baseline,
-      &inserted), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_append_batch (fx->store, &fx->schema,
+      &fx->baseline, &inserted), ==, WYRELOG_E_OK);
   g_assert_true (inserted);
+}
+
+static void
+physical_fixture_clear (PhysicalFixture *fx)
+{
+  g_clear_pointer (&fx->store, wyl_fact_store_close);
+  remove_root (fx->root);
+  g_clear_pointer (&fx->root, g_free);
+  g_clear_pointer (&fx->policy_store, wyl_policy_store_close);
+}
+
+static void
+test_commit_outcome_settles_physical_quota (gconstpointer data)
+{
+  const CommitOutcomeCase *c = data;
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  wyl_policy_store_t *policy_store = fx.policy_store;
+  const wyl_policy_fact_relation_schema_options_t schema = fx.schema;
+  wyl_fact_store_batch_t batch = fx.batch;
+  wyl_fact_store_t *store = fx.store;
+  gboolean inserted = FALSE;
   WylPolicyFactPhysicalQuotaStatus before = { 0 };
   assert_physical_settled (policy_store, &before);
   g_assert_cmpuint (before.committed_bytes, >, 0);
@@ -841,7 +879,7 @@ test_commit_outcome_settles_physical_quota (gconstpointer data)
   /* Reopen: the batch is present exactly when the commit was durable, and the
    * identical retry is then a replay that leaves the accounting alone. */
   store = NULL;
-  g_assert_cmpint (open_live (policy_store, root, TRUE, &store), ==,
+  g_assert_cmpint (open_live (policy_store, fx.root, TRUE, &store), ==,
       WYRELOG_E_OK);
   gint64 present = -1;
   g_assert_cmpint (wyl_fact_store_test_query_int64 (store,
@@ -881,8 +919,186 @@ test_commit_outcome_settles_physical_quota (gconstpointer data)
             "outcome");
     g_assert_cmpstr (retry_state, ==, "settled");
   }
-  wyl_fact_store_close (store);
-  remove_root (root);
+  fx.store = store;
+  physical_fixture_clear (&fx);
+}
+
+/* #1523: a mutation that fails before COMMIT is issued leaves no batch, so
+ * its reservation must not hold the tenant's headroom: it settles from the
+ * observation like any other attempt (normally charging nothing), the tenant
+ * can keep appending, and the identical retry is admitted and settled once. */
+typedef struct
+{
+  const gchar *name;
+  WylFactStoreBatchFault fault;
+  gboolean update;
+} PrecommitCase;
+
+static const PrecommitCase precommit_cases[] = {
+  { "before-commit-append", WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT, FALSE },
+  { "at-commit-append", WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT, FALSE },
+  { "before-commit-update", WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT, TRUE },
+  { "at-commit-update", WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT, TRUE },
+};
+
+static wyrelog_error_t
+physical_apply (PhysicalFixture *fx, gboolean update,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted)
+{
+  const CommitOutcomeCase c = {.update = update };
+  return commit_outcome_apply (fx->store, &c, &fx->schema, batch,
+             out_inserted);
+}
+
+static void
+test_precommit_failure_releases_physical_quota (gconstpointer data)
+{
+  const PrecommitCase *c = data;
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  WylPolicyFactPhysicalQuotaStatus before = { 0 };
+  assert_physical_settled (fx.policy_store, &before);
+  gboolean inserted = TRUE;
+  wyl_fact_store_set_batch_fault_once_for_test (fx.store, c->fault);
+  g_assert_cmpint (physical_apply (&fx, c->update, &fx.batch, &inserted), ==,
+      WYRELOG_E_IO);
+  g_assert_false (inserted);
+  WylPolicyFactPhysicalQuotaStatus after = { 0 };
+  assert_physical_settled (fx.policy_store, &after);
+  g_assert_cmpuint (after.committed_bytes, >=, before.committed_bytes);
+  g_autofree gchar *state = reservation_state (fx.policy_store, "outcome");
+  g_assert_cmpstr (state, ==, "settled");
+
+  /* The tenant is not locked out: an unrelated append is admitted. */
+  g_assert_cmpint (physical_apply (&fx, FALSE, &fx.other, &inserted), ==,
+      WYRELOG_E_OK);
+  g_assert_true (inserted);
+
+  /* The identical retry is a new attempt, admitted and settled once. */
+  AdmissionProbe probe = {.policy_store = fx.policy_store };
+  wyl_fact_store_test_set_transaction_hook (fx.store, admission_probe_hook,
+      &probe);
+  g_assert_cmpint (physical_apply (&fx, c->update, &fx.batch, &inserted), ==,
+      WYRELOG_E_OK);
+  wyl_fact_store_test_set_transaction_hook (fx.store, NULL, NULL);
+  g_assert_true (inserted);
+  g_assert_true (probe.seen);
+  g_assert_cmpstr (probe.state, ==, "pending");
+  g_assert_cmpuint (probe.pending_bytes, >, 0);
+  g_free (probe.state);
+  WylPolicyFactPhysicalQuotaStatus retried = { 0 };
+  assert_physical_settled (fx.policy_store, &retried);
+  g_autofree gchar *retry_state = reservation_state (fx.policy_store,
+          "outcome");
+  g_assert_cmpstr (retry_state, ==, "settled");
+  physical_fixture_clear (&fx);
+}
+
+/* #1523: when the observation cannot be taken, or the settle fails, the
+ * reservation is cancelled instead: definitely when no COMMIT was issued, so
+ * nothing is held back, and as uncertain (reconciling) when COMMIT was issued,
+ * whether it failed with an unknown outcome or succeeded. */
+typedef enum
+{
+  FALLBACK_PRECOMMIT_EXPORT_FAILS,
+  FALLBACK_PRECOMMIT_SETTLE_FAILS,
+  FALLBACK_UNKNOWN_EXPORT_FAILS,
+  FALLBACK_COMMIT_EXPORT_FAILS,
+  FALLBACK_COMMIT_SETTLE_FAILS,
+} FallbackMode;
+
+typedef struct
+{
+  const gchar *name;
+  FallbackMode mode;
+  wyrelog_error_t rc;
+  const gchar *state;
+} FallbackCase;
+
+static const FallbackCase fallback_cases[] = {
+  { "precommit-observation-fails", FALLBACK_PRECOMMIT_EXPORT_FAILS,
+    WYRELOG_E_IO, "cancelled" },
+  { "precommit-settle-fails", FALLBACK_PRECOMMIT_SETTLE_FAILS, WYRELOG_E_IO,
+    "cancelled" },
+  { "unknown-outcome-observation-fails", FALLBACK_UNKNOWN_EXPORT_FAILS,
+    WYRELOG_E_INTERNAL, "reconciling" },
+  { "commit-observation-fails", FALLBACK_COMMIT_EXPORT_FAILS, WYRELOG_E_OK,
+    "reconciling" },
+  { "commit-settle-fails", FALLBACK_COMMIT_SETTLE_FAILS, WYRELOG_E_IO,
+    "reconciling" },
+};
+
+/* Arms the inventory fault, so the next evidence export fails, at one phase
+ * of the batch transaction itself: after the reserve-time export, before the
+ * finish-time one. */
+typedef struct
+{
+  WylFactStoreTransactionTestPhase phase;
+  gboolean armed;
+} ExportFaultHook;
+
+static wyrelog_error_t
+export_fault_hook (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
+{
+  ExportFaultHook *hook = user_data;
+  if (kind == WYL_FACT_STORE_TRANSACTION_TEST_APPEND_CORE
+      && phase == hook->phase && !hook->armed) {
+    hook->armed = TRUE;
+    wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+test_physical_quota_fallback (gconstpointer data)
+{
+  const FallbackCase *c = data;
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  ExportFaultHook hook = {
+    .phase = c->mode == FALLBACK_COMMIT_EXPORT_FAILS
+        ? WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT
+        : WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK,
+  };
+  if (c->mode == FALLBACK_PRECOMMIT_EXPORT_FAILS
+      || c->mode == FALLBACK_PRECOMMIT_SETTLE_FAILS)
+    wyl_fact_store_set_batch_fault_once_for_test (fx.store,
+        WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT);
+  const gboolean settle_fails = c->mode == FALLBACK_PRECOMMIT_SETTLE_FAILS
+      || c->mode == FALLBACK_COMMIT_SETTLE_FAILS;
+  if (settle_fails)
+    wyl_policy_store_fail_next_fact_physical_settle_for_test
+      (fx.policy_store);
+  else
+    wyl_fact_store_test_set_transaction_hook (fx.store, export_fault_hook,
+        &hook);
+  if (c->mode == FALLBACK_UNKNOWN_EXPORT_FAILS)
+    g_assert_true (exec_ok (fx.store,
+        "SET auto_checkpoint_skip_wal_threshold=9999999999;"
+        "SET wal_autocheckpoint_entries=1;"
+        "SET debug_checkpoint_abort='before_header'"));
+  gboolean inserted = FALSE;
+  g_assert_cmpint (physical_apply (&fx, FALSE, &fx.batch, &inserted), ==,
+      c->rc);
+  wyl_fact_store_test_set_transaction_hook (fx.store, NULL, NULL);
+  if (!settle_fails) {
+    g_assert_true (hook.armed);
+    g_assert_true (wyl_fact_artifact_namespace_test_fault_was_consumed
+          (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE));
+  }
+  g_autofree gchar *state = reservation_state (fx.policy_store, "outcome");
+  g_assert_cmpstr (state, ==, c->state);
+  WylPolicyFactPhysicalQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status
+        (fx.policy_store, tenant_id, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.pending_bytes, ==, 0);
+  if (g_strcmp0 (c->state, "cancelled") == 0)
+    g_assert_cmpuint (status.reconciling_bytes, ==, 0);
+  else
+    g_assert_cmpuint (status.reconciling_bytes, >, 0);
+  physical_fixture_clear (&fx);
 }
 #endif
 
@@ -914,6 +1130,20 @@ main (int argc, char *argv[])
             commit_outcome_cases[i].name);
     g_test_add_data_func (name, &commit_outcome_cases[i],
         test_commit_outcome_settles_physical_quota);
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (precommit_cases); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact/store-provisioned/physical-quota/precommit/%s",
+            precommit_cases[i].name);
+    g_test_add_data_func (name, &precommit_cases[i],
+        test_precommit_failure_releases_physical_quota);
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (fallback_cases); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact/store-provisioned/physical-quota/fallback/%s",
+            fallback_cases[i].name);
+    g_test_add_data_func (name, &fallback_cases[i],
+        test_physical_quota_fallback);
   }
 #endif
 #ifdef __APPLE__

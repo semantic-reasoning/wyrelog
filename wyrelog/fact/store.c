@@ -2884,7 +2884,7 @@ fact_store_physical_quota_reserve (wyl_fact_store_t *store,
 static wyrelog_error_t
 fact_store_physical_quota_finish (wyl_fact_store_t *store,
     const wyl_fact_store_batch_t *batch,
-    WylFactPhysicalQuotaAdmission *admission, gboolean settle_observed)
+    WylFactPhysicalQuotaAdmission *admission, gboolean definite_noncommit)
 {
   if (admission == NULL || !admission->active)
     return WYRELOG_E_OK;
@@ -2900,9 +2900,13 @@ fact_store_physical_quota_finish (wyl_fact_store_t *store,
           (admission->reservation_evidence),
   };
   WylPolicyFactPhysicalOperationStatus operation_status = { 0 };
-  if (!settle_observed)
-    return wyl_policy_store_cancel_fact_physical_quota
-             (store->physical_quota_policy, &operation, FALSE, &operation_status);
+  /* Every attempt settles from the observed artifacts, whatever became of its
+   * transaction: since #1509 a settle charges only growth past the graph's
+   * high-water mark, so it is right for a commit, a lost commit (#1499) and a
+   * rollback whose optimistic writes may still have extended the files
+   * (#1523).  Only when the observation cannot be taken, or the settle
+   * fails, is the reservation cancelled instead: definitely when no COMMIT
+   * was issued, so nothing is held back, and as uncertain otherwise. */
   g_autoptr (WylFactArtifactPhysicalQuotaEvidence) observed = NULL;
   wyrelog_error_t rc =
       wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
@@ -2910,11 +2914,16 @@ fact_store_physical_quota_finish (wyl_fact_store_t *store,
           &observed);
   if (rc != WYRELOG_E_OK)
     return wyl_policy_store_cancel_fact_physical_quota
-             (store->physical_quota_policy, &operation, FALSE, &operation_status);
+             (store->physical_quota_policy, &operation, definite_noncommit,
+               &operation_status);
   rc = wyl_policy_store_settle_fact_physical_quota_observation
         (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
           batch->request_id, admission->reservation_evidence, observed,
           &operation_status);
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_BUSY)
+    (void) wyl_policy_store_cancel_fact_physical_quota
+      (store->physical_quota_policy, &operation, definite_noncommit,
+        &operation_status);
   return rc;
 }
 #endif
@@ -3085,11 +3094,12 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   rc = wyl_fact_store_transaction_finish (&transaction, rc);
   wyl_fact_store_connection_session_end (&session);
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
-  /* A COMMIT whose outcome is unknown settles from the observed artifacts,
-   * which are right whether or not it landed (#1499). */
+  /* Settled from the observation in every case.  A failure with no COMMIT
+   * issued is a definite non-commit for the fallback cancel; a COMMIT whose
+   * outcome is unknown (#1499) or that succeeded is not (#1523). */
   wyrelog_error_t physical_rc = fact_store_physical_quota_finish (store, batch,
-          &physical_admission, rc == WYRELOG_E_OK
-          || transaction.commit_outcome_unknown);
+          &physical_admission, rc != WYRELOG_E_OK
+          && !transaction.commit_outcome_unknown);
   if (rc == WYRELOG_E_OK && physical_rc != WYRELOG_E_OK)
     rc = physical_rc;
   g_clear_pointer (&physical_admission.reservation_evidence,
@@ -3387,11 +3397,12 @@ wyl_fact_store_update_graph_batches_delta (wyl_fact_store_t *store,
   rc = wyl_fact_store_transaction_finish (&transaction, rc);
   wyl_fact_store_connection_session_end (&session);
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
-  /* A COMMIT whose outcome is unknown settles from the observed artifacts,
-   * which are right whether or not it landed (#1499). */
+  /* Settled from the observation in every case.  A failure with no COMMIT
+   * issued is a definite non-commit for the fallback cancel; a COMMIT whose
+   * outcome is unknown (#1499) or that succeeded is not (#1523). */
   wyrelog_error_t physical_rc = fact_store_physical_quota_finish (store, first,
-          &physical_admission, rc == WYRELOG_E_OK
-          || transaction.commit_outcome_unknown);
+          &physical_admission, rc != WYRELOG_E_OK
+          && !transaction.commit_outcome_unknown);
   if (rc == WYRELOG_E_OK && physical_rc != WYRELOG_E_OK)
     rc = physical_rc;
   g_clear_pointer (&physical_admission.reservation_evidence,
