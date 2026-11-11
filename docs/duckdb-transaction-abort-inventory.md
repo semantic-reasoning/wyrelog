@@ -182,7 +182,9 @@ outside #1453, but the audit surfaced them:
   reservation from the observed artifacts instead of parking it in
   `reconciling_bytes`; the observation is right whether or not the commit
   landed. A retry of a commit that was lost, under the same idempotency key,
-  still meets the settled reservation and is refused with a conflict.
+  is a new attempt: the fact store reserves it only after finding no stored
+  batch for the key, and reopens the earlier attempt's settled reservation
+  (#1523).
 - **A late interrupt carries over** (#1500). The replay store wires
   `duckdb_interrupt` to the fact store connection it borrows. An interrupt
   that lands after its statement has returned stays set and fails the next
