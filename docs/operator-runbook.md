@@ -2902,9 +2902,14 @@ released only when its tenant is deleted. A COMMIT that DuckDB reports as
 failed may still be durable, and the error does not reliably say which, so
 the mutation answers with an internal error and its reservation is settled
 from the observation in the same way; the charge is right whether or not the
-commit landed. If such a commit was lost, a retry under the same idempotency
-key meets the settled reservation and is refused with a conflict; resubmit
-it under a new key. When the
+commit landed. Retry such a mutation under the same idempotency key. If the
+commit was durable, the retry is a replay (`"inserted":false`; wyctl prints
+`replay=true`) and is charged nothing again; if it was lost, the retry is a
+new attempt, admitted against the current headroom and charged only its own
+growth (#1523). Do not resubmit under a new key first: after a durable commit,
+a new key with a new `batch_id` duplicates the batch. A
+`409 fact_batch_conflict` on the retry means the key was reused with
+different content. When the
 post-commit observation cannot be taken, the reservation's bytes move to
 `reconciling_bytes`, which keeps counting against the limit and is never
 lowered by unverified evidence. This dimension is enforced only by builds

@@ -646,6 +646,8 @@ static const CommitOutcomeCase commit_outcome_cases[] = {
     "SET auto_checkpoint_skip_wal_threshold=9999999999;"
     "SET wal_autocheckpoint_entries=1;"
     "SET debug_checkpoint_abort='before_header'", TRUE, TRUE },
+  { "update-commit-failure-not-durable",
+    "SET debug_force_commit_failure=true", FALSE, TRUE },
 };
 
 static sqlite3 *
@@ -696,6 +698,33 @@ reservation_state (wyl_policy_store_t *policy_store, const gchar *request)
   gchar *state = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
   sqlite3_finalize (stmt);
   return state;
+}
+
+/* #1523: what the physical reservation looked like when the retry's batch
+ * transaction was about to COMMIT, i.e. after admission and before finish. */
+typedef struct
+{
+  wyl_policy_store_t *policy_store;
+  gboolean seen;
+  gchar *state;
+  guint64 pending_bytes;
+} AdmissionProbe;
+
+static wyrelog_error_t
+admission_probe_hook (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
+{
+  AdmissionProbe *probe = user_data;
+  if (kind != WYL_FACT_STORE_TRANSACTION_TEST_APPEND_CORE
+      || phase != WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT || probe->seen)
+    return WYRELOG_E_OK;
+  probe->seen = TRUE;
+  probe->state = reservation_state (probe->policy_store, "outcome");
+  WylPolicyFactPhysicalQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status
+        (probe->policy_store, tenant_id, &status), ==, WYRELOG_E_OK);
+  probe->pending_bytes = status.pending_bytes;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -826,6 +855,31 @@ test_commit_outcome_settles_physical_quota (gconstpointer data)
     WylPolicyFactPhysicalQuotaStatus replay = { 0 };
     assert_physical_settled (policy_store, &replay);
     g_assert_cmpuint (replay.committed_bytes, ==, after.committed_bytes);
+  } else {
+    /* #1523: the lost commit's identical retry, under the same key, is a new
+     * attempt: admitted again (pending while its transaction commits), then
+     * settled and charged once. */
+    AdmissionProbe probe = {.policy_store = policy_store };
+    wyl_fact_store_test_set_transaction_hook (store, admission_probe_hook,
+        &probe);
+    g_assert_cmpint (commit_outcome_apply (store, c, &schema, &batch,
+        &inserted), ==, WYRELOG_E_OK);
+    wyl_fact_store_test_set_transaction_hook (store, NULL, NULL);
+    g_assert_true (inserted);
+    g_assert_true (probe.seen);
+    g_assert_cmpstr (probe.state, ==, "pending");
+    g_assert_cmpuint (probe.pending_bytes, >, 0);
+    g_free (probe.state);
+    g_assert_cmpint (wyl_fact_store_test_query_int64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id='outcome';",
+        &present), ==, WYRELOG_E_OK);
+    g_assert_cmpint (present, ==, 1);
+    WylPolicyFactPhysicalQuotaStatus retried = { 0 };
+    assert_physical_settled (policy_store, &retried);
+    g_assert_cmpuint (retried.committed_bytes, >=, after.committed_bytes);
+    g_autofree gchar *retry_state = reservation_state (policy_store,
+            "outcome");
+    g_assert_cmpstr (retry_state, ==, "settled");
   }
   wyl_fact_store_close (store);
   remove_root (root);

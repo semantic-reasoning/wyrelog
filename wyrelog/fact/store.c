@@ -2862,14 +2862,22 @@ fact_store_physical_quota_reserve (wyl_fact_store_t *store,
   }
   guint64 bound = status.hard_limit - used;
   WylPolicyFactPhysicalOperationStatus operation_status = { 0 };
-  rc = wyl_policy_store_reserve_fact_physical_quota_evidence
+  /* Callers reserve only after existing_batch_matches_unlocked has shown,
+   * under the graph's mutation lease, that this batch is not stored; so this
+   * is a new attempt, and a reservation an earlier attempt left settled or
+   * cancelled is reopened rather than replayed (#1523). */
+  rc = wyl_policy_store_reserve_fact_physical_quota_attempt_evidence
         (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
           batch->request_id, admission->reservation_evidence, bound,
           &operation_status);
   if (rc == WYRELOG_E_POLICY)
     admission->quota_exceeded = TRUE;
+  /* An attempt is always admitted and settled; a replay would let the
+   * mutation write without either, so treat one as a store fault. */
+  if (rc == WYRELOG_E_OK && operation_status.replay)
+    rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
-    admission->active = !operation_status.replay;
+    admission->active = TRUE;
   return rc;
 }
 
