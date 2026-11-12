@@ -29,14 +29,14 @@
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 4976,
+    "line": 5150,
     "api": "_exit",
     "expression": "run_lease_child (argv[2], argv[3])",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace-windows.c",
-    "line": 4978,
+    "line": 5152,
     "api": "_exit",
     "expression": "run_temp_token_child (argv[2], argv[3], argv[4])",
     "platform": "posix-normalized-wrapper"
