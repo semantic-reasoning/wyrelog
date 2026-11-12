@@ -109,6 +109,8 @@ def main() -> int:
         # (test-fact-replay and so on), so naming them individually would
         # still pass if a suite were dropped from the run.
         require(mutation,
+            "            daemon-signals \\\n"
+            "            recursive-rule-packs-e2e \\\n"
             "            fact-replay \\\n"
             "            fact-recursive-replay \\\n"
             "            engine-recursion \\\n"

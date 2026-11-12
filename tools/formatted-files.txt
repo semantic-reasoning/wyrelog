@@ -34,6 +34,7 @@ tests/test-daemon-mfa-validator-seams.c
 tests/test-daemon-mfa-validator.c
 tests/test-daemon-options.c
 tests/test-daemon-service-credential-handoff.c
+tests/test-daemon-signals.c
 tests/test-daemon-startup-recovery.c
 tests/test-decide-req.c
 tests/test-decide-resp.c

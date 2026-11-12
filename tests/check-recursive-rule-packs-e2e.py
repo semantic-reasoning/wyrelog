@@ -18,6 +18,21 @@ import urllib.request
 
 LINEAR = 'reachable(X,Y):-edge(X,Y).\nreachable(X,Z):-reachable(X,Y),edge(Y,Z).\n'
 
+if os.name == 'nt':
+    from recursive_windows_test_support import ensure_console, protect
+
+
+def private_file(path):
+    path.touch(mode=0o600, exist_ok=True)
+    if os.name == 'nt':
+        protect(path, token=True)
+
+
+def private_directory(path):
+    path.mkdir(mode=0o700, exist_ok=True)
+    if os.name == 'nt':
+        protect(path)
+
 
 def closure(edges):
     """Independent per-source BFS, matching recursive-rule-test-support.h."""
@@ -46,19 +61,29 @@ def restore_tree(source, destination):
     for child in source.iterdir():
         target = destination / child.name
         if child.is_dir():
-            target.mkdir(exist_ok=True, mode=0o700)
+            private_directory(target)
             restore_tree(child, target)
         else:
             shutil.copy2(child, target)
+            if os.name == 'nt':
+                protect(target)
 
 
 def run(daemon, wyctl, templates):
     with tempfile.TemporaryDirectory(prefix='recursive-product-') as directory:
         root = Path(directory).resolve()
+        if os.name == 'nt':
+            ensure_console()
+            protect(root)
+            probe = root / 'acl-probe'
+            probe.touch()
+            protect(probe)
+            probe.unlink()
         live = root / 'live'
-        live.mkdir(mode=0o700)
-        (live / 'facts').mkdir(mode=0o700)
+        private_directory(live)
+        private_directory(live / 'facts')
         key = live / 'policy.key'
+        private_file(key)
         key.write_bytes(os.urandom(32))
         key.chmod(0o600)
         tenant = 'recursive-qualification'
@@ -75,6 +100,10 @@ def run(daemon, wyctl, templates):
         for name in list(environment):
             if name.startswith(('WIRELOG_', 'WYL_TEST_')):
                 del environment[name]
+        scratch = root / 'scratch'
+        private_directory(scratch)
+        for name in ('TMPDIR', 'TMP', 'TEMP'):
+            environment[name] = str(scratch)
 
         def http(path, query=None):
             if query:
@@ -96,18 +125,24 @@ def run(daemon, wyctl, templates):
         def stop():
             nonlocal process
             if process is not None:
-                process.terminate()
+                child = process
+                process = None
                 try:
-                    process.wait(timeout=30)
-                    assert process.returncode == 0, ('daemon shutdown', process.returncode)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=10)
-                    raise AssertionError('daemon shutdown watchdog expired')
+                    if child.poll() is None:
+                        if os.name == 'nt':
+                            child.send_signal(signal.CTRL_BREAK_EVENT)
+                        else:
+                            child.terminate()
+                    child.wait(timeout=30)
+                    assert child.returncode == 0, ('daemon shutdown', child.returncode)
                 finally:
-                    process = None
+                    # Forced termination is failed-test cleanup, never a
+                    # successful stop or permission to copy a backup.
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=10)
 
-        def start():
+        def launch():
             nonlocal process
             with log.open('ab') as output:
                 process = subprocess.Popen([daemon, '--production', '--profile', 'system',
@@ -115,7 +150,11 @@ def run(daemon, wyctl, templates):
                     '--policy-keyprovider', 'file:' + str(key), '--audit-db', str(live / 'audit.duckdb'),
                     '--fact-root', str(live / 'facts'), '--listen-port', str(port),
                     '--bootstrap-admin-subject', 'admin', '--bootstrap-admin-allow-skip-mfa'],
-                    stdout=output, stderr=output, env=environment)
+                    stdout=output, stderr=output, env=environment,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+
+        def start():
+            launch()
             for _ in range(300):
                 assert process.poll() is None, 'daemon exited during startup'
                 try:
@@ -126,6 +165,7 @@ def run(daemon, wyctl, templates):
             else:
                 raise AssertionError('daemon startup watchdog expired')
             if not token.exists():
+                private_file(token)
                 token.write_text(http('/auth/login', {'username': 'admin', 'skip_mfa': 'true'})['access_token'], encoding='utf-8')
                 token.chmod(0o600)
             login(token)
@@ -134,10 +174,19 @@ def run(daemon, wyctl, templates):
 
         def login(destination, scope='__wr_default'):
             if not destination.exists():
+                private_file(destination)
                 shutil.copy2(token, destination)
+            if os.name == 'nt':
+                destination.chmod(0o600)
+                protect(destination, token=True)
+                private_file(root / 'admin.seed')
             subprocess.run([sys.executable, str(Path(__file__).with_name('human-user-auth-fixture.py')),
                 base, str(destination), 'admin', str(root / 'admin.seed'), scope],
                 check=True, timeout=100, env=environment)
+            if os.name == 'nt':
+                # The token reader requires READONLY; permit writes only
+                # around the fixture's explicit authentication refresh.
+                destination.chmod(0o400)
 
         def arm(permission, scope):
             cli('policy', 'permission-transition', '--subject', 'admin', '--perm', permission,
@@ -148,7 +197,7 @@ def run(daemon, wyctl, templates):
 
         def pack(graph, source=LINEAR, success=True):
             path = root / 'pack.rules'
-            path.write_text(source, encoding='utf-8')
+            path.write_text(source, encoding='utf-8', newline='\n')
             return cli('fact', 'rule-pack', 'register', *target(graph), '--file', path, success=success)
 
         def create(graph):
@@ -164,7 +213,7 @@ def run(daemon, wyctl, templates):
             sequence += 1
             batch = f'batch-{sequence}'
             path = root / 'input.tsv'
-            path.write_text('src\tdst\n' + ''.join(f'{x}\t{y}\n' for x, y in sorted(edges)), encoding='utf-8')
+            path.write_text('src\tdst\n' + ''.join(f'{x}\t{y}\n' for x, y in sorted(edges)), encoding='utf-8', newline='\n')
             cli('fact', action, *target(graph), '--namespace', 'shop', '--relation', relation,
                 '--schema-version', '1', '--batch-id', batch, '--idempotency-key', batch,
                 '--format', 'tsv', '--input', path)
@@ -244,6 +293,7 @@ def run(daemon, wyctl, templates):
                 '--reason', 'qualification', '--confirm')
             query(graph, closure(edges | {('b', 'q')}))
             print(json.dumps({'case': 'lifecycle', 'result': 'passed',
+                'platform': sys.platform, 'shutdown': 'CTRL_BREAK_EVENT' if os.name == 'nt' else 'SIGTERM',
                 'restore': 'stopped matching policy/key/audit/fact-root, changed facts and pack before rollback'}), flush=True)
             for shape in ('chain', 'cycle', 'fanout'):
                 for size in (8, 16, 32):

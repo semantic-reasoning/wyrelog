@@ -825,6 +825,7 @@ audit_subsystem_enabled (const WylDaemonOptions *opts)
 int
 wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 {
+  g_auto (WylDaemonSignalScope) signal_scope = { FALSE };
   g_autoptr (GError) error = NULL;
 
   if (bootstrap_admin_requested (opts) && !audit_subsystem_enabled (opts)) {
@@ -855,6 +856,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
      * handlers exist) sets a flag we can observe instead of letting
      * the default disposition terminate the process. */
     wyl_daemon_install_early_signal_handlers ();
+    signal_scope.installed = TRUE;
 
     g_autoptr (WylHandle) readiness_handle = NULL;
     wyrelog_error_t readiness_rc =
@@ -990,13 +992,9 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 #endif
   guint early_signal_poll_id =
       g_timeout_add (100, quit_loop_on_early_signal, loop);
-  /* If SIGTERM/SIGINT arrived during readiness or post-readiness setup,
-   * the early handler captured it but the GMainLoop's signal source did
-   * not. Quit the loop preemptively so we exit cleanly without serving
-   * a single request. */
-  if (wyl_daemon_early_signal_received ())
-    g_main_loop_quit (loop);
-  g_main_loop_run (loop);
+  /* Skip loop entry if startup already captured a shutdown request.
+   * Later requests are handled by the installed sources and polling. */
+  wyl_daemon_run_main_loop (loop);
 #ifdef WYL_HAS_DAEMON_HTTP
   soup_server_disconnect (server);
 #endif

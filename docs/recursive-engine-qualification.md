@@ -324,8 +324,13 @@ rule definitions may qualify it as `shop.reachable`.
 
 The fixture creates owner-only temporary keys and stores, clears ambient
 `WIRELOG_*` evaluator settings, bounds child calls and readiness, and stops
-and reaps the daemon before removing the complete temporary tree. Its stopped
-backup includes the matching policy store, key, audit store and entire fact
+and reaps the daemon before removing the complete temporary tree.
+Windows execution additionally applies and reads back protected owner ACLs,
+sets the token-reader's required read-only attribute, and uses a dedicated
+console process group with Ctrl+Break. Forced termination is failed-test cleanup
+and cannot authorize a backup. The focused `daemon-signals` test checks early
+and repeated requests and handler/source cleanup. Its stopped backup includes
+the matching policy store, key, audit store and entire fact
 root. It changes both facts and the active pack before restoring to the
 original paths in place (retaining provisioned directory bindings), then proves the earlier facts and recursive behavior returned.
 This exercises the runbook's **file-level disaster recovery**, not the separate
@@ -392,12 +397,15 @@ A separate static hook build runs real iteration failure/retry under sanitizers.
 | Linux prebuilt, bridge off | Native semantic/credential tests, executable lifecycle, full feature-enabled suite; secure bridge tests are intentionally absent |
 | Linux source, secure bridge on | Same recursive group plus secure restore validation; full feature-enabled suite |
 | macOS prebuilt and source/secure | Named recursive group and executable lifecycle in hosted CI; Linux results cannot fill these rows |
-| Windows prebuilt and source/secure | Named engine, compiler, durable replay and credential tests in native hosted CI. The subprocess lifecycle fixture is currently registered only on POSIX; native Windows daemon/wyctl lifecycle evidence remains incomplete |
+| Windows prebuilt and source/secure | Named engine, compiler, durable replay, credential and `recursive-rule-packs-e2e` executable lifecycle tests in native hosted CI; actual successful outcomes are required for qualification |
 | Hook-enabled static Linux | Real serial/TDD iteration-cap failures and complete retry, including production lazy retry |
 | ASan/UBSan Linux | Focused recursive group and static hook run; any conditional skip is reported explicitly |
 
-**Qualification is incomplete until actual hosted outcomes and the remaining
-native Windows executable-lifecycle evidence are attached to #1502/#1507.**
+**Qualification requires actual successful hosted outcomes, including native
+Windows executable lifecycle evidence, attached to #1502/#1507.**
+The acceptance outcome ledger and exact revision/log links are recorded in
+[#1507](https://github.com/semantic-reasoning/wyrelog/issues/1507) and
+[#1502](https://github.com/semantic-reasoning/wyrelog/issues/1502).
 CI wiring is a requirement to collect evidence, not a successful run. Do not
 close either issue merely because local Linux checks pass. Journaled restore
 commit remains Linux-only; macOS begin/prepare does not establish commit or

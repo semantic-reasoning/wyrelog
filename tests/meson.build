@@ -1806,14 +1806,6 @@ if host_machine.system() != 'windows' and build_client
   )
 
   if get_option('enable_audit').allowed() and get_option('enable_fact_store').allowed()
-    test('recursive-rule-packs-e2e', python3,
-      args : [meson.current_source_dir() / 'check-recursive-rule-packs-e2e.py',
-        wyrelogd_exe.full_path(), wyctl_exe.full_path(),
-        meson.project_source_root() / 'templates' / 'access'],
-      depends : [wyctl_exe, wyrelogd_exe],
-      is_parallel : false,
-      timeout : 600,
-    )
     test('wyrelogd-datalog-product-flow', sh,
       args : [
         meson.current_source_dir() / 'check-wyrelogd-datalog-product-flow.sh',
@@ -1841,6 +1833,18 @@ if host_machine.system() != 'windows' and build_client
     depends : [wyrelogd_exe, test_client_audit_daemon],
   )
 endif
+
+if build_client and get_option('enable_audit').allowed() and get_option('enable_fact_store').allowed()
+  test('recursive-rule-packs-e2e', python3,
+    args : [meson.current_source_dir() / 'check-recursive-rule-packs-e2e.py',
+      wyrelogd_exe.full_path(), wyctl_exe.full_path(),
+      meson.project_source_root() / 'templates' / 'access'],
+    depends : [wyctl_exe, wyrelogd_exe],
+    is_parallel : false,
+    timeout : 600,
+  )
+endif
+
 
 test_traits_compile = executable('test-traits-compile',
   'test-traits-compile.c',
@@ -2691,8 +2695,14 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [glib_dep, gio_dep, duckdb_dep],
     override_options : ['cpp_std=c++17'],
   )
+  # Hosted Windows run 43001964834 exceeded the inherited 30s deadline
+  # after 10/15 cases (spill and UTF-8 lifecycle alone used >21s).
+  # Serialize this I/O aggregate and retain a finite native deadline.
   test('secure-duckdb-recording-filesystem',
-    test_secure_duckdb_recording_filesystem)
+    test_secure_duckdb_recording_filesystem,
+    is_parallel : host_machine.system() != 'windows',
+    timeout : host_machine.system() == 'windows' ? 120 : 30,
+  )
   test_fact_provisioning_construct = executable(
     'test-fact-provisioning-construct',
     'test-fact-provisioning-construct.c',
@@ -4864,3 +4874,12 @@ if get_option('enable_audit').allowed()
 
   test('daemon-delta', test_daemon_delta, env : audit_conn_test_env)
 endif
+
+# The real console delivery is exercised by recursive-rule-packs-e2e;
+# this focused test also covers startup state and source/handler teardown.
+test_daemon_signals = executable('test-daemon-signals',
+  'test-daemon-signals.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : glib_dep,
+)
+test('daemon-signals', test_daemon_signals)
