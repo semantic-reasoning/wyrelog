@@ -1665,6 +1665,148 @@ test_unleased_replay_rejects_metadata (void)
   remove_tree (root);
 }
 
+static void
+assert_provisioned_has_no_ledger (wyl_policy_store_t *policy,
+    const gchar *root, const gchar *tenant, const gchar *graph)
+{
+  WylPolicyGraphMaterializationState state =
+      WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
+  g_assert_cmpint (wyl_policy_store_read_fact_graph_materialization (policy,
+      tenant, graph, &state), ==, WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_GRAPH_MATERIALIZATION_NEVER);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+      tenant, graph, FALSE, &store), ==, WYRELOG_E_OK);
+  gboolean has_ledger = TRUE;
+  g_assert_cmpint (wyl_fact_store_table_exists (store, "fact_batches",
+      &has_ledger), ==, WYRELOG_E_OK);
+  g_assert_false (has_ledger);
+}
+
+static wyrelog_error_t
+provisioned_never_validate_bounded (wyl_policy_store_t *policy,
+    const gchar *root, const wyl_policy_fact_graph_info_t *info)
+{
+  WylFactReplaySchedulerConfig config = {
+    .global_concurrency = 2,
+    .tenant_concurrency = 1,
+    .global_queue_limit = 8,
+    .tenant_queue_limit = 4,
+    .row_limit = 100,
+    .time_limit_us = 5 * G_TIME_SPAN_SECOND,
+  };
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  BoundedRefreshCall call = {
+    .policy = policy,
+    .root = root,
+    .info = info,
+  };
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler,
+      info->tenant_id, info->graph_id, NULL, bounded_validation_job, &call,
+      NULL, &future), ==, WYRELOG_E_OK);
+  return wyl_fact_replay_future_wait (future);
+}
+
+/* #1524: provisioning writes a graph's store identity before its first batch
+ * creates the ledger.  Validation must accept that store exactly while the
+ * graph has never materialized, as replay does, instead of failing on the
+ * missing ledger table. */
+static void
+test_provisioned_never_validation_matches_replay (void)
+{
+  const gchar *tenant = "tenant-1524";
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-replay-never-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant,
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
+
+  /* A graph created with no relation, as /graphs/create does, has nothing
+   * to validate: not found, like a legacy graph with no store file. */
+  const wyl_policy_fact_graph_create_options_t empty_opts = {
+    .tenant_id = tenant,
+    .graph_id = "empty",
+    .fact_root = root,
+    .schema_version = 1,
+    .owner_scope = tenant,
+  };
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_provisioning (policy,
+      &empty_opts, NULL, op_uuid), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioning_recover (policy, op_uuid, root,
+      NULL), ==, WYRELOG_E_OK);
+  assert_provisioned_has_no_ledger (policy, root, tenant, "empty");
+  wyl_policy_fact_graph_info_t empty = {
+    .tenant_id = tenant, .graph_id = "empty", .schema_version = 1,
+  };
+  g_assert_cmpint (wyl_fact_replay_validate_graph (policy, root, &empty), ==,
+      WYRELOG_E_NOT_FOUND);
+  guint64 batches = 1, rows = 1;
+  g_assert_cmpint (wyl_fact_replay_validate_graph_with_orphan_candidates
+        (policy, root, &empty, &batches, &rows), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpuint (batches, ==, 0);
+  g_assert_cmpuint (rows, ==, 0);
+  g_assert_cmpint (provisioned_never_validate_bounded (policy, root, &empty),
+      ==, WYRELOG_E_NOT_FOUND);
+  /* Parity: the engine builder refuses the same graph the same way. */
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &empty,
+      &engine), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (engine);
+
+  /* A declared relation with no batch validates, with no orphan candidate,
+   * and the builder publishes it. */
+  provisioned_871_create_graph (policy, root, tenant, "declared");
+  assert_provisioned_has_no_ledger (policy, root, tenant, "declared");
+  wyl_policy_fact_graph_info_t declared = {
+    .tenant_id = tenant, .graph_id = "declared", .schema_version = 1,
+  };
+  g_assert_cmpint (wyl_fact_replay_validate_graph (policy, root, &declared),
+      ==, WYRELOG_E_OK);
+  batches = 1;
+  rows = 1;
+  g_assert_cmpint (wyl_fact_replay_validate_graph_with_orphan_candidates
+        (policy, root, &declared, &batches, &rows), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (batches, ==, 0);
+  g_assert_cmpuint (rows, ==, 0);
+  g_assert_cmpint (provisioned_never_validate_bounded (policy, root,
+      &declared), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &declared,
+      &engine), ==, WYRELOG_E_OK);
+  g_clear_pointer (&engine, wyl_engine_close);
+
+  /* Once the graph has materialized, a missing ledger means lost rows:
+   * validation fails closed. */
+  WylPolicyAuthorityMutationResult transition =
+      WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+  g_assert_cmpint (wyl_policy_store_transition_fact_graph_materialization
+        (policy, tenant, "declared", WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &transition), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (transition, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_fact_replay_validate_graph (policy, root, &declared),
+      ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_replay_validate_graph_with_orphan_candidates
+        (policy, root, &declared, &batches, &rows), ==, WYRELOG_E_IO);
+  g_assert_cmpint (provisioned_never_validate_bounded (policy, root,
+      &declared), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &declared,
+      &engine), ==, WYRELOG_E_IO);
+  g_assert_null (engine);
+
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
 static gint64
 provisioned_871_count (wyl_fact_store_t *store, const gchar *sql)
 {
@@ -8567,6 +8709,8 @@ main (int argc, char **argv)
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   g_test_add_func ("/fact-replay/unleased-metadata-refused",
       test_unleased_replay_rejects_metadata);
+  g_test_add_func ("/fact-replay/provisioned-never-validation-matches-replay",
+      test_provisioned_never_validation_matches_replay);
 #endif
   return wyl_test_normalize_exit_status (g_test_run ());
 }

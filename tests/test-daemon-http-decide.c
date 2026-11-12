@@ -26746,8 +26746,11 @@ check_data_credential_read_contract (void)
   g_free (data_credential_query (&env, narrow, "dc-1475", "g2", 403));
   g_free (data_credential_revoke (&env, alice, "dc-1475", narrow_id, 200));
   g_free (data_credential_query (&env, narrow, "dc-1475", "g2", 401));
-  /* g2 has no relations: authorized, then not found. */
-  g_free (data_credential_verify (&env, query, "g2", 404));
+  /* g2 has no relations: authorized, then not found.  Under the secure
+   * bridge its provisioned store has no ledger yet (#1524). */
+  g_autofree gchar *unmaterialized = data_credential_verify (&env, query,
+          "g2", 404);
+  g_assert_cmpstr (unmaterialized, ==, "{\"error\":\"graph_not_found\"}");
   g_free (data_credential_rotate_in (&env, alice, "dc-1475", query_id));
   g_free (data_credential_verify (&env, query, "g2", 401));
 
