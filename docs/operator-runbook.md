@@ -312,13 +312,19 @@ $loginUrl = "http://127.0.0.1:8765/auth/login?username=alice&tenant=__wr_default
 $login = Invoke-RestMethod -Method Post -Uri $loginUrl
 $tokenPath = "C:\ProgramData\Wyrelog\bootstrap.token"
 New-Item -ItemType File -Path $tokenPath | Out-Null
-icacls $tokenPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" "SYSTEM:(F)"
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$acl = New-Object Security.AccessControl.FileSecurity
+$acl.SetSecurityDescriptorSddlForm("O:${sid}D:P(A;;FA;;;OW)")
+Set-Acl -LiteralPath $tokenPath -AclObject $acl
 [IO.File]::WriteAllText($tokenPath, $login.access_token + "`n", [Text.Encoding]::ASCII)
+attrib +R $tokenPath
 ```
 
 Use this token only to enroll TOTP. Then repeat the normal `/auth/login` and
 `/auth/mfa/verify` flow and replace the file with the newly issued
 MFA-assured access token before guarded permission transitions.
+Clear the read-only attribute before replacing the token contents, then set it
+again before passing the file to `wyctl.exe`. Keep the protected owner-only ACL.
 
 After provisioning a separate MFA-authenticated auditor at `__wr_default` as
 described under [Day-2 Operations](#day-2-operations),
@@ -333,6 +339,13 @@ wyctl.exe --daemon-url http://127.0.0.1:8765 audit query `
 ```
 
 ### Operational Notes
+
+For a Windows daemon launched directly in a console, Ctrl+C or Ctrl+Break
+requests normal shutdown. The console callback records the request; the main
+loop closes listeners and stores before the process exits. A test or supervisor
+sending Ctrl+Break must target the daemon's dedicated process group in the same
+console. Wait for exit code zero before copying a stopped backup; forcibly
+terminating a process does not establish clean shutdown.
 
 - The flag pair is idempotent for the same subject. Leaving the flag on
   subsequent restarts is safe and emits a no-op audit row each time

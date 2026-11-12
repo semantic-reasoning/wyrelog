@@ -10,6 +10,8 @@
 
 #ifdef G_OS_UNIX
 #include <glib-unix.h>
+#elif defined(G_OS_WIN32)
+#include <windows.h>
 #endif
 
 #ifdef G_OS_UNIX
@@ -58,24 +60,37 @@ wyl_daemon_install_signal_handlers (GMainLoop *loop, guint *sigint_id,
   *sigterm_id = g_unix_signal_add (SIGTERM, quit_loop_from_signal, loop);
 }
 
-void
-wyl_daemon_remove_signal_handler (guint *source_id)
+#elif defined(G_OS_WIN32)
+static volatile LONG console_shutdown_requested = 0;
+static gboolean console_handler_installed = FALSE;
+
+static BOOL WINAPI
+console_ctrl_handler (DWORD event)
 {
-  if (*source_id != 0) {
-    g_source_remove (*source_id);
-    *source_id = 0;
-  }
+  if (event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT)
+    return FALSE;
+  /* This runs on a Windows console thread. The runtime's main-context
+   * polling source owns loop and storage teardown. */
+  InterlockedExchange (&console_shutdown_requested, 1);
+  return TRUE;
 }
-#else
+
 void
 wyl_daemon_install_early_signal_handlers (void)
 {
+  if (console_handler_installed)
+    return;
+  InterlockedExchange (&console_shutdown_requested, 0);
+  if (!SetConsoleCtrlHandler (console_ctrl_handler, TRUE))
+    g_error ("Cannot install daemon console handler: %lu",
+        (unsigned long) GetLastError ());
+  console_handler_installed = TRUE;
 }
 
 gboolean
 wyl_daemon_early_signal_received (void)
 {
-  return FALSE;
+  return InterlockedCompareExchange (&console_shutdown_requested, 0, 0) != 0;
 }
 
 void
@@ -87,9 +102,34 @@ wyl_daemon_install_signal_handlers (GMainLoop *loop, guint *sigint_id,
   *sigterm_id = 0;
 }
 
+#endif
+
+void
+wyl_daemon_signal_scope_clear (WylDaemonSignalScope *scope)
+{
+#ifdef G_OS_WIN32
+  if (scope->installed && console_handler_installed) {
+    if (!SetConsoleCtrlHandler (console_ctrl_handler, FALSE))
+      g_error ("Cannot remove daemon console handler: %lu",
+          (unsigned long) GetLastError ());
+    console_handler_installed = FALSE;
+  }
+#endif
+  scope->installed = FALSE;
+}
+
 void
 wyl_daemon_remove_signal_handler (guint *source_id)
 {
-  (void) source_id;
+  if (*source_id != 0) {
+    g_source_remove (*source_id);
+    *source_id = 0;
+  }
 }
-#endif
+
+void
+wyl_daemon_run_main_loop (GMainLoop *loop)
+{
+  if (!wyl_daemon_early_signal_received ())
+    g_main_loop_run (loop);
+}

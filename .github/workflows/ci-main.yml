@@ -258,7 +258,7 @@ jobs:
       - name: Qualify recursive packs with prebuilt DuckDB
         run: |
           meson test -C build-fact --no-rebuild \
-            engine-recursion fact-rule-pack fact-recursive-replay \
+            daemon-signals engine-recursion fact-rule-pack fact-rule-pack-store fact-runtime fact-recursive-replay \
             daemon-http-recursive-credentials recursive-rule-packs-e2e \
             --logbase recursive-prebuilt --print-errorlogs
           git rev-parse HEAD > build-fact/meson-logs/recursive-prebuilt.provenance.txt
@@ -270,10 +270,11 @@ jobs:
       - name: Qualify recursive packs with source secure DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 3 \
-            wyrelogd wyctl test-engine-recursion test-fact-rule-pack \
+            wyrelogd wyctl test-daemon-signals test-engine-recursion test-fact-rule-pack \
+            test-fact-rule-pack-store test-fact-rule-pack-legacy-reader test-fact-runtime \
             test-fact-replay test-daemon-http-recursive-credentials
           meson test -C build-secure-duckdb --no-rebuild \
-            engine-recursion fact-rule-pack fact-recursive-replay \
+            daemon-signals engine-recursion fact-rule-pack fact-rule-pack-store fact-runtime fact-recursive-replay \
             daemon-http-recursive-credentials recursive-rule-packs-e2e \
             --logbase recursive-secure --print-errorlogs
           git rev-parse HEAD > build-secure-duckdb/meson-logs/recursive-secure.provenance.txt
@@ -1169,6 +1170,7 @@ jobs:
       - name: Compile focused fact mutation tests
         run: |
           meson compile -C build-fact-mutation-sanitizer \
+            wyrelogd wyctl test-daemon-signals \
             test-fact-replay \
             test-fact-runtime \
             test-engine-recursion \
@@ -1176,13 +1178,15 @@ jobs:
             test-fact-store \
             test-daemon-http-facts
 
-      # --num-processes 2 rather than the default ncpu: these four suites are
+      # --num-processes 2 rather than the default ncpu: these suites are
       # instrumented and fact-replay itself runs two mutation workers plus an
       # observer, so on a 4-vCPU runner the default would have them contend
       # for the very cores the timeout budget assumes.
       - name: Test focused fact mutation paths
         run: |
           meson test -C build-fact-mutation-sanitizer --no-rebuild \
+            daemon-signals \
+            recursive-rule-packs-e2e \
             fact-replay \
             fact-recursive-replay \
             engine-recursion \
@@ -1648,7 +1652,7 @@ jobs:
           type subprojects\wirelog.wrap >> builddir\meson-logs\recursive-windows.provenance.txt
           meson introspect --buildoptions builddir >> builddir\meson-logs\recursive-windows.provenance.txt
           if errorlevel 1 goto :fail
-          meson test -C builddir engine-recursion fact-rule-pack fact-recursive-replay daemon-http-recursive-credentials --logbase recursive-windows --print-errorlogs
+          meson test -C builddir daemon-signals engine-recursion fact-rule-pack fact-rule-pack-store fact-runtime fact-recursive-replay daemon-http-recursive-credentials recursive-rule-packs-e2e --num-processes 2 --logbase recursive-windows --print-errorlogs
           if errorlevel 1 goto :fail
           exit /b 0
           :fail

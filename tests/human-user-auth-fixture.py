@@ -33,7 +33,7 @@ def code(secret, step):
     offset = digest[-1] & 15
     return f'{(struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000:06d}'
 
-if seed_path.exists():
+if seed_path.exists() and seed_path.stat().st_size:
     material = json.loads(seed_path.read_text(encoding='utf-8'))
 else:
     bearer = token_path.read_text(encoding='utf-8').strip()
