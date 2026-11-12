@@ -372,6 +372,17 @@ jobs:
             wyrelogd-datalog-product-flow \
             --print-errorlogs
 
+      # Only a secure build provisions a graph's store before its first
+      # batch, so only here does /facts/verify reach a store without a
+      # ledger (#1524).
+      - name: Test data credentials with secure DuckDB
+        run: |
+          meson compile -C build-secure-duckdb -j 3 \
+            test-daemon-http-recursive-credentials
+          meson test -C build-secure-duckdb --no-rebuild \
+            daemon-http-recursive-credentials \
+            --print-errorlogs
+
       - name: Test audit DuckDB hardening with source DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 3 \
