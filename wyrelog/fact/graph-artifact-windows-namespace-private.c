@@ -38,6 +38,46 @@ win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
   return g_atomic_int_compare_and_exchange (&win_namespace_test_fault, fault,
              WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE);
 }
+
+/* The platform-neutral namespace test fault, for suites that run on every
+ * host.  Only INVENTORY_PRE_FINALIZE has a Windows counterpart, so arming any
+ * other fault is a caller error.  Consumption is recorded where the inventory
+ * capture takes the fault, and only when it was armed through this setter,
+ * so a Windows-only test arming the native fault directly cannot make a later
+ * shared check report it consumed. */
+static gint win_namespace_shared_fault_armed;
+static gint win_namespace_consumed_shared_fault;
+
+void
+wyl_fact_artifact_namespace_set_test_fault (WylFactArtifactNamespaceTestFault
+    fault)
+{
+  g_return_if_fail (fault == WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
+      || fault == WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  g_atomic_int_set (&win_namespace_consumed_shared_fault,
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
+  if (fault == WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE) {
+    /* Disarm only a fault this setter armed and nothing has taken. */
+    if (g_atomic_int_compare_and_exchange (&win_namespace_shared_fault_armed,
+        TRUE, FALSE))
+      win_namespace_fault_take
+        (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+    return;
+  }
+  g_atomic_int_set (&win_namespace_shared_fault_armed, TRUE);
+  wyl_fact_artifact_win_namespace_set_test_fault
+    (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+}
+
+gboolean
+wyl_fact_artifact_namespace_test_fault_was_consumed
+  (WylFactArtifactNamespaceTestFault fault)
+{
+  return fault != WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
+         && g_atomic_int_compare_and_exchange
+           (&win_namespace_consumed_shared_fault, fault,
+             WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
+}
 #endif /* WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS */
 
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -374,6 +414,10 @@ struct WylFactArtifactWinNamespace
    * so the pair's authority cannot be released underneath it, and so the
    * hot-path re-proof below has something to re-prove.  NULL otherwise. */
   WylFactGraphProvisionedPair *provisioned_pair;
+  /* Decoded from the pair's directory components, so physical-quota evidence
+   * names the graph it measures.  NULL when not adopted from a pair. */
+  gchar *tenant_id;
+  gchar *graph_id;
   gboolean active;
   gint references;
 };
@@ -403,6 +447,8 @@ namespace_unref (WylFactArtifactWinNamespace *namespace_)
   /* After the locator: release derived authority before the authority it was
    * derived from. */
   wyl_fact_graph_provisioned_pair_free (namespace_->provisioned_pair);
+  g_free (namespace_->tenant_id);
+  g_free (namespace_->graph_id);
   g_free (namespace_);
 }
 
@@ -3095,6 +3141,22 @@ wyl_fact_artifact_namespace_open_provisioned_pair_internal (
     return rc;
   }
 
+  g_autofree gchar *tenant_id = NULL;
+  g_autofree gchar *graph_id = NULL;
+  if (wyl_fact_graph_component_decode (pair->directory.tenant_component,
+      &tenant_id) != WYRELOG_E_OK
+      || wyl_fact_graph_component_decode (pair->directory.graph_component,
+      &graph_id) != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_namespace_free (namespace_);
+    return WYRELOG_E_POLICY;
+  }
+  namespace_->tenant_id = g_strdup (tenant_id);
+  namespace_->graph_id = g_strdup (graph_id);
+  if (namespace_->tenant_id == NULL || namespace_->graph_id == NULL) {
+    wyl_fact_artifact_win_namespace_free (namespace_);
+    return WYRELOG_E_NOMEM;
+  }
+
   namespace_->provisioned_pair = wyl_fact_graph_provisioned_pair_ref (pair);
   *out_namespace = namespace_;
   return WYRELOG_E_OK;
@@ -3192,31 +3254,27 @@ inventory_failure_status (wyrelog_error_t rc,
   return WYL_FACT_ARTIFACT_INVENTORY_STATUS_IO;
 }
 
-wyrelog_error_t
-wyl_fact_artifact_namespace_inventory_snapshot
-  (WylFactArtifactNamespace *namespace_,
-    WylFactArtifactInventorySnapshot **out_snapshot)
+/* Fill |snapshot| from a begin and an end scan taken under |lease|, which the
+ * caller already holds and keeps alive.  Nothing is acquired here, so the
+ * capture runs equally under a reader guard and under the caller's exclusive
+ * mutation lease, which a second lock request could never join: the kernel
+ * lock is taken with LOCKFILE_FAIL_IMMEDIATELY.  The lease is revalidated
+ * before each scan.  On failure |*out_provider_status| carries the provider's
+ * own classification, or INVALID when it gave none; failing |snapshot| closed
+ * is left to the caller. */
+static wyrelog_error_t
+namespace_inventory_capture_under_lease (WylFactArtifactWinNamespace
+    *namespace_, WylFactArtifactWinLease *lease,
+    WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactInventoryStatus *out_provider_status)
 {
-  WylFactArtifactInventorySnapshot *snapshot = NULL;
-  WylFactArtifactWinLease *reader = NULL;
   WylFactArtifactWinInventoryScan begin_scan = { 0 };
   WylFactArtifactWinInventoryScan end_scan = { 0 };
   WylFactArtifactInventoryStatus provider_status =
       WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID;
   const WylFactGraphWinIdentity *main_identity;
   const WylFactGraphWinIdentity *guard_identity;
-  wyrelog_error_t rc = WYRELOG_E_OK;
-  if (out_snapshot != NULL)
-    *out_snapshot = NULL;
-  if (namespace_ == NULL || out_snapshot == NULL)
-    return WYRELOG_E_INVALID;
-  snapshot = wyl_fact_artifact_inventory_snapshot_new (256);
-  if (snapshot == NULL)
-    return WYRELOG_E_NOMEM;
-  rc = wyl_fact_artifact_win_namespace_acquire_reader (namespace_, &reader);
-  if (rc != WYRELOG_E_OK)
-    goto done;
-  rc = lease_revalidate (reader);
+  wyrelog_error_t rc = lease_revalidate (lease);
   if (rc != WYRELOG_E_OK)
     goto done;
   rc = wyl_fact_artifact_win_locator_inventory_scan (namespace_->locator,
@@ -3270,7 +3328,7 @@ wyl_fact_artifact_namespace_inventory_snapshot
       if (rc != WYRELOG_E_OK)
         goto done;
     }
-  rc = lease_revalidate (reader);
+  rc = lease_revalidate (lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_locator_inventory_scan (namespace_->locator,
             &end_scan);
@@ -3294,46 +3352,115 @@ wyl_fact_artifact_namespace_inventory_snapshot
       inventory_observation_from_windows (&end_scan, guard_identity);
 #ifdef WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS
   if (win_namespace_fault_take
-        (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE))
+        (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE)) {
     end.entry_fingerprint ^= G_GUINT64_CONSTANT (1);
+    if (g_atomic_int_compare_and_exchange (&win_namespace_shared_fault_armed,
+        TRUE, FALSE))
+      g_atomic_int_set (&win_namespace_consumed_shared_fault,
+          WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  }
 #endif
   wyl_fact_artifact_inventory_snapshot_end (snapshot, &end);
   rc = wyl_fact_artifact_inventory_snapshot_finalize (snapshot);
 done:
-  if (rc != WYRELOG_E_OK) {
-    WylFactArtifactInventoryObservation failure_observation = { 0 };
-    WylFactArtifactInventoryStatus status = inventory_failure_status (rc,
-            provider_status, snapshot);
-    wyl_fact_artifact_inventory_snapshot_clear (snapshot);
-    wyl_fact_artifact_inventory_snapshot_begin (snapshot,
-        &failure_observation);
-    wyl_fact_artifact_inventory_snapshot_fail (snapshot, status);
-  }
+  *out_provider_status = provider_status;
+  return rc;
+}
+
+/* Replace whatever a failed capture left in |snapshot| with a published
+ * failure, so a caller never observes a partial inventory. */
+static void
+inventory_snapshot_fail_closed (WylFactArtifactInventorySnapshot *snapshot,
+    wyrelog_error_t rc, WylFactArtifactInventoryStatus provider_status)
+{
+  WylFactArtifactInventoryObservation failure_observation = { 0 };
+  WylFactArtifactInventoryStatus status = inventory_failure_status (rc,
+          provider_status, snapshot);
+  wyl_fact_artifact_inventory_snapshot_clear (snapshot);
+  wyl_fact_artifact_inventory_snapshot_begin (snapshot, &failure_observation);
+  wyl_fact_artifact_inventory_snapshot_fail (snapshot, status);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_inventory_snapshot
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactInventorySnapshot **out_snapshot)
+{
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+  WylFactArtifactWinLease *reader = NULL;
+  WylFactArtifactInventoryStatus provider_status =
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID;
+  wyrelog_error_t rc;
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (namespace_ == NULL || out_snapshot == NULL)
+    return WYRELOG_E_INVALID;
+  snapshot = wyl_fact_artifact_inventory_snapshot_new (256);
+  if (snapshot == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_fact_artifact_win_namespace_acquire_reader (namespace_, &reader);
+  if (rc == WYRELOG_E_OK)
+    rc = namespace_inventory_capture_under_lease (namespace_, reader, snapshot,
+            &provider_status);
+  if (rc != WYRELOG_E_OK)
+    inventory_snapshot_fail_closed (snapshot, rc, provider_status);
   wyl_fact_artifact_win_lease_free (reader);
   *out_snapshot = snapshot;
   return rc;
 }
 
+/* Physical-quota evidence is the same bounded inventory the POSIX namespace
+ * exports: every fixed child, the temporary aggregate and each one's
+ * allocation, refused when the set is unstable, anomalous or reports a size
+ * that is not an allocation.  It names the graph it measures, so only a
+ * namespace adopted from a provisioned pair can export it. */
 wyrelog_error_t
 wyl_fact_artifact_namespace_export_physical_quota_evidence
   (WylFactArtifactNamespace *namespace_,
     WylFactArtifactPhysicalQuotaEvidence **out_evidence)
 {
-  (void) namespace_;
   if (out_evidence != NULL)
     *out_evidence = NULL;
-  return WYRELOG_E_POLICY;
+  if (namespace_ == NULL || out_evidence == NULL
+      || namespace_->tenant_id == NULL || namespace_->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  wyrelog_error_t rc = wyl_fact_artifact_namespace_inventory_snapshot
+        (namespace_, &snapshot);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+           (snapshot, namespace_->tenant_id, namespace_->graph_id, out_evidence);
 }
 
+/* The store exports while it holds |lease|, the namespace's exclusive
+ * mutation lease, and under its own store lock, which serializes every use
+ * of the lease; a lease only ever moves from active to inactive.  So the
+ * capture runs under that lease rather than a reader guard of its own, which
+ * the held exclusive lock would refuse. */
 wyrelog_error_t
 wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
   (WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
     WylFactArtifactPhysicalQuotaEvidence **out_evidence)
 {
-  (void) namespace_;
-  (void) lease;
   if (out_evidence != NULL)
     *out_evidence = NULL;
-  return WYRELOG_E_POLICY;
+  if (namespace_ == NULL || lease == NULL || out_evidence == NULL
+      || namespace_->tenant_id == NULL || namespace_->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (lease->namespace_ != namespace_)
+    return WYRELOG_E_POLICY;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot =
+      wyl_fact_artifact_inventory_snapshot_new (256);
+  if (snapshot == NULL)
+    return WYRELOG_E_NOMEM;
+  WylFactArtifactInventoryStatus provider_status =
+      WYL_FACT_ARTIFACT_INVENTORY_STATUS_INVALID;
+  wyrelog_error_t rc = namespace_inventory_capture_under_lease (namespace_,
+          lease, snapshot, &provider_status);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+           (snapshot, namespace_->tenant_id, namespace_->graph_id, out_evidence);
 }
 #endif

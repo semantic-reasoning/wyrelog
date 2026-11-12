@@ -2783,6 +2783,9 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   # limit at 60.21 s after 15 of 17 cases. Allow the same bounded 180 s
   # headroom as fact-provisioning-run without changing case selection or
   # concurrency. Keep the existing Linux and Darwin deadlines.
+  # #1522 runs the 15 physical-quota cases on Windows too, each a further
+  # provisioning; all 32 cases took 26 s in a local MinGW debug build.  The
+  # CI clang-cl time is unmeasured: raise this if it nears the limit.
   fact_store_provisioned_timeout = 60
   if host_machine.system() == 'darwin'
     fact_store_provisioned_timeout = 300
