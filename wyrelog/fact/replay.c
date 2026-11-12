@@ -1441,14 +1441,29 @@ validate_graph_internal (wyl_policy_store_t *policy,
 
   rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
           graph_info->graph_id);
+  /* Provisioning creates identity metadata before the first batch creates
+   * its ledger (#1524).  As in replay, only a graph that has never
+   * materialized may validate its declarations without durable rows; in any
+   * other state a missing ledger means lost rows and fails closed. */
+  gboolean has_ledger = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_table_exists (store, "fact_batches", &has_ledger);
+  if (rc == WYRELOG_E_OK && !has_ledger) {
+    WylPolicyGraphMaterializationState state = policy_snapshot == NULL
+        ? graph_materialization_state_or_unknown (policy, graph_info)
+        : policy_snapshot->materialization_state;
+    if (state != WYL_POLICY_GRAPH_MATERIALIZATION_NEVER)
+      rc = WYRELOG_E_IO;
+  }
   if (rc == WYRELOG_E_OK) {
     /* Opening the provisioned store performs the physical identity and
      * metadata-schema validation. Enumerating replay relations then checks
      * that durable policy schema is complete and type-valid before the
      * caller asks the runtime to publish anything. */
     g_autoptr (WylFactReplayStore) replay_store = NULL;
-    rc = wyl_fact_replay_store_new_c_store (store, job_context,
-            &replay_store);
+    if (has_ledger)
+      rc = wyl_fact_replay_store_new_c_store (store, job_context,
+              &replay_store);
     g_autoptr (GPtrArray) relations = NULL;
     if (rc == WYRELOG_E_OK)
       rc = list_replay_relations (policy, replay_store, graph_info,
@@ -1459,7 +1474,11 @@ validate_graph_internal (wyl_policy_store_t *policy,
       if (rc == WYRELOG_E_OK)
         rc = close_rc;
     }
-    if (rc == WYRELOG_E_OK && out_candidate_batches != NULL) {
+    /* Without a ledger or a declared relation the graph holds nothing to
+     * validate, as a legacy graph with no store file. */
+    if (rc == WYRELOG_E_OK && !has_ledger && relations->len == 0)
+      rc = WYRELOG_E_NOT_FOUND;
+    if (rc == WYRELOG_E_OK && has_ledger && out_candidate_batches != NULL) {
       for (guint i = 0; i < relations->len && rc == WYRELOG_E_OK; i++) {
         ReplayRelation *rel = g_ptr_array_index (relations, i);
         const wyl_policy_fact_relation_schema_options_t schema = {
