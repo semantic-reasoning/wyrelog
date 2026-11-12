@@ -26773,6 +26773,21 @@ check_data_credential_read_contract (void)
   g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
       WYRELOG_E_OK);
   g_free (data_credential_verify (&env, kept, "g2", 404));
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  /* A relation declared before any batch: the provisioned store still has
+   * no ledger, and the graph verifies with no orphan candidate (#1524). */
+  data_credential_admin_send (&env, admin, "/facts/schema/register",
+      "tenant=dc-1475&graph=g2&namespace=owner&relation=declared&"
+      "schema_version=1&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+      "column_name\tcolumn_type\tnullable\tvisible\n"
+      "row_id\tsymbol\tfalse\ttrue\n", TRUE);
+  g_autofree gchar *declared = data_credential_verify (&env, kept, "g2",
+          200);
+  g_assert_cmpstr (declared, ==, "{\"ok\":true,\"verified\":true,"
+      "\"tenant_id\":\"dc-1475\",\"graph_id\":\"g2\","
+      "\"orphan_repair_candidate_batches\":0,"
+      "\"orphan_repair_candidate_rows\":0}");
+#endif
   /* A transfer ends the credential itself: its bearer is no longer
    * resolved and its secret no longer exchanges. */
   gchar transfer_request[WYL_REQUEST_ID_STRING_BUF];
