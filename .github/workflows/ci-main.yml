@@ -1520,6 +1520,22 @@ jobs:
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Test data credentials with secure DuckDB (clang-cl)
+        if: matrix.secure_bridge == 'enabled'
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          meson compile -C builddir test-daemon-http-recursive-credentials
+          if errorlevel 1 exit /b 1
+          meson test -C builddir daemon-http-recursive-credentials --no-rebuild --print-errorlogs
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test fact forget transaction cleanup seam (clang-cl)
         if: matrix.secure_bridge == 'enabled'
         shell: powershell
