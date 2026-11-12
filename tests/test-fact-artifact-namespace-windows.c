@@ -4852,6 +4852,176 @@ test_inventory_hostile_and_bounded_namespace (void)
   g_free (path);
 }
 
+static void
+assert_physical_quota_evidence (const WylFactArtifactPhysicalQuotaEvidence
+    *evidence)
+{
+  g_assert_nonnull (evidence);
+  g_assert_cmpstr (wyl_fact_artifact_physical_quota_evidence_tenant_id
+        (evidence), ==, "tenant");
+  g_assert_cmpstr (wyl_fact_artifact_physical_quota_evidence_graph_id
+        (evidence), ==, "graph");
+  const gchar *digest =
+      wyl_fact_artifact_physical_quota_evidence_digest (evidence);
+  g_assert_cmpuint (strlen (digest), ==, 64);
+  g_autofree gchar *generation = g_strconcat ("v1:", digest, NULL);
+  g_assert_cmpstr (wyl_fact_artifact_physical_quota_evidence_generation
+        (evidence), ==, generation);
+}
+
+/* #1522: the store exports physical-quota evidence while it holds the
+ * namespace's exclusive mutation lease, so the export must capture under that
+ * lease.  A reader guard of its own could never be granted alongside it: the
+ * native lock is requested with LOCKFILE_FAIL_IMMEDIATELY. */
+static void
+test_inventory_physical_quota_export_under_mutation_lease (void)
+{
+  g_autofree gchar *root = provisioned_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactArtifactNamespace *ns = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactPhysicalQuotaEvidence *under_lease = NULL;
+  WylFactArtifactPhysicalQuotaEvidence *unleased = NULL;
+
+  WylFactGraphProvisionedPair *pair = provisioned_pair_for_test (root,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c0705b0", &locator, &resolver, &graph);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns,
+      &lease), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns,
+      lease, &under_lease), ==, WYRELOG_E_OK);
+  assert_physical_quota_evidence (under_lease);
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_export_physical_quota_evidence
+        (ns, &unleased), ==, WYRELOG_E_BUSY);
+  g_assert_null (unleased);
+  wyl_fact_artifact_win_lease_free (lease);
+
+  /* With the lease released the unleased export takes its own reader guard,
+   * and an unchanged artifact set yields the same generation.  Both charge
+   * the whole allocation the inventory measures. */
+  g_assert_cmpint (wyl_fact_artifact_namespace_export_physical_quota_evidence
+        (ns, &unleased), ==, WYRELOG_E_OK);
+  assert_physical_quota_evidence (unleased);
+  g_assert_cmpstr (wyl_fact_artifact_physical_quota_evidence_generation
+        (unleased), ==, wyl_fact_artifact_physical_quota_evidence_generation
+        (under_lease));
+  WylFactArtifactInventorySnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_inventory_snapshot (ns,
+      &snapshot), ==, WYRELOG_E_OK);
+  const guint64 allocated =
+      wyl_fact_artifact_inventory_snapshot_allocated_bytes (snapshot);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpuint (wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+        (under_lease), ==, allocated);
+  g_assert_cmpuint (wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+        (unleased), ==, allocated);
+
+  wyl_fact_artifact_physical_quota_evidence_free (unleased);
+  wyl_fact_artifact_physical_quota_evidence_free (under_lease);
+  wyl_fact_artifact_win_namespace_free (ns);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_for_test (root);
+}
+
+/* Every export that cannot prove the evidence refuses and returns none. */
+static void
+test_inventory_physical_quota_export_refusals (void)
+{
+  g_autofree gchar *root = provisioned_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactArtifactNamespace *ns = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinLease *foreign_lease = NULL;
+  WylFactArtifactPhysicalQuotaEvidence *evidence = NULL;
+  gchar *isolated_path = NULL;
+  HANDLE isolated_graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *isolated =
+      open_isolated_namespace (&isolated_path, &isolated_graph);
+
+  WylFactGraphProvisionedPair *pair = provisioned_pair_for_test (root,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c0705b1", &locator, &resolver, &graph);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &ns), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (ns,
+      &lease), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_export_physical_quota_evidence
+        (NULL, &evidence), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns,
+      NULL, &evidence), ==, WYRELOG_E_INVALID);
+  g_assert_null (evidence);
+
+  /* A namespace not adopted from a provisioned pair names no tenant or graph
+   * to charge, as on POSIX. */
+  g_assert_cmpint (wyl_fact_artifact_namespace_export_physical_quota_evidence
+        (isolated, &evidence), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (isolated,
+      &foreign_lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+        (isolated, foreign_lease, &evidence), ==, WYRELOG_E_INVALID);
+  /* Another namespace's lease is no authority over this one. */
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns,
+      foreign_lease, &evidence), ==, WYRELOG_E_POLICY);
+  g_assert_null (evidence);
+  wyl_fact_artifact_win_lease_free (foreign_lease);
+
+  /* A size the filesystem cannot report as an allocation is no evidence. */
+  wyl_fact_artifact_win_locator_set_inventory_test_fault
+    (WYL_FACT_ARTIFACT_WIN_INVENTORY_TEST_FAULT_ALLOCATION_UNSUPPORTED);
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns,
+      lease, &evidence), ==, WYRELOG_E_POLICY);
+  g_assert_null (evidence);
+
+  /* An artifact set that changes between the two scans is no evidence. */
+  wyl_fact_artifact_win_namespace_set_test_fault
+    (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns,
+      lease, &evidence), ==, WYRELOG_E_BUSY);
+  g_assert_null (evidence);
+
+  /* A namespace whose provenance is revoked under the lease refuses. */
+  g_autofree gchar *graph_path = g_build_filename (root,
+          locator.tenant_component, locator.graph_component, NULL);
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (graph_path, -1, NULL, NULL,
+          NULL);
+  g_assert_nonnull (wide);
+  g_assert_cmpint (SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+      NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
+  g_assert_cmpint
+    (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns,
+      lease, &evidence), ==, WYRELOG_E_POLICY);
+  g_assert_null (evidence);
+
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (ns);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_for_test (root);
+  wyl_fact_artifact_win_namespace_free (isolated);
+  g_assert_true (CloseHandle (isolated_graph));
+  remove_tree_for_test (isolated_path);
+  g_free (isolated_path);
+}
+
 static const WinGuardedCase win_guarded_cases[] = {
 #if defined (test_working_handle_free_closes_unlinked_object)                 \
   || defined (test_locator_replace_open_destination)                          \
@@ -4967,6 +5137,10 @@ static const WinGuardedCase win_guarded_cases[] = {
    test_inventory_faults_discard_partial_results},
   {"/fact/artifact-namespace/windows/inventory/hostile-bounded",
    test_inventory_hostile_and_bounded_namespace},
+  {"/fact/artifact-namespace/windows/inventory/physical-quota-under-lease",
+   test_inventory_physical_quota_export_under_mutation_lease},
+  {"/fact/artifact-namespace/windows/inventory/physical-quota-refusals",
+   test_inventory_physical_quota_export_refusals},
 };
 
 int

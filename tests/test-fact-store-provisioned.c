@@ -617,10 +617,6 @@ test_malformed_darwin_evidence_fails_before_filesystem (void)
 }
 #endif
 
-/* The Windows artifact namespace cannot export physical-quota evidence yet
- * (it fails closed with POLICY), so a Windows store has no physical admission
- * to settle; these cases run where the evidence exists. */
-#ifndef G_OS_WIN32
 /* #1499: a COMMIT that DuckDB reports as failed has an unknown outcome.  The
  * durable-autocheckpoint error says the transaction is durable; a commit that
  * DuckDB reverts is not.  Either way the physical quota must
@@ -994,6 +990,123 @@ test_precommit_failure_releases_physical_quota (gconstpointer data)
   physical_fixture_clear (&fx);
 }
 
+/* #1522: a tenant with a physical limit can append, and once the graph's
+ * usage has reached the limit the next mutation is refused as over quota (the
+ * daemon's 429) without writing it, reserving anything, or charging the
+ * graph; raising the limit then admits it.  A limit below what the tenant
+ * already uses cannot be configured at all: the policy store refuses it with
+ * WYRELOG_E_CONFLICT. */
+typedef struct
+{
+  const gchar *name;
+  gboolean update;
+} LimitCase;
+
+static const LimitCase limit_cases[] = {
+  { "append-at-limit", FALSE },
+  { "update-at-limit", TRUE },
+};
+
+static gint64
+reservation_count (wyl_policy_store_t *policy_store, const gchar *request)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db (policy_store),
+      "SELECT COUNT(*) FROM fact_physical_quota_reservations "
+      "WHERE request_id=?1", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, request, -1, SQLITE_STATIC),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gint64 count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return count;
+}
+
+static void
+set_physical_limit (wyl_policy_store_t *policy_store, guint64 hard_limit)
+{
+  WylPolicyFactQuotaConfig limit = {
+    .has_limit = TRUE,
+    .hard_limit = hard_limit,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (policy_store,
+      tenant_id, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &limit), ==,
+      WYRELOG_E_OK);
+}
+
+static wyrelog_error_t
+physical_apply_delta (PhysicalFixture *fx, gboolean update,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted,
+    wyl_fact_commit_delta_t *out_delta)
+{
+  if (!update)
+    return wyl_fact_store_append_batch_delta (fx->store, &fx->schema, batch,
+               out_inserted, out_delta);
+  wyl_fact_store_batch_t as_update = *batch;
+  as_update.op = WYL_FACT_STORE_OP_UPDATE;
+  const wyl_fact_store_update_part_t part = {
+    .schema = &fx->schema,
+    .batch = &as_update,
+  };
+  return wyl_fact_store_update_graph_batches_delta (fx->store, &part, 1,
+             out_inserted, out_delta);
+}
+
+static void
+test_physical_limit_admits_and_refuses (gconstpointer data)
+{
+  const LimitCase *c = data;
+  PhysicalFixture fx;
+  /* The fixture's baseline append is itself admitted under the limit. */
+  physical_fixture_init (&fx);
+  WylPolicyFactPhysicalQuotaStatus before = { 0 };
+  assert_physical_settled (fx.policy_store, &before);
+  g_assert_cmpuint (before.committed_bytes, >, 0);
+  const gint64 charge = graph_charge (fx.policy_store);
+  WylPolicyFactQuotaConfig below_usage = {
+    .has_limit = TRUE,
+    .hard_limit = before.committed_bytes - 1,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (fx.policy_store,
+      tenant_id, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &below_usage), ==,
+      WYRELOG_E_CONFLICT);
+
+  set_physical_limit (fx.policy_store, before.committed_bytes);
+  gboolean inserted = TRUE;
+  wyl_fact_commit_delta_t delta = { 0 };
+  g_assert_cmpint (physical_apply_delta (&fx, c->update, &fx.other, &inserted,
+      &delta), ==, WYRELOG_E_POLICY);
+  g_assert_true (delta.quota_exceeded);
+  g_assert_false (inserted);
+  WylPolicyFactPhysicalQuotaStatus refused = { 0 };
+  assert_physical_settled (fx.policy_store, &refused);
+  g_assert_cmpuint (refused.committed_bytes, ==, before.committed_bytes);
+  g_assert_cmpint (graph_charge (fx.policy_store), ==, charge);
+  g_assert_cmpint (reservation_count (fx.policy_store, "other"), ==, 0);
+  gint64 present = -1;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (fx.store,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id='other';",
+      &present), ==, WYRELOG_E_OK);
+  g_assert_cmpint (present, ==, 0);
+
+  set_physical_limit (fx.policy_store, G_GUINT64_CONSTANT (1) << 30);
+  delta = (wyl_fact_commit_delta_t) { 0 };
+  g_assert_cmpint (physical_apply_delta (&fx, c->update, &fx.other, &inserted,
+      &delta), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_assert_false (delta.quota_exceeded);
+  WylPolicyFactPhysicalQuotaStatus admitted = { 0 };
+  assert_physical_settled (fx.policy_store, &admitted);
+  g_assert_cmpuint (admitted.committed_bytes, >=, before.committed_bytes);
+  g_autofree gchar *state = reservation_state (fx.policy_store, "other");
+  g_assert_cmpstr (state, ==, "settled");
+  physical_fixture_clear (&fx);
+}
+
+/* The fallback cases arm the shared namespace test fault, which a Windows
+ * build defines only with the artifact test hooks. */
+#if !defined (G_OS_WIN32) || defined (WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
+
 /* #1523: when the observation cannot be taken, or the settle fails, the
  * reservation is cancelled instead: definitely when no COMMIT was issued, so
  * nothing is held back, and as uncertain (reconciling) when COMMIT was issued,
@@ -1123,7 +1236,6 @@ main (int argc, char *argv[])
     g_test_add_data_func (name, &metadata_cases[i],
         test_leased_open_rejects_corruption);
   }
-#ifndef G_OS_WIN32
   for (gsize i = 0; i < G_N_ELEMENTS (commit_outcome_cases); i++) {
     g_autofree gchar *name = g_strdup_printf
           ("/fact/store-provisioned/physical-quota/%s",
@@ -1138,6 +1250,14 @@ main (int argc, char *argv[])
     g_test_add_data_func (name, &precommit_cases[i],
         test_precommit_failure_releases_physical_quota);
   }
+  for (gsize i = 0; i < G_N_ELEMENTS (limit_cases); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact/store-provisioned/physical-quota/limit/%s",
+            limit_cases[i].name);
+    g_test_add_data_func (name, &limit_cases[i],
+        test_physical_limit_admits_and_refuses);
+  }
+#if !defined (G_OS_WIN32) || defined (WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
   for (gsize i = 0; i < G_N_ELEMENTS (fallback_cases); i++) {
     g_autofree gchar *name = g_strdup_printf
           ("/fact/store-provisioned/physical-quota/fallback/%s",
