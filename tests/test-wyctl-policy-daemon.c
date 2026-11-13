@@ -1243,7 +1243,8 @@ main (void)
     "--guard-risk", "29",
     NULL,
   };
-  assert_wyctl_ok (schema_register_argv);
+  assert_wyctl_stdout (schema_register_argv,
+      "mutation_class=committed_ready reconcile=false\n");
   assert_wyctl_stdout (fact_schema_quota_status_argv,
       "tenant=__wr_default dimension=schema_count limit=2 registered=1\n");
 
@@ -1715,7 +1716,8 @@ main (void)
     "--guard-risk", "29",
     NULL,
   };
-  assert_wyctl_ok (other_schema_register_argv);
+  assert_wyctl_stdout (other_schema_register_argv,
+      "mutation_class=committed_ready reconcile=false\n");
   /* One row in the other relation, so the wrong-relation forget below meets
    * a real projection table, the case that used to drop batch-1's index. */
   gchar *refund_input_path = NULL;

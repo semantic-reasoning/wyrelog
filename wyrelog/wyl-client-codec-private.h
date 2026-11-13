@@ -71,4 +71,8 @@ wyrelog_error_t wyl_client_fact_replay_resources_copy
 
 wyrelog_error_t wyl_client_user_list_decode (const gchar *document, gsize size, WylClientUserList *out);
 wyrelog_error_t wyl_client_user_preview_decode (const gchar *document, gsize size, WylClientUserDeletePreview *out);
+wyrelog_error_t wyl_client_fact_schema_register_result_decode
+  (const gchar *document, gsize document_len, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    WylClientFactSchemaRegisterResult *out_result);
 G_END_DECLS;

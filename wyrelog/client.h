@@ -211,6 +211,21 @@ typedef struct
   gboolean audit_recorded;
 } WylClientFactForgetResult;
 
+/* Owned registration receipt. Zero-initialize and clear after use. When
+ * has_outcome is false (hidden relation or older server), runtime fields
+ * are absent and must not be interpreted as a readiness verdict. */
+typedef struct
+{
+  gboolean has_outcome;
+  gboolean committed;
+  gchar *mutation_class;
+  gboolean queryable;
+  gboolean reconcile;
+  gchar *degraded_class;
+  guint64 engine_generation;
+} WylClientFactSchemaRegisterResult;
+
+
 typedef struct
 {
   gchar *tenant_id;
@@ -1025,6 +1040,24 @@ wyrelog_error_t wyl_client_fact_schema_register_with_max_rows
     gsize n_columns,
     guint max_rows,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+/* Additive result-bearing registration. Existing registration entry points
+ * keep their status-only behavior. A NULL result also requests status-only
+ * behavior. Otherwise result must be zero-initialized or cleared, and is
+ * empty on error. HTTP success with an unreadable receipt is WYRELOG_E_IO:
+ * the registration may already have committed. Degraded/barrier receipts
+ * return OK because registration committed; inspect mutation_class and
+ * reconcile before relying on runtime publication. */
+wyrelog_error_t wyl_client_fact_schema_register_with_max_rows_result
+  (WylClient *client, const gchar *tenant, const gchar *graph,
+    const gchar *namespace_id, const gchar *relation, guint32 schema_version,
+    const WylClientFactColumn *columns, gsize n_columns, guint max_rows,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactSchemaRegisterResult *out_result);
+void wyl_client_fact_schema_register_result_clear
+  (WylClientFactSchemaRegisterResult *result);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylClientFactSchemaRegisterResult,
+    wyl_client_fact_schema_register_result_clear)
+
 wyrelog_error_t wyl_client_fact_put_batch (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
