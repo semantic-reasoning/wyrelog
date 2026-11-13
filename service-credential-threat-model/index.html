@@ -1,0 +1,1705 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Access-control and Datalog fact-store service">
+      
+      
+      
+        <link rel="canonical" href="https://semantic-reasoning.github.io/wyrelog/service-credential-threat-model/">
+      
+      
+        <link rel="prev" href="../secure-duckdb-backend/">
+      
+      
+        <link rel="next" href="../service-credential-platform-support/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Service credential threat model - wyrelog</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#service-credential-threat-model-v1" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="wyrelog" class="md-header__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            wyrelog
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Service credential threat model
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="wyrelog" class="md-nav__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    wyrelog
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operator-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operator runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../offline-restore-daemon-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore daemon API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-abort-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore abort recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-schema-transition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore schema transitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ga-hardening-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GA hardening gates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth-session-restart-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth restart and JWT keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lobac-v0-tenant-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../engine-session-publication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine-session publication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-admission-enum-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fact admission enum evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../recursive-engine-qualification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secure-duckdb-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secure DuckDB backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#v1-non-goals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        V1 non-goals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custody-and-transport-boundaries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custody and transport boundaries
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#owner-issued-data-credentials-1341" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Owner-issued data credentials (#1341)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-platform-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-traceability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential traceability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-artifact-handle-verifier/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows artifact handle verifier
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-formatting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-after-walstart-test-seam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB AFTER_WAL_START seam
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-fixed-wal-lifecycle-evidence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB fixed-WAL evidence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-transaction-abort-inventory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#v1-non-goals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        V1 non-goals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custody-and-transport-boundaries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custody and transport boundaries
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#owner-issued-data-credentials-1341" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Owner-issued data credentials (#1341)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
+<h1 id="service-credential-threat-model-v1">Service-Credential Threat Model (v1)<a class="headerlink" href="#service-credential-threat-model-v1" title="Permanent link">&para;</a></h1>
+<p>This document states the security boundaries, the deliberate v1 non-goals, and
+the accepted limitations of the service-credential subsystem. It is a companion
+to the operator runbook's "Service Credential Handoff" and "Key Rotation"
+sections (<code>docs/operator-runbook.md</code>) and to the platform evidence matrix
+(<code>docs/service-credential-platform-support.md</code>). Read those for the operator
+procedures and for what kind of proof each platform provides; read this for what
+the subsystem intentionally does <strong>not</strong> defend against and why.</p>
+<p>The guiding principle is least authority: a service credential is a
+data-plane-only principal whose live authorization is decided at <code>/decide</code>
+against current policy, whose management is reserved to human SYSTEM admins in
+<code>__wr_default</code>, and whose entire surface is loopback-only and file-mediated.</p>
+<p>Owner-issued data credentials (#1341) are a separate credential kind with their
+own boundaries. They are described under "Owner-issued data credentials" below.
+The non-goals and the custody section below describe service credentials; where
+one of them also binds data credentials, or is replaced for them, the data
+credential section says so. The host trust boundary, loopback confinement, the
+KeyProvider trust anchor and the in-process-memory caveat apply to both kinds.</p>
+<h2 id="v1-non-goals">V1 non-goals<a class="headerlink" href="#v1-non-goals" title="Permanent link">&para;</a></h2>
+<p>These are out of scope for v1 by design, not defects. Each is a bounded,
+documented limitation.</p>
+<ul>
+<li><strong>No workload refresh token.</strong> A service token has a fixed, short server-side
+  TTL and no refresh path. A workload re-exchanges its credential to obtain a
+  new token. There is intentionally nothing that can silently extend or renew a
+  live token's lifetime.</li>
+<li><strong>No secret recovery, redisplay, or replay.</strong> The 32-byte credential secret is
+  returned exactly once, out-of-band, into the owner-only escrow document. It is
+  never re-derivable, re-displayable, or replayable from the authoritative
+  store, which persists only a versioned salted verifier and lifecycle metadata.
+  A lost secret is rotated, not recovered. A data credential's secret is never
+  redisplayed or recovered either, but it is delivered differently; see
+  "Secret delivery" under "Owner-issued data credentials".</li>
+<li><strong>No tenant-local management.</strong> Principal and credential management is a human
+  SYSTEM capability bound to the management resolver tenant <code>__wr_default</code>. There
+  is no tenant-local management authority; a tenant cannot self-administer its
+  own service principals. This non-goal does not cover data credentials. A
+  tenant owner issues, lists, rotates and revokes those for their own tenant, so
+  that a program can use the tenant's data without an administrator creating a
+  principal for it. Service principals and service credentials stay
+  SYSTEM-managed.</li>
+<li><strong>No remote / proxy / TLS / mTLS / Unix-socket transport.</strong> The management
+  routes and the <code>/auth/service-token</code> exchange are loopback-only. Peer and
+  listener addresses are validated against a canonical literal loopback address,
+  and <code>Forwarded</code> / <code>X-Forwarded-*</code> are never trusted. There is no supported
+  network, reverse-proxy, TLS/mTLS, or Unix-domain-socket transport in v1.</li>
+<li><strong>No automated rotation.</strong> Credential and KeyProvider-root rotation are
+  operator-initiated. Nothing rotates on a schedule or on its own.</li>
+<li><strong>No multi-root auto-recovery at normal store open.</strong> A normal single-root
+  store open never auto-recovers an interrupted key rotation. Recovery is
+  explicit (<code>wyctl key recover</code> / <code>resume</code>) and requires both provider roots;
+  see the corrected disclosure below.</li>
+<li><strong>No cryptographic wipe of SQLite internal page memory.</strong> The wyrelog-owned
+  decrypted image buffer is zeroed on close, but the subsystem does not and
+  cannot scrub SQLite's own internal page cache or other process-memory copies
+  the library may retain. This is the accepted in-process-memory caveat below.</li>
+</ul>
+<h2 id="custody-and-transport-boundaries">Custody and transport boundaries<a class="headerlink" href="#custody-and-transport-boundaries" title="Permanent link">&para;</a></h2>
+<p>The subsystem's confidentiality rests on local file custody and loopback
+confinement, not on a network security layer:</p>
+<ul>
+<li><strong>Escrow documents (<code>0600</code>).</strong> The one-time secret is delivered only to the
+  owner-only escrow document under <code>--credential-publication-root</code>. Anyone who
+  can read that file before the workload consumes it holds the credential secret;
+  protect it like the KeyProvider key file. It is never written to stdout, argv,
+  or a query parameter. This applies to service credentials. A data
+  credential's secret has no escrow document.</li>
+<li><strong>Owner-only roots (<code>0700</code>).</strong> <code>--credential-publication-root</code>,
+  <code>--operation-root</code>, and the fact root are each <code>0700</code> and must be mutually
+  disjoint and disjoint from the policy/audit/event-spool paths; overlap fails
+  startup closed. This keeps a delivered secret or a durable operation journal
+  from sharing a directory with another store.</li>
+<li><strong>Loopback confinement.</strong> Management and exchange trust only a real loopback
+  transport. An attacker without local host access and without the ability to
+  reach the loopback listener cannot present, mint, or manage credentials. The
+  threat model assumes the host and its filesystem permissions are the trust
+  boundary.</li>
+<li><strong>KeyProvider trust anchor.</strong> The encrypted policy store, sealed under the
+  KeyProvider, is the authority for verifier and CVK material. Whoever controls
+  the KeyProvider key and the store path controls credential verification.</li>
+</ul>
+<h2 id="owner-issued-data-credentials-1341">Owner-issued data credentials (#1341)<a class="headerlink" href="#owner-issued-data-credentials-1341" title="Permanent link">&para;</a></h2>
+<p><strong>Status: partly implemented.</strong> This section records the boundary that the
+implementation units must build: #1473 (storage), #1474 (management routes),</p>
+<h1 id="1475-exchange-and-per-use-checks-1476-lifecycle-revocation-and-1477">1475 (exchange and per-use checks), #1476 (lifecycle revocation) and #1477<a class="headerlink" href="#1475-exchange-and-per-use-checks-1476-lifecycle-revocation-and-1477" title="Permanent link">&para;</a></h1>
+<p>(<code>wyctl</code> and runbook). Storage, the management routes, the exchange, the
+per-use checks and lifecycle revocation have landed: a tenant owner can issue,
+list, rotate and revoke data credentials, a program can exchange one at
+<code>/auth/service-token</code> and use its bearer on the data routes, and the lifecycle
+events below revoke them. A credential's last-used time is the time
+of its last exchange. An exchange of an unknown credential id is refused
+sooner than one with a wrong secret, so its timing can tell whether an id
+exists; ids are not secrets, and the exchange limiter applies. Where the
+shipped behaviour differs from this section, #1477 corrects this document.</p>
+<h3 id="why-the-boundary-moves">Why the boundary moves<a class="headerlink" href="#why-the-boundary-moves" title="Permanent link">&para;</a></h3>
+<p>Today a program cannot read or write a tenant's facts:</p>
+<ul>
+<li>A human bearer can, but obtaining one needs <code>/auth/login</code> and interactive
+  TOTP MFA.</li>
+<li>A service credential cannot. A <code>svc:</code> principal's authority is confined to the
+  data-plane allowlist in <code>templates/access/bootstrap.dl</code>
+  (<code>approved_data_plane_permission</code>: <code>wr.stream.read</code>, <code>wr.stream.list</code>,
+  <code>wr.svc.read_decision</code>). Every fact and datalog permission is control-plane,
+  so a service bearer is denied them even when a role grants them, as
+  <code>wr.svc_agent</code> does for the fact mutation permissions.</li>
+</ul>
+<p>A data credential lets the tenant's owner give a program a fixed, narrow set of
+data operations. It is a new credential kind, not a new use of service
+principals.</p>
+<h3 id="credential-kind">Credential kind<a class="headerlink" href="#credential-kind" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Bound at issuance</strong> to <code>(tenant, issuer, operations, graphs, expiry)</code>. The
+  tenant is the tenant that issued it. The issuer is the owner who issued it.
+  <code>graphs</code> is optional; when it is empty the credential covers every graph in
+  the tenant. A named graph is bound by its graph id, and a scope is never
+  emptied into "every graph". Graphs leave a tenant today only when the tenant
+  is deleted, which revokes every credential in it. Any future operation that
+  removes a single graph must revoke, in the same transaction, every credential
+  whose scope names that graph, so that a later graph with the same id is never
+  covered.</li>
+<li><strong>Not a principal.</strong> It has no <code>svc:</code> subject, is never granted a role, and is
+  never named in <code>approved_data_plane_permission</code>. The data-plane allowlist for
+  ordinary service principals does not change.</li>
+<li><strong>Its own identity.</strong> A bearer obtained from a data credential authenticates
+  as that credential, under an identity distinct from every human and <code>svc:</code>
+  subject. It never authenticates as its issuer. The issuer's subject id is
+  consulted only for the issuer check at use (check 5 below). So a route that
+  derives authority from the actor, such as ownership comparison against
+  <code>tenants.owner_subject_id</code> or a <code>/decide</code> call on the actor, never sees the
+  issuer through a data credential.</li>
+<li><strong>Immutable scope.</strong> Nothing widens a credential after issuance. Changing the
+  operations or graphs means issuing a new credential. Rotation keeps the scope
+  and the original expiry, and replaces only the secret, so rotating never
+  extends a credential's life. Rotation is owner-initiated; nothing rotates a
+  data credential automatically.</li>
+<li><strong>Stored as a verifier.</strong> The store keeps a versioned salted verifier and
+  lifecycle metadata, as for service credentials, and never the secret.</li>
+</ul>
+<h3 id="operations">Operations<a class="headerlink" href="#operations" title="Permanent link">&para;</a></h3>
+<p>The owner chooses any combination of five operations. Each one is exactly the
+permission the existing route already checks:</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Permission</th>
+<th>Routes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>wr.datalog.query</code>, <code>wr.fact.read</code></td>
+<td><code>POST /datalog/...</code>; <code>GET /facts/verify</code></td>
+</tr>
+<tr>
+<td><code>infer</code></td>
+<td><code>wr.datalog.infer</code></td>
+<td>Datalog queries on graphs with a published rule pack (including base relations); also requires <code>query</code></td>
+</tr>
+<tr>
+<td><code>insert</code></td>
+<td><code>wr.fact.append</code></td>
+<td>the facts <code>:append</code> route</td>
+</tr>
+<tr>
+<td><code>delete</code></td>
+<td><code>wr.fact.retract</code></td>
+<td>the facts <code>:retract</code> route</td>
+</tr>
+<tr>
+<td><code>update</code></td>
+<td><code>wr.fact.update</code></td>
+<td>the facts <code>:update</code> routes</td>
+</tr>
+</tbody>
+</table>
+<p>The check is per operation. An <code>insert</code>-only credential is refused on retract
+and update, although all three are fact mutations.</p>
+<h3 id="never-reachable">Never reachable<a class="headerlink" href="#never-reachable" title="Permanent link">&para;</a></h3>
+<p>A data credential never authorizes any action outside the table above,
+whatever its operations. In particular:</p>
+<ul>
+<li><code>wr.fact.forget</code> (irreversible erasure) and <code>wr.fact.repair</code>;</li>
+<li>schema and rule-pack registration (<code>wr.schema.manage</code>), graph management
+  (<code>wr.graph.manage</code>) and quota configuration;</li>
+<li>policy, audit, key and tenant actions;</li>
+<li>every service-principal, service-credential and data-credential management
+  action, so a data credential can never issue, rotate or revoke a credential;</li>
+<li>the service data-plane permissions (<code>wr.stream.read</code>, <code>wr.stream.list</code>,
+  <code>wr.svc.read_decision</code>);</li>
+<li>every other permission.</li>
+</ul>
+<h3 id="who-manages-them">Who manages them<a class="headerlink" href="#who-manages-them" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Issue and rotate:</strong> only the tenant's current owner
+  (<code>tenants.owner_subject_id</code>, #1338). The owner needs a live, MFA-assured
+  human session with the usual guard context. The authority comes from
+  ownership. Neither a SYSTEM admin nor a holder of tenant-scoped
+  <code>wr.system_admin</code> can issue on the owner's behalf. An owner who also holds
+  SYSTEM authority issues as the owner. A SYSTEM admin can still become the
+  owner through <code>/tenants/transfer-owner</code> and then issue; that transfer is
+  audited and revokes the previous owner's credentials. Rotation re-checks the
+  issuer requirements of issuance (see below), and only an active credential
+  can be rotated, so a revoked one stays revoked. A sealed tenant refuses issue
+  and rotate. The owner check and the credential insert run inside the same
+  policy write, so an issue racing an ownership transfer either completes
+  before the transfer, and is revoked by it, or is refused.</li>
+<li><strong>List and revoke:</strong> the owner, and a SYSTEM admin for incident response. Here
+  SYSTEM admin means a principal allowed <code>wr.tenant.manage</code> on <code>__wr_default</code>,
+  the capacity the existing tenant routes already recognize. Both stay
+  available while the tenant is sealed. A listing shows id, operations, graphs,
+  issuer, created, expires and last-used time, and state. It never shows the
+  secret, salt or verifier.</li>
+<li><strong>Never a credential's bearer:</strong> a <code>svc:</code> bearer and a data-credential bearer
+  are refused on every management route.</li>
+</ul>
+<h3 id="never-more-than-its-issuer">Never more than its issuer<a class="headerlink" href="#never-more-than-its-issuer" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>At issuance,</strong> the owner must currently hold, in the tenant, every
+  permission mapped to each requested operation (both of them for <code>query</code>), and
+  each named graph must exist in the tenant.</li>
+<li><strong>At every use,</strong> the request is refused unless all of these hold:</li>
+<li>the credential is active and unexpired;</li>
+<li>the request's tenant is the credential's tenant;</li>
+<li>a graph-addressed request names a graph in the credential's scope, when
+     the scope is set;</li>
+<li>the route's operation is in the credential's operations;</li>
+<li>the issuer is still the tenant's owner, is not disabled, and currently
+     holds, in the tenant, the permission the route checks;</li>
+<li>the tenant is not sealed.</li>
+</ul>
+<p>Revoking an owner's own permission therefore narrows their credentials on the
+  next request. A sealed tenant refuses every operation, and unsealing restores
+  the credentials that have not expired or been revoked meanwhile.
+- <strong>Lifecycle events revoke durably.</strong> Ownership transfer revokes the previous
+  owner's credentials in the tenant. Disabling or deleting a user revokes every
+  credential that user issued. Deleting a tenant revokes every credential in
+  it. Each revocation commits in the same transaction as the event, and the
+  event fails if the revocation fails. A replay of an event that already
+  committed revokes nothing, so a former owner replaying an old transfer
+  cannot end credentials issued since. A revoked credential's bearer is
+  refused at its next request, because every request looks the credential up.
+  Credentials that have expired but are still active are revoked too, so the
+  list shows why they ended. The per-use owner check stays as defence in depth
+  against any owner change that does not go through a transfer.</p>
+<h3 id="use">Use<a class="headerlink" href="#use" title="Permanent link">&para;</a></h3>
+<p>A program exchanges the credential for a short-TTL bearer bound to the
+credential id, through <code>/auth/service-token</code> or a sibling route. As with
+service tokens, there is no refresh token: the program exchanges again.</p>
+<ul>
+<li>The program presents the secret only in the body of the exchange request,
+  never in a URL, a query parameter, a header, or argv. The daemon never logs
+  it from the request.</li>
+<li>The existing service-token exchange rate limiter applies to data-credential
+  exchange.</li>
+<li>There is no rate limit on the query routes today, for any caller. Fact
+  writes are limited only by the tenant's <code>write_rate</code> fact quota, which is off
+  until an operator sets it (operator runbook, "Tenant Resource Quotas"). A
+  data-credential bearer is limited exactly as a human bearer is. This is
+  accepted for this kind.</li>
+<li>Writes count against the tenant's fact quotas, including <code>write_rate</code>,
+  exactly as human writes do. Those quotas are shared with the tenant's human
+  writers.</li>
+</ul>
+<h3 id="secret-delivery">Secret delivery<a class="headerlink" href="#secret-delivery" title="Permanent link">&para;</a></h3>
+<p>The secret is returned exactly once, in the body of the authenticated issue or
+rotate response, over the same loopback-only listener as every other route.
+There is no escrow document, because a tenant owner need not have shell access
+to the daemon host.</p>
+<ul>
+<li>The daemon zeroizes every copy it owns once the response is sent: the
+  generated secret, its encoded form and the response body. Copies held in the
+  HTTP library's transport buffers fall under the in-process-memory caveat
+  below. The daemon never writes the secret to a log line, an audit row, a
+  header, or a later response.</li>
+<li>A replayed issue or rotate request, for example one repeating an idempotency
+  key, never returns the secret again. It may report the credential id and
+  state only.</li>
+<li>If the issue response is lost, the credential still exists and counts
+  against the caps. The owner lists the tenant's credentials and revokes the
+  one whose secret never arrived, identified by its created time and scope and
+  by never showing a last-used time.</li>
+<li><code>wyctl</code> writes it to the file named by <code>--output</code>, created exclusively with
+  mode <code>0600</code>, and refuses to overwrite an existing file. It never prints the
+  secret to stdout or stderr and never takes it in argv. It zeroizes its own
+  buffer after writing.</li>
+<li>A lost secret is rotated, never redisplayed.</li>
+</ul>
+<p>The response travels over loopback inside the host trust boundary described
+above, so a process that can read the loopback traffic or the daemon's memory
+is outside this boundary, as it is for every other secret here.</p>
+<h3 id="blast-radius-and-limits">Blast radius and limits<a class="headerlink" href="#blast-radius-and-limits" title="Permanent link">&para;</a></h3>
+<p>Before this kind existed, no program identity could write a fact. A leaked data
+credential therefore widens what a leak can do: until it expires or is revoked,
+whoever holds it may perform its operations on its graphs, from any process
+that can reach the loopback listener. It cannot erase, repair, change schema,
+manage graphs or reach any control-plane action. Because the tenant's fact
+quotas are shared, a leaked write-capable credential can also exhaust them and
+so block the owner's own writes. Revoking it stops further consumption.
+<code>write_rate</code> recovers as its bucket refills, but rows and bytes committed under
+<code>logical_bytes</code> stay charged: nothing releases committed logical usage today,
+not even <code>forget</code>, so the owner's writes stay blocked until an operator raises
+that limit. Every
+operation it performs is audited with the credential id and its
+issuer, so the owner or a SYSTEM admin can find and revoke it.</p>
+<p>The limits bound that exposure:</p>
+<ul>
+<li><strong>Mandatory expiry.</strong> Every data credential has an expiry, capped by a
+  deployment-wide maximum. The default maximum is 90 days.</li>
+<li><strong>Per-tenant caps.</strong> At most 32 live data credentials per tenant by default,
+  of which at most 8 may be write-capable (holding <code>insert</code>, <code>delete</code> or
+  <code>update</code>). Revoked and expired credentials do not count.</li>
+<li><strong>Fact quotas.</strong> The tenant's existing fact quotas apply to writes made
+  through a credential. An operator who issues write-capable credentials may
+  set <code>write_rate</code> to bound how fast a leaked one can write.</li>
+</ul>
+<p>The expiry maximum and the caps are deployment configuration. An operator may
+lower or raise them, and the store enforces whatever values are configured.
+The fact quotas stay per tenant, configured as they are today.</p>
+<h3 id="audit">Audit<a class="headerlink" href="#audit" title="Permanent link">&para;</a></h3>
+<p>Issue, rotate and revoke are audited with the actor, issuer, tenant,
+operations, graphs and credential id. A lifecycle revocation writes one audit
+row per credential, with action <code>data_credential_lifecycle_revoke</code>: the event's
+actor as subject, the credential's tenant as resource, the credential id as
+origin and the event's request id. Its summary carries the credential's scope
+as the route audits render it, then the acting capacity, the reason
+(<code>ownership_transfer</code>, <code>issuer_disabled</code>, <code>issuer_deleted</code> or
+<code>tenant_deleted</code>), the event's action and the event's audit id. A user delete
+revokes the user's credentials under its own request first; each tenant it
+deletes then revokes whatever else is still active there under that tenant
+delete's request. A tenant delete revokes before it purges, so these audit rows
+are the record of credentials the purge removed. A revocation, by a lifecycle
+event, through the revoke route or of a rotated credential, is recorded at the
+event's time, or at the credential's creation if that is later, so a clock that
+stepped back can make neither the event, the revoke nor the rotation fail. Such
+a revocation shows a time later than its audit row and than the clock that made
+it. A rotation's successor is created at the rotation's time and keeps its
+predecessor's absolute expiry, not its creation plus its lifetime, so after
+such a step it can show a creation earlier than its predecessor's and a span to
+its expiry longer than the lifetime; its generation and predecessor id, not its
+times, order the lineage. Every data operation made through a credential is
+attributed to the credential id and its issuer.</p>
+<h3 id="interaction-with-tenant-deletion">Interaction with tenant deletion<a class="headerlink" href="#interaction-with-tenant-deletion" title="Permanent link">&para;</a></h3>
+<p>A data credential is not "another subject's permission" under the tenant-delete
+refusal rule (#1340). It never blocks a tenant delete, and it is revoked with
+the tenant, as the owner's own permissions are.</p>
+<h3 id="transport">Transport<a class="headerlink" href="#transport" title="Permanent link">&para;</a></h3>
+<p>The loopback-only rule above applies unchanged. Until a remote transport lands
+(#1342), a program using a data credential must run on the daemon host.</p>
+<h2 id="accepted-disclosures">Accepted disclosures<a class="headerlink" href="#accepted-disclosures" title="Permanent link">&para;</a></h2>
+<h3 id="encrypted-stores-operate-in-memory-no-plaintext-on-disk-363">Encrypted stores operate in memory; no plaintext on disk (#363)<a class="headerlink" href="#encrypted-stores-operate-in-memory-no-plaintext-on-disk-363" title="Permanent link">&para;</a></h3>
+<p>Encrypted policy stores operate on an in-memory SQLite connection: the
+AEAD-authenticated canonical file is read through the retained parent directory
+descriptor, deserialized into a <code>:memory:</code> connection, and re-serialized and
+re-encrypted on persist. No plaintext database, journal, WAL/SHM, or temporary
+artifact is ever created on disk
+(<code>wyrelog/policy/store.c</code>: <code>:memory:</code> open at store.c:7205 / store.c:8599,
+deserialize of the decrypted buffer at store.c:7214, canonical read through the
+retained parent directory descriptor at store.c:8534-8538, serialize-and-encrypt
+on persist at store.c:7487-7548). A legacy <code>.wyrelog-clear</code> file is swept if
+present but is never created (best-effort <code>unlinkat</code> at store.c:8509 and on close
+at store.c:8708; the plaintext work-file writers are defined but never called).
+The wyrelog-owned decrypted image buffer is zeroed on close (<code>sodium_memzero</code>
+at store.c:8698-8704). Provider-backed <strong>plaintext</strong> file stores are
+unsupported and fail closed with a policy error <em>before</em> any SQLite open
+(store.c:8584, backed by an always-false pinned-backend probe).</p>
+<p>The accepted limitation: this zeroes only the application-owned decrypted image
+buffer. It is <strong>not</strong> a claim that the decrypted data is wiped or scrubbed from
+all process memory, and it provides <strong>no</strong> cryptographic erasure of SQLite's
+internal page cache. An attacker who can read the daemon's live process memory
+is outside this boundary. (Line numbers reflect the merged tree in this
+worktree; the behavior, not any single line, is the contract.)</p>
+<h3 id="key-rotation-recovery-is-explicit-and-fails-closed-364">Key rotation recovery is explicit and fails closed (#364)<a class="headerlink" href="#key-rotation-recovery-is-explicit-and-fails-closed-364" title="Permanent link">&para;</a></h3>
+<p>Interrupted KeyProvider-root rotation is crash-recoverable, but recovery is
+<strong>explicit, not automatic</strong>. A normal single-root store open does <strong>not</strong>
+auto-recover an interrupted rotation. An operator must run <code>wyctl key recover</code>
+(or its alias <code>wyctl key resume</code>) with both provider roots available, after
+classifying the state with <code>wyctl key status --store …</code>. Recovery either
+resumes an OLD-root store forward to the intended NEW generation or recognizes
+an already-committed NEW result and completes only durable cleanup. When the
+state is <strong>AMBIGUOUS</strong> — neither or both roots authenticate — recovery
+deliberately <strong>fails closed</strong> without changing any canonical byte and <strong>retains
+both roots</strong>. The canonical rename is the linearization point: there is no
+rollback after it. These classifier and recovery paths are unit/library-proven
+(<code>tests/test-policy-store-service-cvk.c</code>), not driven by a packaged e2e; the
+packaged rotation e2e drives only <code>wyctl key rotate</code>.</p>
+<h2 id="in-process-memory-caveat">In-process-memory caveat<a class="headerlink" href="#in-process-memory-caveat" title="Permanent link">&para;</a></h2>
+<p>The subsystem protects secrets at rest (encrypted store, <code>0600</code>/<code>0700</code> custody)
+and in transit (loopback confinement, secret never on argv/stdout/query). It
+does <strong>not</strong> defend against an adversary who already reads the daemon's live
+process memory. While secrets are held in locked, zeroized daemon memory where
+the implementation controls the buffer, copies that libraries such as SQLite
+keep in their own internal caches are outside the subsystem's control (see #363
+above). Live-process-memory disclosure is an accepted out-of-scope threat for
+v1.</p>
+<h2 id="cross-references">Cross-references<a class="headerlink" href="#cross-references" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Operator procedures: <code>docs/operator-runbook.md</code> — "Service Credential
+  Handoff" and "Key Rotation" (including "Interrupted rotation recovery").</li>
+<li>Evidence by platform and proof kind:
+  <code>docs/service-credential-platform-support.md</code>.</li>
+<li>Criterion-to-evidence map: <code>docs/service-credential-traceability.md</code>.</li>
+</ul>
+<blockquote>
+<p>Documentation follow-up (flag only): <code>docs/developer-lifecycle.md:81-90</code>
+carries older prose that predates the in-memory encrypted-store behavior
+described under #363 above and should be reconciled in a separate change. This
+threat model describes the implemented in-memory behavior, which is
+authoritative.</p>
+</blockquote>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "content.code.copy"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>

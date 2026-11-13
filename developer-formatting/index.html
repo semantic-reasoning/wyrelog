@@ -1,0 +1,1622 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Access-control and Datalog fact-store service">
+      
+      
+      
+        <link rel="canonical" href="https://semantic-reasoning.github.io/wyrelog/developer-formatting/">
+      
+      
+        <link rel="prev" href="../windows-artifact-handle-verifier/">
+      
+      
+        <link rel="next" href="../developer-lifecycle/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Formatting - wyrelog</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#c-formatting" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="wyrelog" class="md-header__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            wyrelog
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Formatting
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="wyrelog" class="md-nav__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    wyrelog
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operator-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operator runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../offline-restore-daemon-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore daemon API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-abort-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore abort recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-schema-transition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore schema transitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ga-hardening-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GA hardening gates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth-session-restart-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth restart and JWT keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lobac-v0-tenant-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../engine-session-publication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine-session publication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-admission-enum-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fact admission enum evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../recursive-engine-qualification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secure-duckdb-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secure DuckDB backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-threat-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-platform-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-traceability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential traceability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-artifact-handle-verifier/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows artifact handle verifier
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#migration-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-the-formatter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install the formatter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#format-and-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Format and check
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Format and check">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#multi-line-block-comments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-line block comments
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#committed-pre-commit-hook" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Committed pre-commit hook
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#block-comment-continuation-stars" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Block-comment continuation stars
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Block-comment continuation stars">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-trigger-is-length-equality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The trigger is length equality
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-this-option-and-not-the-narrower-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why this option and not the narrower one
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-is-and-is-not-fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is and is not fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-after-walstart-test-seam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB AFTER_WAL_START seam
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-fixed-wal-lifecycle-evidence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB fixed-WAL evidence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-transaction-abort-inventory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#migration-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install-the-formatter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install the formatter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#format-and-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Format and check
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Format and check">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#multi-line-block-comments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-line block comments
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#committed-pre-commit-hook" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Committed pre-commit hook
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#block-comment-continuation-stars" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Block-comment continuation stars
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Block-comment continuation stars">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-trigger-is-length-equality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The trigger is length equality
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-this-option-and-not-the-narrower-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why this option and not the narrower one
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-is-and-is-not-fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is and is not fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="c-formatting">C formatting<a class="headerlink" href="#c-formatting" title="Permanent link">&para;</a></h1>
+<p>Wyrelog's authoritative C formatter is Uncrustify 0.83.0 through
+<code>tools/format-c</code>, configured by <code>tools/uncrustify.cfg</code>. The exact version
+matters: formatter releases change their output, and this repository's contract
+is that migrated files are exact fixed points.</p>
+<h2 id="migration-state">Migration state<a class="headerlink" href="#migration-state" title="Permanent link">&para;</a></h2>
+<p>The tree is part-way through a migration from GNU indent 2.2.13 to Uncrustify.
+Uncrustify cannot reproduce GNU indent's continuation-indent model for wrapped
+declarations, so the two formatters disagree about roughly 80% of the tracked C
+files. Rather than rewrite them all at once, the migration is incremental:</p>
+<ul>
+<li><code>tools/formatted-files.txt</code> is the ledger of files already migrated.</li>
+<li>Every ledger entry must be an exact fixed point of the pinned formatter.</li>
+<li>Any C file a change touches must be formatted and added to the ledger.</li>
+</ul>
+<p>The migrated set therefore only grows, and touching a file is what migrates it.
+Files nobody edits stay in their old formatting until someone does.</p>
+<h2 id="install-the-formatter">Install the formatter<a class="headerlink" href="#install-the-formatter" title="Permanent link">&para;</a></h2>
+<p>The repository provides a source installer for POSIX development hosts. It
+downloads the pinned release archive, verifies its SHA-256 digest, builds it
+with CMake, and installs beneath an explicit absolute prefix:</p>
+<div class="highlight"><pre><span></span><code>./tools/install-uncrustify.sh<span class="w"> </span>/absolute/path/to/format-tools
+<span class="nb">export</span><span class="w"> </span><span class="nv">PATH</span><span class="o">=</span><span class="s2">"/absolute/path/to/format-tools/bin:</span><span class="nv">$PATH</span><span class="s2">"</span>
+./tools/format-c<span class="w"> </span>--check-version
+</code></pre></div>
+<p>The installer requires <code>curl</code>, <code>cmake</code>, and <code>tar</code>. It rejects a relative
+prefix and a symlink at the requested prefix itself, including one written with
+a trailing <code>/</code>, and it validates the prefix before running any download or
+build command so a rejected prefix leaves no side effects. Symlinks in ancestor
+components remain allowed so conventional paths such as macOS <code>/tmp</code> stay
+usable.</p>
+<p>On Windows, the upstream project publishes a prebuilt binary
+(<code>uncrustify-0.83.0_f-win64.zip</code>) which avoids needing a toolchain locally.</p>
+<p>The expected output is:</p>
+<div class="highlight"><pre><span></span><code>Uncrustify-0.83.0_f
+</code></pre></div>
+<h2 id="format-and-check">Format and check<a class="headerlink" href="#format-and-check" title="Permanent link">&para;</a></h2>
+<p>Format a file in place, then record it in the ledger:</p>
+<div class="highlight"><pre><span></span><code>./tools/format-c<span class="w"> </span>path/to/file.c
+<span class="c1"># add path/to/file.c to tools/formatted-files.txt, keeping the file sorted</span>
+</code></pre></div>
+<p>Check the files a change touches, plus every migrated file:</p>
+<div class="highlight"><pre><span></span><code>./tools/check-format.sh<span class="w"> </span>--changed<span class="w"> </span>origin/main
+</code></pre></div>
+<p>Check only the migrated set:</p>
+<div class="highlight"><pre><span></span><code>./tools/check-format.sh<span class="w"> </span>--ledger
+</code></pre></div>
+<p>Check the prospective index, as the pre-commit hook does:</p>
+<div class="highlight"><pre><span></span><code>./tools/check-format.sh<span class="w"> </span>--staged
+</code></pre></div>
+<p>The formatter runs twice per file. Uncrustify is single-pass, but the contract
+being enforced is that a file is a fixed point, and a second pass is what
+demonstrates the first converged rather than assuming it.</p>
+<h3 id="multi-line-block-comments">Multi-line block comments<a class="headerlink" href="#multi-line-block-comments" title="Permanent link">&para;</a></h3>
+<p>Continuation stars in a block comment align with the star in the opening
+<code>/*</code>. For example:</p>
+<div class="highlight"><pre><span></span><code><span class="w">  </span><span class="cm">/* The first line introduces the comment and continues below.</span>
+<span class="cm">   * The continuation star remains aligned with the opening star. */</span>
+</code></pre></div>
+<p>Uncrustify 0.83.0's default <code>cmt_indent_multi</code> behavior can violate that rule.
+For a long comment with at least two star-prefixed lines after the opener, with
+the last of those lines ending in an inline <code>*/</code>, it can move correctly aligned
+continuation stars one column left. The misaligned result is itself a fixed
+point, so running the formatter twice does not detect the problem.</p>
+<p>The defect was initially observed through two prose-sensitive effects:
+shortening either the first or last line could preserve alignment, and removing
+an apostrophe from one larger comment could do the same. Those observations
+helped isolate the formatter behavior, but neither is a general rule. A smaller
+reproduction showed that absolute line width is not the trigger: long text,
+multiple continuation lines, and an inline closing delimiter are the relevant
+shape. Putting <code>*/</code> on its own line or shortening the comment was a workable
+pre-fix escape hatch.</p>
+<p>Wyrelog pins <code>cmt_indent_multi = false</code> so the correctly aligned form is the
+authoritative fixed point. <code>tools/test-format-tooling.sh</code> embeds the exact
+nine-line reproduction and checks both directions:</p>
+<div class="highlight"><pre><span></span><code>./tools/test-format-tooling.sh
+</code></pre></div>
+<p>The test requires the repository configuration to preserve the canonical
+fixture byte for byte. It also removes exactly that one option in a temporary
+configuration, runs the same pinned Uncrustify binary successfully, and
+requires the historical rewrite to reappear. That negative control invokes
+Uncrustify directly because <code>tools/format-c</code> intentionally always binds the
+repository's <code>tools/uncrustify.cfg</code>.</p>
+<p><code>--ledger</code> and <code>--changed</code> re-verify the whole migrated set, which is what
+catches a formatter or configuration change: altering <code>tools/uncrustify.cfg</code>
+without reformatting the ledger fails CI. <code>--staged</code> deliberately does not scan
+the whole ledger, because it runs on every commit and that cost grows with the
+ledger; CI carries the exhaustive check instead.</p>
+<h2 id="committed-pre-commit-hook">Committed pre-commit hook<a class="headerlink" href="#committed-pre-commit-hook" title="Permanent link">&para;</a></h2>
+<p>Run the idempotent setup helper, or run <code>meson setup</code>, once after cloning:</p>
+<div class="highlight"><pre><span></span><code>./tools/setup-git-hooks.sh
+</code></pre></div>
+<p>Run the helper from the root of the same worktree that contains it. It refuses
+to change Git configuration when the caller and script resolve to different
+repository roots, or when an unpacked source directory merely happens to be
+nested below another Git repository. Meson applies the same physical
+source-root versus Git-top-level check before invoking it.</p>
+<p>The helper sets the repository-local value <code>core.hooksPath=hooks</code>. Git resolves
+that relative path from the active worktree, so each linked worktree executes
+the executable <code>hooks/pre-commit</code> file committed on its checked-out branch.
+The checker also requires the hook and formatting authority scripts to have
+committed index mode <code>100755</code>. There is no copied <code>.git/hooks/pre-commit</code> file
+to become stale.</p>
+<p>Repository-local Git configuration is shared by linked worktrees, so activating
+<code>core.hooksPath=hooks</code> affects all of them immediately. A worktree on a commit
+or branch from before the committed hook was introduced has no gate until it
+is updated or rebased. The setup helper inspects every listed worktree and
+prints an explicit warning with the escaped worktree path when
+<code>hooks/pre-commit</code> is missing or is not executable. Warnings for other
+worktrees do not block setup; the invoking worktree's hook remains a required
+precondition and fails setup when absent. Paths containing spaces remain
+readable; the exceptional case of an embedded newline is rendered as
+<code>byte-hex:</code> followed by the path bytes so one warning stays on one line.</p>
+<p>The hook materializes the checker and formatter from index blobs, so unstaged
+source, checker, and formatter changes cannot affect its result. Git chooses
+the worktree hook before the script can inspect the index, so the committed
+hook intentionally remains a small launcher and is covered by a behavior test.</p>
+<p>Failures distinguish a missing formatter, an incompatible version, a changed
+file that has not been migrated, an invalid ledger, and content that is not a
+fixed point.</p>
+<h2 id="block-comment-continuation-stars">Block-comment continuation stars<a class="headerlink" href="#block-comment-continuation-stars" title="Permanent link">&para;</a></h2>
+<p><code>tools/uncrustify.cfg</code> sets <code>cmt_indent_multi = false</code>. Without it, uncrustify
+0.83.0 pulls correctly aligned continuation stars one column left, so they stop
+lining up under the <code>*</code> of the opening <code>/*</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="w"> </span>  /* The control: two intents really are PENDING before the rename, so a zero
+<span class="gd">-   * count below is the survey failing and not an empty fixture.  This is a</span>
+<span class="gd">-   * seeding check, not a convergence check -- no reconcile pass runs here. */</span>
+<span class="gi">+  * count below is the survey failing and not an empty fixture.  This is a</span>
+<span class="gi">+  * seeding check, not a convergence check -- no reconcile pass runs here. */</span>
+</code></pre></div>
+<p>This is correct alignment being <em>removed</em>, and the result is idempotent. That
+combination is what made it a problem rather than an annoyance: under the old
+config the misaligned form was the only fixed point, so the ledger rule above
+made it the only committable one. Editing a comment into the right shape and
+running <code>./tools/format-c</code> silently undid the edit.</p>
+<h3 id="the-trigger-is-length-equality">The trigger is length equality<a class="headerlink" href="#the-trigger-is-length-equality" title="Permanent link">&para;</a></h3>
+<p>The heuristic is uncrustify's <code>cmt_multi_check_last</code>, documented as: <em>for
+multi-line comments with a <code>*</code> lead, remove leading spaces if the first and
+last lines of the comment are the same length.</em> Length is measured from the
+first non-space character.</p>
+<p>It is <strong>not</strong> line width and <strong>not</strong> comment size. Measured: it reproduces at
+six characters with a single continuation line, and comments of uniform width
+are stable at every width from 30 to 78 columns.</p>
+<p>That one rule explains every workaround people stumble onto — padding the
+opening line, shortening the text, moving the closing <code>*/</code> to its own line,
+even deleting an apostrophe. Each works by breaking the length equality, not
+by satisfying any size or width condition. So advice of the form "avoid long
+comments" is wrong and will leave you bitten by a short one.</p>
+<h3 id="why-this-option-and-not-the-narrower-one">Why this option and not the narrower one<a class="headerlink" href="#why-this-option-and-not-the-narrower-one" title="Permanent link">&para;</a></h3>
+<p><code>cmt_multi_check_last = false</code> names the behaviour exactly and would be the
+tighter fix, but it re-adds the space to comments already committed in the
+pulled-left shape: <strong>25 of the 168 files</strong> in <code>tools/formatted-files.txt</code> stop
+being fixed points under it. <code>cmt_indent_multi = false</code> costs no reformatting —
+all 168 remain exact fixed points — at the price of being broader: it disables
+multi-line comment interior processing generally, including <code>cmt_width</code>,
+keyword substitution and leading-character handling. That breadth is free today
+(<code>cmt_width</code> is 0, <code>cmt_star_cont</code> is false, the <code>cmt_insert_*</code> options are
+empty) but it does pre-empt setting any of them later.</p>
+<h3 id="what-is-and-is-not-fixed">What is and is not fixed<a class="headerlink" href="#what-is-and-is-not-fixed" title="Permanent link">&para;</a></h3>
+<p><code>tools/format-fixtures/block-comment-alignment.c</code> is the reproduction and
+<code>tools/check-comment-alignment.sh</code> asserts it is a fixed point, registered as
+the <code>check-comment-alignment</code> test. It drives the fixture through
+<code>tools/format-c</code> so it inherits the version pin — calling <code>uncrustify</code> directly
+let a wrong-version binary report success, and a vacuous pass is worse than a
+skip because a skip announces itself.</p>
+<p>Note that <code>check-format.sh --ledger</code> already asserts the fixture is a fixed
+point, hard-failing and version-pinned, on every CI main run. That sweep is
+what protects the property; the <code>meson test</code> check is a targeted diagnostic
+that names #872 when it trips.</p>
+<p>Comments already committed in the pulled-left shape stay that way and stay
+fixed points — <strong>128 continuation lines across 25 ledger files</strong> when the
+option was added. Correcting them is cosmetic and was deliberately left out.
+What the option fixes is the direction: newly aligned comments now stay
+aligned.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "content.code.copy"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>

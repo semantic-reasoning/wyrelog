@@ -1,0 +1,1872 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Access-control and Datalog fact-store service">
+      
+      
+      
+        <link rel="canonical" href="https://semantic-reasoning.github.io/wyrelog/recursive-engine-qualification/">
+      
+      
+        <link rel="prev" href="../fact-admission-enum-evolution/">
+      
+      
+        <link rel="next" href="../secure-duckdb-backend/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Recursive engine qualification - wyrelog</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#recursive-engine-qualification" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="wyrelog" class="md-header__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            wyrelog
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Recursive engine qualification
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="wyrelog" class="md-nav__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    wyrelog
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operator-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operator runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../offline-restore-daemon-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore daemon API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-abort-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore abort recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-schema-transition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore schema transitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ga-hardening-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GA hardening gates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth-session-restart-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth restart and JWT keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lobac-v0-tenant-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../engine-session-publication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine-session publication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-admission-enum-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fact admission enum evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#executable-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executable contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routes-and-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routes and configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-and-retry-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure and retry semantics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproduction-and-validation-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproduction and validation commands
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#internal-rule-pack-compiler-capability-1504" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Internal rule-pack compiler capability (#1504)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stored-reader-compatibility-1505" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stored reader compatibility (#1505)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resource-control-inventory-and-downstream-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource-control inventory and downstream work
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secure-duckdb-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secure DuckDB backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-threat-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-platform-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-traceability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential traceability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-artifact-handle-verifier/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows artifact handle verifier
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-formatting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-after-walstart-test-seam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB AFTER_WAL_START seam
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-fixed-wal-lifecycle-evidence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB fixed-WAL evidence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-transaction-abort-inventory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#executable-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executable contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routes-and-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routes and configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-and-retry-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure and retry semantics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproduction-and-validation-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproduction and validation commands
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#internal-rule-pack-compiler-capability-1504" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Internal rule-pack compiler capability (#1504)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stored-reader-compatibility-1505" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stored reader compatibility (#1505)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resource-control-inventory-and-downstream-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource-control inventory and downstream work
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="recursive-engine-qualification">Recursive engine qualification<a class="headerlink" href="#recursive-engine-qualification" title="Permanent link">&para;</a></h1>
+<p>This is the executable capability handoff for #1503 to #1504, #1505 and #1506,
+under #1502, extended with production activation evidence for #1506.
+Production registration and replay now enable the qualified positive recursive
+subset; unsafe negative cycles remain refused.</p>
+<p>The inspected baseline is Wyrelog <code>c462944d</code> and Wirelog
+<code>9cb295ad49280c2562e29148796d1ac7ec69c2ef</code>. Qualification uses that pinned
+source <strong>plus</strong> <code>0002-easy-snapshot-completeness.patch</code>. The patch fixes
+<a href="https://github.com/semantic-reasoning/wirelog/issues/2345">Wirelog #2345</a>.
+An unpatched provider at the same version is not equivalent.</p>
+<h2 id="executable-contract">Executable contract<a class="headerlink" href="#executable-contract" title="Permanent link">&para;</a></h2>
+<p><code>tests/test-engine-recursion.c</code> uses <code>wyl_engine_open_source()</code>, engine-owned
+symbol interning and insert/remove, READ ownership, and
+<code>wyl_engine_snapshot()</code>. This bypasses rule-pack admission intentionally;
+it tests the actual easy facade used by fact engines without pretending the
+HTTP feature is already enabled. Host-owned symbol IDs are mapped back to
+finite vertex indices. Callback capture checks relation, arity, unknown
+vertices, duplicates and every expected/absent tuple.</p>
+<p>A breadth-first search from each vertex is the independent reachability
+oracle. It does not reuse Wirelog output or implement its join algorithm.
+Unary mutually recursive heads are compared to the union of host seed values
+and independently reachable vertices.</p>
+<table>
+<thead>
+<tr>
+<th>Program / case</th>
+<th>Required result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linear closure over <code>(0,1),(1,2)</code></td>
+<td>Exactly <code>(0,1),(1,2),(0,2)</code></td>
+</tr>
+<tr>
+<td>Two-vertex cycle</td>
+<td>Exactly <code>(0,0),(0,1),(1,0),(1,1)</code></td>
+</tr>
+<tr>
+<td>Diamond paths</td>
+<td>One row per pair regardless of derivation count</td>
+</tr>
+<tr>
+<td>Empty input / seed removal</td>
+<td>Empty model, including recursive cycles without support</td>
+</tr>
+<tr>
+<td>64-vertex chain</td>
+<td>Every pair in the host BFS closure, not just a row count</td>
+</tr>
+<tr>
+<td>Nonlinear <code>reachable(X,Z) :- reachable(X,Y), reachable(Y,Z)</code></td>
+<td>Same closure oracle</td>
+</tr>
+<tr>
+<td>Mutual <code>p</code>/<code>q</code>, seeded from <code>seed</code>, expanded along edges</td>
+<td>Exact equal unary sets in both heads</td>
+</tr>
+<tr>
+<td>Insert, retract, alternate support, final support removal, re-add</td>
+<td>Recomputed host model after every mutation</td>
+</tr>
+<tr>
+<td>First empty read, input before first read, dirty and unchanged reads</td>
+<td>Exact fresh collectors for each snapshot</td>
+</tr>
+<tr>
+<td>Additional <code>observed</code> identity head</td>
+<td>Correct relation filtering and complete downstream model</td>
+</tr>
+</tbody>
+</table>
+<p>These finite fixtures qualify direct, mutual and nonlinear positive recursion
+for the tested symbol relations. They do not qualify new value-generating
+operators, every possible recursive program, stratified-negation admission,
+or pack persistence/security integration. Those remain owned by the later
+umbrella units. Fact rebuild semantics may use fresh engines rather than the
+in-place remove path exercised here.</p>
+<h2 id="routes-and-configuration">Routes and configuration<a class="headerlink" href="#routes-and-configuration" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Evidence and limit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>num_workers=0</code></td>
+<td><code>wyl_engine_open_source()</code> maps it to 1; exact-set lifecycle suite</td>
+</tr>
+<tr>
+<td><code>num_workers=1</code></td>
+<td>Production source-engine default; exact-set lifecycle suite</td>
+</tr>
+<tr>
+<td><code>num_workers=2</code></td>
+<td>Explicit host option; exact-set lifecycle suite, including initial and dirty reads</td>
+</tr>
+<tr>
+<td>Two workers with <code>WIRELOG_TDD_MIN_ROWS_PER_WORKER=1</code></td>
+<td>Isolated subprocess exercises seeded 64-vertex programs; asserts runtime diagnostic <code>use_tdd=1</code>, then checks unchanged/removed/re-added models</td>
+</tr>
+<tr>
+<td>Backend</td>
+<td>Easy facade calls <code>wl_backend_columnar()</code>; no backend selection is exposed by the Wyrelog source opener</td>
+</tr>
+<tr>
+<td>Optimizer</td>
+<td>Easy open calls the pinned <code>wirelog_optimize()</code> pipeline; Wyrelog exposes no optimizer-disable option here</td>
+</tr>
+</tbody>
+</table>
+<p>Requested workers alone do not establish TDD dispatch. The forced-route
+subprocess checks the actual dispatch diagnostic; it does not assert every
+stratum uses TDD. Runtime diagnostics also expose legitimate serial fallbacks.
+Unexposed advanced/raw backends, optimizer variants and larger worker counts
+are not qualified by this suite. Native Windows/macOS execution is not
+established merely by local Linux results; #1507 owns the supported product
+matrix. Normal tests do not reference internal Wirelog symbols.</p>
+<h2 id="failure-and-retry-semantics">Failure and retry semantics<a class="headerlink" href="#failure-and-retry-semantics" title="Permanent link">&para;</a></h2>
+<p>All engine cases run in isolated subprocesses. The launcher clears ambient
+evaluator knobs, then supplies each case's settings before process creation;
+child initialization preserves them. This matters on Windows, where GLib and
+the evaluator can use different CRT environment copies. Changing GLib's
+environment after startup is not reliable configuration for the evaluator.
+The TDD cases also receive their threshold and diagnostic flags at startup.</p>
+<p>The join-output-limit case starts a subprocess with
+<code>WIRELOG_JOIN_OUTPUT_LIMIT=1</code>. A real recursive join exceeds the latched
+limit: snapshot must return <code>WYRELOG_E_EXEC</code>, deliver zero callbacks, and not
+latch successful snapshot mode. A second attempt on that engine must still
+fail. A separate subprocess starts without the limit and must recover the full
+independently computed model from the same inputs. On POSIX, the limited child
+additionally clears the environment between attempts, proving the existing
+session retains its limit while a newly opened engine recovers. Windows does
+not rely on a late GLib unset reaching the evaluator's CRT.</p>
+<p>The separate hook-enabled static configuration sets the <strong>real upstream</strong>
+<code>wl_columnar_eval_serial_test_iteration_limit</code> and
+<code>wl_columnar_session_test_iteration_limit</code> to 1. A seeded 13-edge mutual chain
+requires 14 values per head. Before the patch, the actual Wyrelog snapshot
+returned success with only 5 values. The test preserves the stronger contract:
+error, zero callbacks, then exact recovery on the <strong>same engine</strong> after limits
+are restored, followed by an unchanged exact snapshot.</p>
+<p>Cap cases cover configured workers 0/1/2, first evaluation and a forced full
+reevaluation after a previously successful model, each recursive head, an
+independent <code>seed_seen</code> head and an unmatched relation. A separate forced-TDD
+subprocess checks a capped 64-vertex linear closure and same-engine recovery
+with runtime dispatch evidence. The mutual program legitimately falls back
+to serial evaluation even with two configured workers. This verifies
+callback suppression even when the requested output is outside the capped
+stratum or would otherwise emit nothing.</p>
+<p>The downstream patch suppresses easy-facade callbacks while the raw session
+reports <code>eval_stratum_iteration_capped</code>, and converts otherwise-successful
+capped completion to <code>WIRELOG_ERR_EXEC</code>. Existing error mapping takes
+precedence; pending-input and retry state are retained. This does not alter
+the raw backend's continuation behavior, promise rollback to a prior published
+engine, or make all possible errors transactionally atomic. It protects the
+easy snapshot's complete-model contract only, not raw/advanced/STEP facades.</p>
+<p><code>WIRELOG_EASY_SNAPSHOT_COMPLETENESS_VERSION &gt;= 1</code> identifies this narrow
+provider contract. The dependency selector rejects unmarked/older system
+headers and uses the patched pinned fallback, or reports an actionable error
+with <code>--wrap-mode=nofallback</code>. It also refuses an unpatched fallback. The
+provider must ship matching headers and library; the macro is an admission
+contract, not a substitute for behavioral tests. Remove the package patch
+only after a new pinned upstream provides and passes the same contract.</p>
+<h2 id="reproduction-and-validation-commands">Reproduction and validation commands<a class="headerlink" href="#reproduction-and-validation-commands" title="Permanent link">&para;</a></h2>
+<p>Normal shared build (no internal cap hooks):</p>
+<div class="highlight"><pre><span></span><code>meson<span class="w"> </span>setup<span class="w"> </span>builddir-recursion<span class="w"> </span>--force-fallback-for<span class="o">=</span>wirelog<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Ddefault_library<span class="o">=</span>shared<span class="w"> </span>-Denable_tpm<span class="o">=</span>disabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_fact_store<span class="o">=</span>enabled<span class="w"> </span>-Denable_audit<span class="o">=</span>enabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_client<span class="o">=</span>enabled<span class="w"> </span>-Denable_fault_injection<span class="o">=</span>enabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Dduckdb_source<span class="o">=</span>prebuilt
+meson<span class="w"> </span>compile<span class="w"> </span>-C<span class="w"> </span>builddir-recursion<span class="w"> </span>test-engine-recursion
+meson<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-C<span class="w"> </span>builddir-recursion<span class="w"> </span>engine-recursion<span class="w"> </span>--print-errorlogs
+</code></pre></div>
+<p>The cap checks must also run in a <strong>separate static test build</strong>. The define
+must apply to Wirelog library objects and the test, not only to the executable.
+Do not install this instrumented build as a product:</p>
+<div class="highlight"><pre><span></span><code>meson<span class="w"> </span>setup<span class="w"> </span>builddir-recursion-hooks<span class="w"> </span>--force-fallback-for<span class="o">=</span>wirelog<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Ddefault_library<span class="o">=</span>static<span class="w"> </span>-Dc_args<span class="o">=</span>-DWL_SESSION_TEST_HOOKS<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_tpm<span class="o">=</span>disabled<span class="w"> </span>-Denable_fact_store<span class="o">=</span>enabled<span class="w"> </span>-Denable_audit<span class="o">=</span>enabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_client<span class="o">=</span>enabled<span class="w"> </span>-Denable_fault_injection<span class="o">=</span>enabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Dduckdb_source<span class="o">=</span>prebuilt
+meson<span class="w"> </span>compile<span class="w"> </span>-C<span class="w"> </span>builddir-recursion-hooks<span class="w"> </span>test-engine-recursion
+meson<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-C<span class="w"> </span>builddir-recursion-hooks<span class="w"> </span>engine-recursion<span class="w"> </span>--print-errorlogs
+</code></pre></div>
+<p>Repeat the static configuration in another directory with
+<code>-Db_sanitize=address,undefined -Dwirelog:b_sanitize=address,undefined</code>
+and <code>-Dwirelog:b_lto=false</code> so the provider is instrumented too, and run with:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">ASAN_OPTIONS</span><span class="o">=</span><span class="nv">halt_on_error</span><span class="o">=</span><span class="m">1</span>:abort_on_error<span class="o">=</span><span class="m">1</span>:print_summary<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="nv">UBSAN_OPTIONS</span><span class="o">=</span><span class="nv">halt_on_error</span><span class="o">=</span><span class="m">1</span>:abort_on_error<span class="o">=</span><span class="m">1</span>:print_summary<span class="o">=</span><span class="m">1</span>:print_stacktrace<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+meson<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-C<span class="w"> </span>builddir-recursion-asan<span class="w"> </span>engine-recursion<span class="w"> </span>--print-errorlogs
+</code></pre></div>
+<p>Run <code>tests/test-wirelog-dependency-boundary.py</code> with the repository root and
+absolute Meson executable path to exercise accepted and rejected provider
+fixtures, including absent/old completeness markers, forced fallback and
+nofallback refusals. Run relevant engine/rule-pack tests and the full
+feature-enabled repository suite before merging. <code>tools/check-format.sh
+--ledger</code> is a separate required check. Host-specific logs belong in the PR;
+these commands and assertions are the durable reproducible evidence.</p>
+<h2 id="internal-rule-pack-compiler-capability-1504">Internal rule-pack compiler capability (#1504)<a class="headerlink" href="#internal-rule-pack-compiler-capability-1504" title="Permanent link">&para;</a></h2>
+<p><code>wyl_fact_rule_pack_compile_with_mode()</code> accepts an explicit private language
+mode. <code>WYL_FACT_RULE_PACK_POSITIVE_RECURSION</code> permits direct, mutual and
+nonlinear positive recursion with stratified negation. The existing
+<code>compile()</code> and <code>compile_canonical()</code> entry points select
+<code>WYL_FACT_RULE_PACK_ACYCLIC</code> for compatibility callers. Production registration,
+replay and restore explicitly select positive recursion (#1506). This option
+is neither authorization nor a storage format marker.</p>
+<p>The grammar remains finite-domain: variables, existing scalar constants and
+opaque compound references range over input values and rule constants. There
+are no arithmetic expressions, aggregates, constructors or value-generating
+extensions. Each positive recursive component denotes its least fixed point
+with set semantics. A positive self-cycle without input has an empty model.
+Durable rows enter the renderer's separate <code>_input</code> relations and are unioned
+with derived rows in customer heads; duplicate support does not duplicate
+query tuples. Derived rows remain query results, not durable fact batches.</p>
+<p>Dependency nodes are the resolved schema identities used by rendering, so
+qualified and unqualified aliases cannot conceal cycles. SCC connectivity
+uses both positive and negative edges. A negative edge within an SCC is
+rejected; a negative edge to an independent lower stratum is accepted. For
+example, recursive <code>reachable</code> may feed
+<code>visible(X,Y):-reachable(X,Y),!blocked(X,Y).</code> when <code>blocked</code> is independent.
+All existing relation, arity, type, variable safety, string and size checks run
+before dependency analysis. Acyclic canonical text and digest inputs remain
+byte-identical in both modes.</p>
+<p>The opted path reports <code>rule_pack_negative_cycle</code>. <code>rule_index</code> and
+<code>atom_index</code> select the first internal negative edge in source order;
+<code>cycle_rules</code> lists the ascending unique rules having internal edges in that
+edge's SCC. It excludes seed-only rules and unrelated components. The first
+listed rule can precede <code>rule_index</code>. Owned head/body namespace and relation
+fields identify the resolved endpoints separately, even when names contain
+dots. Legacy callers retain the original <code>rule_pack_cycle</code> diagnostics.</p>
+<p><code>fact-rule-pack</code> asserts literal rendered/canonical text, negative-cycle
+diagnostics under schema permutation, and exact engine results with one
+worker. Its real parser witness confirms recursive strata in the complete
+rendered program, exercising the revised compile backstop. The unreachable
+legacy recursive-stratum invariant failure is not artificially injected.
+<code>fact-replay</code> additionally verifies that rejected negative-cycle replacements
+leave the stored pack version, digest and rules unchanged. Normal replay
+accepts valid stored positive recursive packs and refuses invalid packs.
+No test-only raw compiler bypass is added.</p>
+<h2 id="stored-reader-compatibility-1505">Stored reader compatibility (#1505)<a class="headerlink" href="#stored-reader-compatibility-1505" title="Permanent link">&para;</a></h2>
+<p><code>wyl_fact_rule_pack_compile_stored()</code> consumes counted canonical rows, version
+and digest plus the exact selected schemas and an explicit #1504 mode. It
+rechecks identity and the complete joined byte limit, compiles with schema and
+safety validation, then requires byte-identical canonical rows. No usable
+output is returned on failure. Unknown capability is an explicit invalid
+request. Positive recursion refused by an acyclic reader is distinguished from
+unsafe negative cycles through diagnostic-only positive-mode analysis; that
+analysis never publishes a program. Normal replay and restore explicitly pass
+<code>POSITIVE_RECURSION</code>; historical-reader tests retain <code>ACYCLIC</code>.</p>
+<p>The v1 ordered rows and digest already represent recursive programs, so no
+marker, migration or rewrite was introduced. The low-level writer remains
+structural and transactional; it is not a semantic admission API. Its byte
+limit includes separators, matching the compiler. The loader checks row counts
+and byte limits before copying text, and refuses corrupt latest versions
+instead of falling back. A failed second-row insertion leaves neither header
+nor rows visible after reopening the policy database.</p>
+<p><code>fact-rule-pack-store</code> proves exact known-answer acyclic/recursive identities
+across upgrade, close/reopen and SQLite policy backup/restore, mixed ordinary
+and recursive graphs, corruption refusal and acyclic replacement preserving
+recursive history. The standalone historical fixture compiles byte-exact
+pre-#1504 compiler/renderer sources; a provenance test checks their SHA-256 and
+Git blob hashes. Its new read-only SQL adapter and current Wirelog dependency
+are explicitly narrower evidence than a full old daemon. Current production
+replay proves recursive recovery across restart and graph-local refusal of
+invalid stored packs.</p>
+<p>The secure-bridge <code>fact-offline-restore-stage-replay</code> test checks acyclic
+and recursive identity preservation without source/stage/pack changes.
+Fact bundles do not transport policy rows; policy backup is a separate part of
+the matching stopped-writer backup set. See the operator runbook's
+<a href="../operator-runbook/#rule-pack-storage-compatibility-and-downgrade">downgrade procedure</a>.</p>
+<h2 id="resource-control-inventory-and-downstream-work">Resource-control inventory and downstream work<a class="headerlink" href="#resource-control-inventory-and-downstream-work" title="Permanent link">&para;</a></h2>
+<p>The pin already contains memory admission/governor machinery and internal
+<code>wl_session_options_t</code> fields for memory governor and evaluation control,
+including work/cancellation reporting and controlled-session routes. Public
+advanced options also contain spill/batch configuration. This is not evidence
+that no controls exist upstream.</p>
+<p>Wyrelog's source opener configures workers and eager plan/session construction
+through the easy API; it does not attach those internal evaluation controls.
+The <code>WIRELOG_MEMORY_BUDGET</code> environment policy and join-output limit are not
+an end-to-end per-query work/time/cancellation guarantee. Eager construction
+also does not mean eager fixed-point evaluation. Static rule/atom/byte caps,
+result limits, subprocess watchdogs and measured runtime do not bound join
+work or intermediate growth.</p>
+<h1 id="1504-consumes-the-qualified-positive-recursion-envelope-while-retaining">1504 consumes the qualified positive-recursion envelope while retaining<a class="headerlink" href="#1504-consumes-the-qualified-positive-recursion-envelope-while-retaining" title="Permanent link">&para;</a></h1>
+<p>schema/type/variable safety and adding signed negative-cycle checks. #1505
+owns canonical storage and downgrade contracts. #1506 activates registration,
+replay/publication, inference authorization, mutation/restore and isolation.
+A demonstrated defect has a narrow tracked dependency (Wirelog #2345);
+completion of the unrelated resource-control umbrella #1817 is not required.</p>
+<h2 id="production-activation-checks-1506">Production activation checks (#1506)<a class="headerlink" href="#production-activation-checks-1506" title="Permanent link">&para;</a></h2>
+<p><code>fact-recursive-replay</code> compares relation-qualified exact sets with the shared independent
+BFS oracle after append/retract/forget, alternate derivations and durable heads.
+It covers empty seeds, cyclic inputs, nonlinear and mutual rules, stratified
+negation, restart and supplied-store restore replay. The secure stage-reader
+suite separately verifies recursive restore validation and unchanged artifact
+and pack identities; validation itself does not run inference.</p>
+<p>Deterministic query barriers cover first-pack publication, schema replacement
+(two symbol columns to one int64 column), and seal draining on success/error.
+The query decoder's namespace, relation, version and ordered column metadata
+must match the pinned engine. A mismatch fails before evaluation. The engine
+continues to own the generation's pack identity and input/model state.</p>
+<p><code>daemon-http-facts</code> exercises recursive registration, exact closure, repeated
+reads, retract and forget through HTTP. Human query-only/infer-only denials
+cover both base and derived relations. <code>daemon-http-recursive-credentials</code>
+uses the test-only engine archive to count actual evaluator entries while
+checking operation bits, issuer permissions, tenant/graph scope and lifecycle.
+The ordinary production-linked credential tests remain in place. Denied
+requests must not increment the evaluator counter; authorized controls do.</p>
+<p>In the static hook build above, also run:</p>
+<div class="highlight"><pre><span></span><code>meson<span class="w"> </span>compile<span class="w"> </span>-C<span class="w"> </span>builddir-recursion-hooks<span class="w"> </span>test-fact-replay
+builddir-recursion-hooks/tests/test-fact-replay<span class="w"> </span>-p<span class="w"> </span>/fact-replay/recursive/lazy-retry
+</code></pre></div>
+<p>This sets actual provider iteration limits during base and derived production
+queries, requires an error and no JSON, then checks the complete set twice on
+the same published generation after restoring limits. Synthetic snapshot
+failure in the seal test proves admission cleanup only. No test or publication
+step moves inference ahead of authorization, and no automatic rollback after
+lazy evaluation failure is promised.</p>
+<h2 id="product-qualification-1507">Product qualification (#1507)<a class="headerlink" href="#product-qualification-1507" title="Permanent link">&para;</a></h2>
+<p>The product qualification baseline is Wyrelog
+<code>6e052590f8e8fd57cf6d41f6c9be0b9e615e3f76</code> (including merged #1506 and the
+subsequent checkpoint-WAL fixes). The Wirelog pin above is unchanged, with both
+wrap patches applied. The test and workflow changes in the #1507 PR are part
+of the candidate: baseline binaries alone do not exercise the new test.</p>
+<p><code>recursive-rule-packs-e2e</code> launches the actual production daemon and uses
+<code>wyctl</code> and its linked client for graph/schema registration, fact mutations,
+pack replacement and queries. The only direct HTTP operations are bootstrap
+and authentication. It checks response graph/relation/columns, rejects
+truncation and duplicate rows, and compares every tuple with an independent
+BFS expected set. Queries use the registered allowlisted name (<code>reachable</code>);
+rule definitions may qualify it as <code>shop.reachable</code>.</p>
+<p>The fixture creates owner-only temporary keys and stores, clears ambient
+<code>WIRELOG_*</code> evaluator settings, bounds child calls and readiness, and stops
+and reaps the daemon before removing the complete temporary tree.
+Windows execution additionally applies and reads back protected owner ACLs,
+sets the token-reader's required read-only attribute, and uses a dedicated
+console process group with Ctrl+Break. Forced termination is failed-test cleanup
+and cannot authorize a backup. The focused <code>daemon-signals</code> test checks early
+and repeated requests and handler/source cleanup. Its stopped backup includes
+the matching policy store, key, audit store and entire fact
+root. It changes both facts and the active pack before restoring to the
+original paths in place (retaining provisioned directory bindings), then proves the earlier facts and recursive behavior returned.
+This exercises the runbook's <strong>file-level disaster recovery</strong>, not the separate
+journaled <code>fact restore commit</code> protocol. The latter remains covered by the
+secure restore suites and their platform restrictions.</p>
+<h3 id="reproducible-commands-and-acceptance-mapping">Reproducible commands and acceptance mapping<a class="headerlink" href="#reproducible-commands-and-acceptance-mapping" title="Permanent link">&para;</a></h3>
+<p>Use a feature-enabled build; missing test registrations are failures, not
+qualification passes. A standard prebuilt profile is:</p>
+<div class="highlight"><pre><span></span><code>meson<span class="w"> </span>setup<span class="w"> </span>build-qualification<span class="w"> </span>--force-fallback-for<span class="o">=</span>wirelog<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_tpm<span class="o">=</span>disabled<span class="w"> </span>-Denable_client<span class="o">=</span>enabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_fact_store<span class="o">=</span>enabled<span class="w"> </span>-Denable_audit<span class="o">=</span>enabled<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-Denable_fault_injection<span class="o">=</span>enabled<span class="w"> </span>-Dduckdb_source<span class="o">=</span>prebuilt
+meson<span class="w"> </span>compile<span class="w"> </span>-C<span class="w"> </span>build-qualification
+meson<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-C<span class="w"> </span>build-qualification<span class="w"> </span>--no-rebuild<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>engine-recursion<span class="w"> </span>fact-rule-pack<span class="w"> </span>fact-rule-pack-store<span class="w"> </span>fact-recursive-replay<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>fact-runtime<span class="w"> </span>daemon-http-facts<span class="w"> </span>daemon-http-recursive-credentials<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>recursive-rule-packs-e2e<span class="w"> </span>--logbase<span class="w"> </span>recursive-focused<span class="w"> </span>--print-errorlogs
+meson<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-C<span class="w"> </span>build-qualification<span class="w"> </span>--suite<span class="w"> </span>wyrelog<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--logbase<span class="w"> </span>recursive-full<span class="w"> </span>--print-errorlogs
+python3<span class="w"> </span>tools/report-inactive-suites.py<span class="w"> </span>build-qualification
+sh<span class="w"> </span>tools/check-format.sh<span class="w"> </span>--ledger
+</code></pre></div>
+<p>For source/secure qualification, configure another directory with
+<code>-Dduckdb_source=subproject -Denable_secure_duckdb_bridge=enabled</code> and the same
+feature flags, then also run <code>fact-offline-restore-stage-replay</code> and the full
+suite. <code>report-inactive-suites.py --strict</code> must pass in this profile; the
+prebuilt profile intentionally omits the secure bridge and cannot qualify its
+restore routes. Run the static hook configuration above, including
+<code>fact-recursive-replay</code>, separately with and without ASan/UBSan. Sanitizer
+instrumentation of Wyrelog does not imply instrumentation of prebuilt DuckDB.</p>
+<table>
+<thead>
+<tr>
+<th>Required behavior</th>
+<th>Concrete test / exact assertion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Direct, mutual, nonlinear recursion; empty, duplicate, cyclic inputs; nontrivial chain</td>
+<td><code>engine-recursion</code>: independent BFS for 64 vertices, workers 0/1/2; <code>fact-recursive-replay</code> <code>/recursive/program-forms</code>, <code>/recursive/durable-lifecycle</code></td>
+</tr>
+<tr>
+<td>Stratified negation and rejected negative SCC diagnostics</td>
+<td><code>fact-rule-pack</code>; <code>/fact-replay/recursive/stratified-negation</code>; E2E requires <code>rule_pack_negative_cycle</code> and no consumed version</td>
+</tr>
+<tr>
+<td>Two edges produce exactly three reachable tuples</td>
+<td>E2E literal expected set <code>{(a,b),(b,c),(a,c)}</code>, plus base relation query</td>
+</tr>
+<tr>
+<td>Retraction, alternate support, durable heads, forget, unchanged queries</td>
+<td>E2E checks exact sets after each operation; durable replay additionally checks relation-qualified internal callbacks</td>
+</tr>
+<tr>
+<td>Concurrent replacement and failed prepublication build</td>
+<td><code>/fact-replay/recursive/generation-races</code>, <code>fact-runtime</code>; pinned generation and previous usable engine assertions</td>
+</tr>
+<tr>
+<td>Real lazy iteration failure, no successful incomplete response, retry</td>
+<td>Static hook <code>engine-recursion</code> iteration-cap cases and <code>/fact-replay/recursive/lazy-retry</code>; absent hooks are not equivalent evidence</td>
+</tr>
+<tr>
+<td>Startup and matching backup/restore</td>
+<td>E2E stopped backup, changed live facts/pack, restored earlier model; <code>/fact-replay/recursive/restore-model</code>; secure <code>fact-offline-restore-stage-replay</code></td>
+</tr>
+<tr>
+<td>Downgrade and stored identity</td>
+<td><code>fact-rule-pack-store</code> with frozen legacy-reader executable; <code>rule-pack-legacy-fixture-provenance</code></td>
+</tr>
+<tr>
+<td>Human/data query and infer permissions, base reads, issuer checks</td>
+<td><code>daemon-http-facts</code>, <code>daemon-http-recursive-credentials</code>; denial asserts evaluator-entry counter unchanged, positive control increments it</td>
+</tr>
+<tr>
+<td>Graph/tenant isolation and seal coordination</td>
+<td><code>/fact-replay/recursive/durable-lifecycle</code>, <code>/recursive/query-seal</code>, credential tests; deterministic barriers cover success and error drain</td>
+</tr>
+<tr>
+<td>Growth and tenant-seal observations</td>
+<td>E2E JSON records for chain/cycle/fanout at 8/16/32 vertices; exact sets checked before and after seal/unseal</td>
+</tr>
+</tbody>
+</table>
+<h3 id="platform-and-backend-evidence-policy">Platform and backend evidence policy<a class="headerlink" href="#platform-and-backend-evidence-policy" title="Permanent link">&para;</a></h3>
+<p>Both <code>ci-pr.yml</code> and <code>ci-main.yml</code> explicitly run recursive tests in the POSIX
+prebuilt and source/secure profiles and in feature-enabled Windows profiles.
+The prebuilt profile also runs the full feature-enabled suite.
+They retain <code>recursive-full</code>, <code>recursive-prebuilt</code>, <code>recursive-secure</code>, <code>recursive-windows</code>,
+<code>recursive-sanitizer</code> and <code>recursive-hooks</code> Meson logs on success and failure.
+The focused sanitizer job now includes the separately registered
+<code>fact-recursive-replay</code>; <code>fact-replay</code> alone deliberately excludes that group.
+A separate static hook build runs real iteration failure/retry under sanitizers.</p>
+<table>
+<thead>
+<tr>
+<th>Platform/profile</th>
+<th>Required evidence and limitations</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linux prebuilt, bridge off</td>
+<td>Native semantic/credential tests, executable lifecycle, full feature-enabled suite; secure bridge tests are intentionally absent</td>
+</tr>
+<tr>
+<td>Linux source, secure bridge on</td>
+<td>Same recursive group plus secure restore validation; full feature-enabled suite</td>
+</tr>
+<tr>
+<td>macOS prebuilt and source/secure</td>
+<td>Named recursive group and executable lifecycle in hosted CI; Linux results cannot fill these rows</td>
+</tr>
+<tr>
+<td>Windows prebuilt and source/secure</td>
+<td>Named engine, compiler, durable replay, credential and <code>recursive-rule-packs-e2e</code> executable lifecycle tests in native hosted CI; actual successful outcomes are required for qualification</td>
+</tr>
+<tr>
+<td>Hook-enabled static Linux</td>
+<td>Real serial/TDD iteration-cap failures and complete retry, including production lazy retry</td>
+</tr>
+<tr>
+<td>ASan/UBSan Linux</td>
+<td>Focused recursive group and static hook run; any conditional skip is reported explicitly</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Qualification requires actual successful hosted outcomes, including native
+Windows executable lifecycle evidence, attached to #1502/#1507.</strong>
+The acceptance outcome ledger and exact revision/log links are recorded in
+<a href="https://github.com/semantic-reasoning/wyrelog/issues/1507">#1507</a> and
+<a href="https://github.com/semantic-reasoning/wyrelog/issues/1502">#1502</a>.
+CI wiring is a requirement to collect evidence, not a successful run. Do not
+close either issue merely because local Linux checks pass. Journaled restore
+commit remains Linux-only; macOS begin/prepare does not establish commit or
+resume support. See the <a href="../fact-offline-restore-runbook/">restore runbook</a>.</p>
+<h3 id="interpreting-the-measurements">Interpreting the measurements<a class="headerlink" href="#interpreting-the-measurements" title="Permanent link">&para;</a></h3>
+<p>Each JSON record includes shape, vertex count, seed/result cardinalities,
+configured production worker count (one), first query, unchanged query and
+sequential tenant-seal elapsed seconds. Query time includes <code>wyctl</code> startup,
+client/HTTP, authorization and result serialization. The fanout is a star;
+chain results grow as <code>n*(n-1)/2</code>, cycle results as <code>n*n</code>, and fanout results as
+<code>n-1</code>. Exact expected sets, not those formulas, determine test success.</p>
+<p>Graphs accumulate in the dedicated tenant during this run, so seal timing
+includes all graphs created so far. These are sequential observations, not
+worst-case latency bounds or proof of cancellation during inference. The
+separate deterministic query/seal barrier fixture supplies overlap evidence.
+No timing threshold is asserted; subprocess and Meson timeouts are watchdogs.
+Unchanged queries may reuse a model. Neither fast repeated reads nor the
+registration size/response limits bound intermediate evaluation work.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "content.code.copy"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>

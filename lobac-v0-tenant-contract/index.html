@@ -1,0 +1,1600 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Access-control and Datalog fact-store service">
+      
+      
+      
+        <link rel="canonical" href="https://semantic-reasoning.github.io/wyrelog/lobac-v0-tenant-contract/">
+      
+      
+        <link rel="prev" href="../auth-session-restart-model/">
+      
+      
+        <link rel="next" href="../engine-session-publication/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Tenant lifecycle contract - wyrelog</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#lobac-tenant-lifecycle-contract" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="wyrelog" class="md-header__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            wyrelog
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Tenant lifecycle contract
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="wyrelog" class="md-nav__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    wyrelog
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operator-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operator runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../offline-restore-daemon-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore daemon API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-abort-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore abort recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-schema-transition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore schema transitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ga-hardening-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GA hardening gates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth-session-restart-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth restart and JWT keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#default-tenant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default Tenant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tenant-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tenant Lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Tenant Lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#migrating-self-service-users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migrating self-service users
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wire-format-error-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wire-Format Error Codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#isolation-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Isolation Rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API Surface
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../engine-session-publication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine-session publication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-admission-enum-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fact admission enum evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../recursive-engine-qualification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secure-duckdb-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secure DuckDB backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-threat-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-platform-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-traceability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential traceability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-artifact-handle-verifier/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows artifact handle verifier
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-formatting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-after-walstart-test-seam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB AFTER_WAL_START seam
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-fixed-wal-lifecycle-evidence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB fixed-WAL evidence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-transaction-abort-inventory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#default-tenant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default Tenant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tenant-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tenant Lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Tenant Lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#migrating-self-service-users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migrating self-service users
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wire-format-error-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wire-Format Error Codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#isolation-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Isolation Rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API Surface
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="lobac-tenant-lifecycle-contract">LoBAC Tenant Lifecycle Contract<a class="headerlink" href="#lobac-tenant-lifecycle-contract" title="Permanent link">&para;</a></h1>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>LoBAC keeps <code>__wr_default</code> as the built-in tenant for compatibility, and
+adds an explicit tenant registry in the policy store for additional
+tenants. A tenant must be present and unsealed in that registry before
+the daemon accepts login, decision, policy mutation, or authenticated
+audit requests for it.</p>
+<p>The lower-level session API validates tenant syntax and binds the
+selected tenant into the session. The HTTP daemon remains authoritative
+for registry membership, sealed state, and cross-tenant isolation.</p>
+<h2 id="default-tenant">Default Tenant<a class="headerlink" href="#default-tenant" title="Permanent link">&para;</a></h2>
+<p>The default tenant literal is:</p>
+<div class="highlight"><pre><span></span><code>__wr_default
+</code></pre></div>
+<p>It is exposed internally as <code>WYL_TENANT_DEFAULT</code>
+(<code>wyrelog/wyl-common-private.h</code>) and is seeded during policy-store schema
+creation and bootstrap template installation. The default tenant cannot
+be sealed.</p>
+<h2 id="tenant-lifecycle">Tenant Lifecycle<a class="headerlink" href="#tenant-lifecycle" title="Permanent link">&para;</a></h2>
+<p>Tenant rows live in the policy store <code>tenants</code> table. Creation accepts an armed <code>wr.tenant.create</code> or <code>wr.tenant.manage</code> permission
+on <code>__wr_default</code>, through a live MFA-verified human session bound to that
+default tenant. The new <code>wr.tenant.create</code> permission is a critical control-plane
+permission in the policy-store catalog; normal direct grants and permission
+state projection work with the existing signed templates.</p>
+<p><code>wr.tenant.create</code> grants no global listing or lifecycle authority. Listing
+requires <code>wr.tenant.manage</code>; show, transfer, seal, unseal and delete use their
+existing global-management or current-owner checks. Owners may unseal only
+owner-sealed tenants. Tenant-bound bearers remain restricted to their tenant,
+even when the same human owns multiple tenants.</p>
+<p>Creation checks live session and permission authority inside the policy write
+lease, before both mutation and existing-name responses. A create-only caller
+may retry its own tenant name, but a name owned by another human returns
+<code>403 tenant_denied</code> without owner metadata or additional grants. An existing
+name does not bypass permission revocation. Explicit global management keeps
+its existing idempotent behavior for any existing name.</p>
+<p>For a new tenant, the creator remains its owner and receives the existing
+<code>wr.system_admin</code> role scoped only to that tenant. Creation audit events record
+<code>creator</code> in the existing acting-capacity field (<code>deny_reason</code>) for self-service
+creation, or <code>system_admin</code> for global management; <code>deny_origin</code> has no seal
+origin on creation. Global management takes precedence when both capabilities
+are allowed. Guard, evaluator and audit failures never authorize a fallback.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Target parameter</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/tenants</code></td>
+<td>none</td>
+<td>Lists known tenants and sealed state.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tenants/create</code></td>
+<td><code>name</code></td>
+<td>Creates a tenant idempotently.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tenants/seal</code></td>
+<td><code>name</code></td>
+<td>Marks a tenant inactive.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tenants/unseal</code></td>
+<td><code>name</code></td>
+<td>Reactivates a sealed tenant.</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/tenants/delete</code></td>
+<td><code>name</code> and canonical <code>request_id</code></td>
+<td>Deletes a sealed tenant after owner/global authority and remaining-holder checks.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="migrating-self-service-users">Migrating self-service users<a class="headerlink" href="#migrating-self-service-users" title="Permanent link">&para;</a></h3>
+<p>Existing <code>wr.tenant.manage</code> grants intentionally retain global authority. An
+upgrade does not silently narrow them. To make a registered human a self-service
+creator, an MFA-authenticated administrator grants and arms <code>wr.tenant.create</code>
+and revokes any direct global <code>wr.tenant.manage</code> grant:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Supply your daemon URL and administrator token file.</span>
+wyctl<span class="w"> </span>--daemon-url<span class="w"> </span><span class="s2">"</span><span class="nv">$URL</span><span class="s2">"</span><span class="w"> </span>policy<span class="w"> </span>permission-grant<span class="w"> </span>--subject<span class="w"> </span><span class="s2">"</span><span class="nv">$USER</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--perm<span class="w"> </span>wr.tenant.create<span class="w"> </span>--scope<span class="w"> </span>__wr_default<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--access-token-file<span class="w"> </span><span class="s2">"</span><span class="nv">$ADMIN_TOKEN</span><span class="s2">"</span><span class="w"> </span>--guard-timestamp<span class="w"> </span><span class="s2">"</span><span class="nv">$NOW_US</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--guard-loc-class<span class="w"> </span>trusted<span class="w"> </span>--guard-risk<span class="w"> </span><span class="m">0</span>
+wyctl<span class="w"> </span>--daemon-url<span class="w"> </span><span class="s2">"</span><span class="nv">$URL</span><span class="s2">"</span><span class="w"> </span>policy<span class="w"> </span>permission-transition<span class="w"> </span>--subject<span class="w"> </span><span class="s2">"</span><span class="nv">$USER</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--perm<span class="w"> </span>wr.tenant.create<span class="w"> </span>--scope<span class="w"> </span>__wr_default<span class="w"> </span>--event<span class="w"> </span>grant<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--access-token-file<span class="w"> </span><span class="s2">"</span><span class="nv">$ADMIN_TOKEN</span><span class="s2">"</span><span class="w"> </span>--guard-timestamp<span class="w"> </span><span class="s2">"</span><span class="nv">$NOW_US</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--guard-loc-class<span class="w"> </span>trusted<span class="w"> </span>--guard-risk<span class="w"> </span><span class="m">0</span>
+wyctl<span class="w"> </span>--daemon-url<span class="w"> </span><span class="s2">"</span><span class="nv">$URL</span><span class="s2">"</span><span class="w"> </span>policy<span class="w"> </span>permission-revoke<span class="w"> </span>--subject<span class="w"> </span><span class="s2">"</span><span class="nv">$USER</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--perm<span class="w"> </span>wr.tenant.manage<span class="w"> </span>--scope<span class="w"> </span>__wr_default<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--access-token-file<span class="w"> </span><span class="s2">"</span><span class="nv">$ADMIN_TOKEN</span><span class="s2">"</span><span class="w"> </span>--guard-timestamp<span class="w"> </span><span class="s2">"</span><span class="nv">$NOW_US</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--guard-loc-class<span class="w"> </span>trusted<span class="w"> </span>--guard-risk<span class="w"> </span><span class="m">0</span>
+</code></pre></div>
+<p>Also remove global roles that confer <code>wr.tenant.manage</code> if the user is meant to
+have no global authority. Revoking a direct grant does not revoke role-derived
+permissions. The user's own MFA default-tenant token can then repeatedly run
+<code>wyctl tenant create --name ...</code> with the usual daemon, token and guard options;
+no temporary global grant is needed. A dormant or revoked creation grant is
+rejected, including for an existing owned name. Listing all tenants remains an
+administrator operation; owners can inspect a known owned name with
+<code>wyctl tenant show --name ...</code>.</p>
+<p><code>tenant=</code> in query strings remains the request/auth tenant. Lifecycle
+targets use <code>name=</code> so target selection cannot be confused with the
+credential tenant.</p>
+<p><code>POST /tenants/seal</code> additionally requires a strict JSON body no larger than
+1024 bytes:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"version"</span><span class="p">:</span><span class="s2">"1"</span><span class="p">,</span><span class="nt">"request_id"</span><span class="p">:</span><span class="s2">"&lt;canonical 27-character KSUID&gt;"</span><span class="p">}</span>
+</code></pre></div>
+<p>The body request ID is the caller's durable idempotency key and is separate
+from the per-attempt <code>X-Wyrelog-Request-Id</code> response header. An exact authorized
+retry returns the original <code>changed</code> result without another audit, receipt,
+authority transition, or service-session invalidation. A fresh key against an
+already stable sealed tenant is an audited no-op with <code>changed:false</code>.</p>
+<p>Tenant lifecycle state is also decision state. Every registered tenant is
+projected into the policy engine's <code>session_state(scope, state)</code> input: an
+unsealed tenant projects <code>active</code>, and a sealed tenant projects <code>closed</code>.
+Create, seal, and unseal publish a complete durable snapshot before returning
+success, so subsequent decisions observe the new state without a daemon
+restart or manual policy reload. If a legacy human-session row uses the same
+textual identifier as a tenant, the tenant row is authoritative for that
+scope; the human row and its event history remain durable and become visible
+again only if that identifier is no longer owned by the tenant registry.</p>
+<p>Private templates that omit <code>session_state</code> remain compatible only with the
+pristine built-in <code>__wr_default</code> tenant and no durable human session states.
+Once another tenant or human state exists, opening such a template fails
+closed. A declared <code>session_state</code> relation must have exactly two non-compound
+symbol columns.</p>
+<p>Tenant seal does not perform the graph-drain lifecycle owned by #549.
+<code>active</code>, <code>sealing</code>, or <code>unsealing</code> therefore returns
+<code>503 tenant_lifecycle_coordination_required</code> without mutation. If an earlier
+seal receipt is no longer authoritative after unseal/reseal or another
+lifecycle transition, the old key returns <code>409 tenant_seal_superseded</code> and the
+body includes <code>recorded_lifecycle_generation</code>,
+<code>recorded_sealed_generation</code>, <code>current_lifecycle_generation</code>, and
+<code>current_sealed_generation</code>. Other key collisions return
+<code>409 tenant_seal_conflict</code>; authority unavailability returns 503, and durable
+receipt/audit/terminal-row corruption returns 500.</p>
+<h2 id="wire-format-error-codes">Wire-Format Error Codes<a class="headerlink" href="#wire-format-error-codes" title="Permanent link">&para;</a></h2>
+<p>The HTTP gate emits stable string codes in the JSON <code>error</code> field:</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>HTTP status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tenant_invalid</code></td>
+<td>400 or 401</td>
+<td>The request or credential names a syntactically invalid or unknown tenant.</td>
+</tr>
+<tr>
+<td><code>tenant_sealed</code></td>
+<td>400 or 409</td>
+<td>The tenant exists but is sealed and cannot accept new authenticated work.</td>
+</tr>
+<tr>
+<td><code>tenant_denied</code></td>
+<td>403</td>
+<td>The authenticated principal's tenant does not match the tenant declared on the request, or a non-default tenant attempts to mutate another tenant's scope.</td>
+</tr>
+</tbody>
+</table>
+<p>For <code>tenant_invalid</code> the status is 401 when the failure is detected while
+resolving credentials, and 400/403 when it is detected while validating the
+request body or query parameters.</p>
+<p><code>tenant_sealed</code> never uses 401 (#1032). A credential that resolves against a
+sealed tenant has not failed authentication -- the tenant is closed -- so the
+bearer gate answers 409, matching <code>graph_sealed</code>. Answering 401 would tell a
+client to re-authenticate, and the prescribed refresh-and-retry succeeds at
+the refresh and fails identically at the retry, so a correct client would
+never reach a terminal state. The request-tenant and login gates still answer
+400 when a sealed tenant is named in the request rather than the credential.</p>
+<h2 id="isolation-rules">Isolation Rules<a class="headerlink" href="#isolation-rules" title="Permanent link">&para;</a></h2>
+<p>Sessions, JWT bearer credentials, refresh-token rotation, decisions,
+audit queries, and policy mutations carry a tenant binding. The daemon
+fails closed before mutation or decision when:</p>
+<ul>
+<li>the request tenant is unknown or syntactically invalid;</li>
+<li>the tenant exists but is sealed;</li>
+<li>a live session or JWT claim is bound to a different tenant;</li>
+<li>a non-default tenant attempts to mutate policy for a different scope.</li>
+</ul>
+<p>The default tenant retains legacy administration behavior and may manage
+other tenant scopes through the guarded policy-mutation APIs.</p>
+<h2 id="public-api-surface">Public API Surface<a class="headerlink" href="#public-api-surface" title="Permanent link">&para;</a></h2>
+<p>The public tenant symbols remain stable:</p>
+<ul>
+<li><code>wyl_client_tenant_select</code> (<code>wyrelog/client.h</code>)</li>
+<li><code>wyl_client_dup_tenant</code> (<code>wyrelog/client.h</code>)</li>
+<li><code>wyl_login_req_set_tenant</code> (<code>wyrelog/session.h</code>)</li>
+<li><code>wyl_login_req_get_tenant</code> (<code>wyrelog/session.h</code>)</li>
+<li><code>wyl_session_dup_tenant</code> (<code>wyrelog/session.h</code>)</li>
+</ul>
+<p>These APIs accept syntactically valid tenant identifiers. Registry
+membership and sealed-state checks are enforced by the daemon and policy
+store paths that perform authenticated work.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "content.code.copy"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,1935 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Access-control and Datalog fact-store service">
+      
+      
+      
+        <link rel="canonical" href="https://semantic-reasoning.github.io/wyrelog/developer-lifecycle/">
+      
+      
+        <link rel="prev" href="../developer-formatting/">
+      
+      
+        <link rel="next" href="../duckdb-after-walstart-test-seam/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Lifecycle constraints - wyrelog</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#developer-lifecycle-constraints" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="wyrelog" class="md-header__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            wyrelog
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Lifecycle constraints
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="wyrelog" class="md-nav__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    wyrelog
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operator-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operator runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../offline-restore-daemon-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore daemon API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-abort-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore abort recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-schema-transition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore schema transitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ga-hardening-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GA hardening gates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth-session-restart-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth restart and JWT keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lobac-v0-tenant-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../engine-session-publication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine-session publication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-admission-enum-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fact admission enum evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../recursive-engine-qualification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secure-duckdb-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secure DuckDB backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-threat-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-platform-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-traceability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential traceability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-artifact-handle-verifier/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows artifact handle verifier
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-formatting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#wirelog-dependency-builds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wirelog dependency builds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#raw-fork" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Raw fork()
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fact-root-writer-lease" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fact-root writer lease
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#provider-backed-store-path-threat-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provider-backed store path threat model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy-store-provider-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Policy-store provider ownership
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-after-walstart-test-seam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB AFTER_WAL_START seam
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-fixed-wal-lifecycle-evidence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB fixed-WAL evidence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-transaction-abort-inventory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#wirelog-dependency-builds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wirelog dependency builds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#raw-fork" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Raw fork()
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fact-root-writer-lease" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fact-root writer lease
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#provider-backed-store-path-threat-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provider-backed store path threat model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#policy-store-provider-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Policy-store provider ownership
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="developer-lifecycle-constraints">Developer lifecycle constraints<a class="headerlink" href="#developer-lifecycle-constraints" title="Permanent link">&para;</a></h1>
+<h2 id="wirelog-dependency-builds">Wirelog dependency builds<a class="headerlink" href="#wirelog-dependency-builds" title="Permanent link">&para;</a></h2>
+<p>Wyrelog disables Wirelog's dependency benchmarks by default; they are not
+needed to build or install Wyrelog. Standalone Wirelog builds retain their
+benchmark default, and a consumer can opt in with
+<code>-Dwirelog:benchmarks=true</code>.</p>
+<p>Meson applies the pinned wrap patch when downloading a fresh subproject.
+For a Wirelog checkout populated before this overlay was added, apply it
+once without resetting unrelated local changes:</p>
+<div class="highlight"><pre><span></span><code><span class="n">git</span> <span class="n">-C</span> <span class="n">subprojects</span><span class="p">\</span><span class="n">wirelog</span> <span class="n">apply</span> <span class="p">-</span><span class="n">-check</span> <span class="p">..\</span><span class="n">packagefiles</span><span class="p">\</span><span class="n">wirelog</span><span class="p">\</span><span class="n">0001-optional-benchmarks</span><span class="p">.</span><span class="n">patch</span>
+<span class="n">git</span> <span class="n">-C</span> <span class="n">subprojects</span><span class="p">\</span><span class="n">wirelog</span> <span class="n">apply</span> <span class="p">..\</span><span class="n">packagefiles</span><span class="p">\</span><span class="n">wirelog</span><span class="p">\</span><span class="n">0001-optional-benchmarks</span><span class="p">.</span><span class="n">patch</span>
+</code></pre></div>
+<p>Inspect overlapping local edits if the check fails; do not discard them.
+Meson's <code>subprojects packagefiles --apply</code> does not apply wrap <code>diff_files</code>.
+Existing build directories also retain cached options across reconfiguration.
+Disable dependency benchmarks explicitly before rebuilding such a directory:</p>
+<div class="highlight"><pre><span></span><code><span class="n">meson</span> <span class="n">configure</span> <span class="n">builddir</span> <span class="n">-Dwirelog</span><span class="p">:</span><span class="n">benchmarks</span><span class="p">=</span><span class="n">false</span>
+</code></pre></div>
+<h2 id="raw-fork">Raw <code>fork()</code><a class="headerlink" href="#raw-fork" title="Permanent link">&para;</a></h2>
+<p>Wyrelog deliberately installs no <code>pthread_atfork</code> handlers. After a process
+with any live Wyrelog handle, store, provider, lease, logger, or error state
+calls raw <code>fork()</code>, the child must immediately call an <code>exec*</code> function or
+<code>_exit()</code>.</p>
+<p>Before <code>exec*</code> or <code>_exit()</code>, the child must not call any Wyrelog API, close or
+free inherited Wyrelog state, format a Wyrelog error, emit a log, call GLib
+cleanup that can reach Wyrelog state, or call C <code>exit()</code>. The child may use
+only async-signal-safe preparation required for <code>exec*</code>; if <code>exec*</code> fails it
+must terminate with <code>_exit()</code>.</p>
+<p>Policy-store lease descriptors use <code>CLOEXEC</code>. Windows lease handles are
+created non-inheritable. This makes <code>fork()</code> followed immediately by <code>exec*</code>
+safe without child-side lifecycle processing while preserving the live
+parent's exclusive store lease.</p>
+<h2 id="fact-root-writer-lease">Fact-root writer lease<a class="headerlink" href="#fact-root-writer-lease" title="Permanent link">&para;</a></h2>
+<p>A handle opened with a non-empty fact root is a writer and must acquire one
+exclusive root lease before it opens or creates the policy store. The lock
+order is fact-root writer lease, policy-store lease, graph-authority mutex,
+runtime engine ownership, then DuckDB. Ordered shutdown destroys graph
+engines and closes the policy store before releasing the root lease. Every
+failed handle open follows the same release order.</p>
+<p>The fact root is a bootstrap prerequisite: daemon setup may create the empty
+owner-only root before handle open. Lease acquisition then opens and pins the
+root with the secure graph resolver; later lease decisions never trust an
+unchecked configured pathname. After opening the policy store, handle startup
+binds its graph resolver under the graph-authority mutex only when the lease
+authorizes that resolver's exact native root identity. This authorization
+precedes policy schema creation and startup graph replay. Startup readiness
+uses scratch policy and audit stores and deliberately passes no fact root to
+its handle, so it neither acquires write authority nor opens a writable fact
+store. The runtime handle is the first startup consumer that acquires
+authority.</p>
+<p>On POSIX, the exclusive non-blocking <code>flock()</code> is held on the verified root
+directory descriptor itself. There is no sidecar and no fallback to a
+process-associated <code>fcntl()</code> lock. A process-local device/inode registry
+closes alias gaps before the kernel lock attempt. On Windows, a fixed
+<code>.wyrelog-writer-lock</code> file is opened relative to the pinned root handle with
+share mode zero. The file must be a zero-length, single-link, non-reparse
+regular file protected by the exact owner-only ACL and must retain the named
+file identity recorded under that root.</p>
+<p>The Windows artifact is permanent coordination metadata and is never removed
+or replaced during normal release or recovery. Its presence is not evidence
+of a live owner; the share-mode open is. POSIX and Windows both rely on handle
+close for orderly release and operating-system process teardown for crash
+release. Operators must not delete, truncate, chmod, relink, or otherwise
+"recover" the authority object. A live conflict returns <code>WYRELOG_E_BUSY</code>;
+malformed or replaced authority returns <code>WYRELOG_E_POLICY</code>; native failures
+return <code>WYRELOG_E_IO</code>. Operator-visible startup errors use those fixed,
+path-free error strings.</p>
+<p>Lease verification also proves whether another secure resolver has the same
+native root identity. This is the required contract for backup, restore, and
+future maintenance entry points. It prevents cooperating writers and detects
+persistent root replacement; it does not make DuckDB's later pathname opens
+descriptor-bound. That remaining same-owner pathname window belongs to #544.</p>
+<h2 id="provider-backed-store-path-threat-model">Provider-backed store path threat model<a class="headerlink" href="#provider-backed-store-path-threat-model" title="Permanent link">&para;</a></h2>
+<p>Every provider-backed store, encrypted or plaintext, must be placed in an
+operator-owned, non-replaceable namespace. The resolved parent and every path
+ancestor must be protected from rename, reparse, and write operations by any
+principal whose trust is lower than the operating-system identity running
+Wyrelog for the store's entire lifetime, from before open until close has
+completed. This is a deployment requirement, not an optional hardening
+measure.</p>
+<p>The store lease provides alias normalization, retained-parent identity
+verification, cooperating-process exclusion tied to the lease sidecar/store
+lease identity, and stale-close prevention. It does not pin or continuously
+match the canonical SQLite store inode. After acquisition, Wyrelog pins its
+own canonical reads, encrypted persistence, and clear-work helper cleanup to
+the resolved parent authority.</p>
+<p>SQLite does not expose a portable <code>openat()</code> VFS. It opens an encrypted
+clear-work database, or a plaintext provider-backed canonical database,
+through a lease-resolved pathname. Parent-identity checks bracket only the
+initial main-database <code>sqlite3_open_v2()</code> call. They can detect a persistent
+parent replacement across that initial bracket, but not a transient
+swap-and-restore inside it. Later VFS opens for journal, WAL, SHM, temporary,
+and other files remain pathname-derived throughout the store lifetime and are
+not pinned or bracketed by those checks. Persistent or transient namespace
+changes after the post-open check are therefore also unprotected. The lease
+does not make an attacker-writable namespace safe at any point in the store
+lifetime.</p>
+<h2 id="policy-store-provider-ownership">Policy-store provider ownership<a class="headerlink" href="#policy-store-provider-ownership" title="Permanent link">&para;</a></h2>
+<p><code>wyl_policy_store_open_with_options()</code> consumes a non-null KeyProvider state
+on every outcome once both <code>opts</code> and <code>out_store</code> have passed entry validation.
+It copies the supplied vtable by value. A successful open retains the state
+until store close; a failure releases it before returning. The caller must not
+invoke provider operations or <code>wipe</code> after transfer. If
+<code>keyprovider_state_free</code> is non-null, the caller must not release the state:
+Wyrelog invokes <code>wipe</code> exactly once when that callback is available, then
+invokes <code>keyprovider_state_free</code> exactly once.</p>
+<p>A providerless configuration has null vtable, state, and free callback. Any
+other combination is configured and requires non-null state and vtable, with
+all of <code>probe</code>, <code>seal</code>, <code>unseal</code>, <code>derive</code>, <code>wipe</code>, and <code>clear_sealed_blob</code>.
+The state free callback is the only optional member. Configured plaintext
+stores call <code>probe</code> exactly once, call no <code>derive</code>, and retain the provider for
+the same close-time lifecycle as encrypted stores.</p>
+<p>If <code>keyprovider_state_free</code> is null, Wyrelog still consumes the logical
+provider state and invokes <code>wipe</code> exactly once when available, but does not
+deallocate its backing storage. That storage must outlive a successful store
+handle. The caller may reclaim it only after store close, or after a failed
+open returns; its contents must not be reused as KeyProvider state. Invalid
+partial configurations are released using only the lifecycle callbacks they
+provide; an unavailable callback is invoked zero times.</p>
+<p>An invalid entry where <code>opts</code> or <code>out_store</code> is null transfers nothing and
+invokes no lifecycle callback. If store lease acquisition returns
+<code>WYRELOG_E_BUSY</code>, no operational KeyProvider callback (<code>probe</code>, <code>seal</code>,
+<code>unseal</code>, or <code>derive</code>) is invoked; the transferred state's lifecycle cleanup
+still follows the available-callback rules above.</p>
+<p><code>seal</code> callers pass an output initialized to <code>{ NULL, 0 }</code>. Failure preserves
+that empty value. A successful output is released only through the producing
+provider's <code>clear_sealed_blob</code>, which securely wipes its length, uses the
+matching allocator to free it, and resets it to <code>{ NULL, 0 }</code>. Clearing a null
+or already-cleared blob is safe.</p>
+<p>Key rotation performs no transfer for an empty path, null option, or aliased
+non-null old/new state. After basic validation it consumes both states on every
+outcome. The old provider is retained by the internal store while the new
+provider is validated and used. An old-provider failure, including
+<code>WYRELOG_E_BUSY</code>, also releases the new provider. Rotation uses the old store's
+snapshotted CVK secure runtime for locked scratch. The runtime supplied through
+<code>new_opts</code>, if any, is not adopted or invoked by this transient operation.</p>
+<p>The clear SQLite work database is disposable rotation staging. After schema
+and snapshot validation in <code>BEGIN IMMEDIATE</code>, an existing CVK is unsealed with
+the old provider and re-sealed under a distinct new-provider binding with its
+generation incremented; the 32-byte CVK and every credential verifier remain
+unchanged. The staged transaction commits before an encrypted candidate is
+prepared with the new database key. A fully written, file-synced and closed
+temporary file is then renamed over the canonical file. That rename is the
+sole rotation linearization point: a failure before it leaves the old canonical
+file byte-for-byte unchanged, while a failure of directory durability after it
+is logged as a warning and the already-committed rotation returns success.
+Provider handoff and secret-buffer cleanup occur while the exclusive lease is
+still held, and close never performs a second persist.</p>
+<p>The post-rename warning contains no key, CVK, credential or path material. It
+means atomic visibility has committed successfully but power-loss durability of
+the directory entry could not be confirmed; it must never be translated into a
+failure that invites an unsafe retry with the old root.</p>
+<p>Crash recovery follows the same boundary: a crash before rename leaves the old
+root authoritative; a crash after rename leaves the new root authoritative.
+The operation is deliberately not crash-resumable or idempotently retryable in</p>
+<h1 id="354-because-a-caller-cannot-infer-which-root-won-after-losing-the-response">354 because a caller cannot infer which root won after losing the response.<a class="headerlink" href="#354-because-a-caller-cannot-infer-which-root-won-after-losing-the-response" title="Permanent link">&para;</a></h1>
+<p>Operators must retain both roots and follow the explicit recovery procedure
+tracked by #364.</p>
+<h2 id="service-credential-verification-key">Service credential verification key<a class="headerlink" href="#service-credential-verification-key" title="Permanent link">&para;</a></h2>
+<p>The service credential CVK is created only by the issuance path. The
+existing-only path never creates authority: an empty store returns
+<code>WYRELOG_E_NOT_FOUND</code>, while credentials without the singleton CVK row are a
+policy-corruption failure. Both paths reject an outer SQLite transaction and
+serialize their top-level <code>BEGIN IMMEDIATE</code> transaction with a per-store
+mutex. A newly generated or unsealed CVK becomes observable through the
+store's borrowed cache only after the database commit succeeds.</p>
+<p>The cache is a locked, store-owned 124-byte version-1 envelope. It is wiped,
+unlocked, and freed at store close. The envelope binds its fixed magic,
+domain, version, singleton slot, generation, provider binding, and 32-byte CVK
+at fixed byte offsets. The provider binding is derived under the KeyProvider
+label <code>wyrelog.service-credential.cvk.provider-binding.v1</code> and a separately
+domain-separated keyed BLAKE2b transcript. Provider outputs are always
+released with the producing provider's <code>clear_sealed_blob</code> callback.</p>
+<p>The optional CVK runtime table is shallow-copied at store open. Its callbacks
+and <code>data</code> pointer are borrowed; no ownership is transferred. The callback
+code and data context must outlive the store and remain valid through the end
+of <code>wyl_policy_store_close()</code>.</p>
+<p>Root-provider rotation never creates a missing CVK. A missing row with existing
+credentials is policy corruption; a missing row with no credentials follows
+the legacy database-key-only rotation path without CVK derive, unseal, seal or
+random-number callbacks. Existing rows require a non-overflowing generation
+and a new provider binding distinct from the old binding.</p>
+<h2 id="service-lifecycle-audit-reconciliation">Service lifecycle audit reconciliation<a class="headerlink" href="#service-lifecycle-audit-reconciliation" title="Permanent link">&para;</a></h2>
+<p>Service-principal and service-credential operations succeed when their local
+SQLite savepoint commits the authority state, lifecycle event, sanitized audit
+row, and pending audit intention together. The external Wirelog projection and
+DuckDB audit mirror are eventual, post-commit work; mirror failure must never be
+translated into lifecycle failure, secret loss, or secret re-issuance.</p>
+<p>Audit-enabled handles reconcile pending and failed intentions explicitly and
+again while opening a persistent handle. A failed projection records a retry
+attempt and remains eligible for idempotent reconciliation. There is no
+automatic lifecycle adapter: callers that require a live mirror invoke the
+private reconciler only after the lifecycle call returns. The daemon
+single-writer contract applies while lifecycle mutations and reconciliation
+share a policy store.</p>
+<p>Reconciliation classifies the complete Wirelog projection for an audit ID as
+absent, exact, or inconsistent. Only an absent projection may be inserted and
+only an exact projection may be skipped. A partial, duplicate, mismatched, or
+unexpected optional fact is policy corruption: reconciliation fails the
+intention without writing DuckDB or marking it committed. Normal projection
+errors roll back every input inserted by that attempt, so a partial projection
+is never a valid retry checkpoint.</p>
+<h2 id="public-service-credential-http-contract">Public Service Credential HTTP contract<a class="headerlink" href="#public-service-credential-http-contract" title="Permanent link">&para;</a></h2>
+<p>The daemon publishes the Service Credential API as one feature-gated route
+set. The management routes are <code>/service-principals</code> and
+<code>/service-credentials</code>; the audit-enabled build adds the loopback-only
+<code>POST /auth/service-token</code>, and the fact-store-enabled build adds the
+<code>/service-credential-operations</code> collection plus its <code>reconcile</code> and <code>recover</code>
+actions. A build without an owning feature does not register that feature's
+route or a compatibility stub.</p>
+<p>The exact method/template matrix contains eight base routes. Audit alone adds
+one (nine total), fact store alone adds three (eleven total), and enabling both
+produces twelve. <code>/service-principals</code> and <code>/service-credentials</code> are the only
+intentional prefix registrations. The operation collection, its two actions,
+and <code>/auth/service-token</code> are singleton registrations protected by the shared
+exact-registration adapter.</p>
+<p>The exact management paths are <code>POST</code> and <code>GET /service-principals</code>,
+<code>POST /service-principals/{subject}/disable</code>, <code>POST</code> and <code>GET
+/service-principals/{subject}/credentials</code>, <code>GET /service-credentials/{id}</code>,
+<code>POST /service-credentials/{id}/rotate</code>, and <code>DELETE
+/service-credentials/{id}</code>. The fact-store-enabled operation paths are <code>GET
+/service-credential-operations</code>, <code>POST
+/service-credential-operations/reconcile</code>, and <code>POST
+/service-credential-operations/recover</code>. No alias, legacy, hidden, or alternate
+route is supported. Reconciliation and recovery return sanitized, non-secret
+operation evidence; they never return a credential secret.</p>
+<p>Path ownership is decided before method selection, authentication, body or
+query parsing, logging, limiter consumption, storage access, locks, or
+mutation. A trailing slash, deeper or doubled segment, suffix collision, or
+other unknown shape therefore returns the generic <code>404 {"error":"not_found"}</code>
+for every method and credential/body combination. Once a canonical template
+matches, an unsupported method returns <code>405 method_not_allowed</code>; identifier,
+query, and body validation then retain their route-specific semantic errors.
+In-tree client and CLI callers construct only the canonical paths above and do
+not rely on prefix aliases or trailing-slash normalization.</p>
+<p>All eleven management routes share one authorization envelope. They are
+SYSTEM-profile, actual-listener-and-peer loopback endpoints that accept only an
+<code>Authorization: Bearer</code> human session. The session must be live, ACTIVE,
+MFA-assured, and rooted in the sole resolver tenant <code>__wr_default</code>; refreshing
+a token does not create MFA assurance. Every request supplies strict guard
+context and is authorized again while its READ or WRITE service-authority lease
+is held. Principal routes require <code>wr.service_principal.manage</code>; credential and
+operation routes require <code>wr.service_credential.manage</code>.</p>
+<h3 id="service-authority-write-terminalization">Service-authority WRITE terminalization<a class="headerlink" href="#service-authority-write-terminalization" title="Permanent link">&para;</a></h3>
+<p>A daemon service-authority WRITE owner acquires resources in the order lease
+(rank 1), engine session (rank 2), policy-store pin (rank 3), request context
+(rank 4), and registry state (rank 5). Every terminal path unwinds that order
+in reverse, closes any authority transaction and maintenance claim, and then
+explicitly finalizes the WRITE lease. A route must not access the borrowed
+policy store after finalization and must not attach a success status, header,
+or body before finalization succeeds. The wrapper destructor is only a
+non-asserting fail-closed emergency path; production owners explicitly
+finalize, and repeated finalization returns the first cached result without
+entering terminal release again.</p>
+<p>Terminal release checks the store pin, lock rank, and sole-owner accounting.
+Any inconsistency latches service authentication unavailable for the remaining
+daemon process lifetime. Cleanup failure dominates the route result and emits
+HTTP 500 with <code>policy_write_cleanup_failed</code>, even when the primary operation
+had otherwise succeeded or failed differently. A durable mutation may already
+have committed before cleanup failed, so this response never represents a
+rollback or proves that no commit occurred. Diagnostics contain only the
+static owner identifier, the primary internal result when known, the primary
+HTTP status and error code, and the numeric cleanup result; they must not
+include credentials, tokens, actors, tenants, request paths, or bodies.</p>
+<p>There is deliberately no in-process reset path for the unavailable latch.
+Human authentication, health, and ordinary decision handling remain available,
+but subsequent service-authority WRITE acquisition fails closed. Only daemon
+restart, which constructs a fresh handle and authority coordinator, restores
+service-management availability after the underlying fault is corrected.</p>
+<p>The management bearer tenant and the managed target tenant are deliberately
+different concepts. Credential and operation requests select their target with
+the <code>tenant</code> query parameter while authentication stays rooted in
+<code>__wr_default</code>. Principal management is global: an omitted principal tenant or
+an explicit <code>__wr_default</code> is accepted, and a non-default principal tenant is a
+usage error. For credential IDs and operation records, the authority derives
+the tenant from stored credential or journal state and requires an exact match
+with the selected target. Unknown IDs, missing authoritative records, and
+cross-target probes therefore share the same not-found response and do not
+leak existence across tenants.</p>
+<p>Client callers that manage a non-default target use the additive
+<code>*_for_tenant</code> credential and operation APIs. The legacy methods remain ABI
+compatible and select <code>__wr_default</code> as their target, so they fail closed
+rather than silently borrowing the authenticated client's tenant for a
+non-default management operation. Issue already carries its target explicitly
+in <code>WylClientServiceCredentialIssueRequest.tenant_id</code>.</p>
+<p>Service-token exchange accepts only a strict JSON credential ID/secret body
+over actual loopback transport. Non-loopback requests, malformed or oversized
+bodies, unknown credentials, and limiter denials fail closed with sanitized
+responses. A successful response contains only the short-lived access token;
+session metadata, tenant data, credential secrets, and raw request material are
+never echoed.</p>
+<h3 id="service-bearer-decision-authority">Service bearer decision authority<a class="headerlink" href="#service-bearer-decision-authority" title="Permanent link">&para;</a></h3>
+<p>The sole bearer resolver retains its service-authentication READ lease only for
+<code>POST /decide</code>. It cannot infer that from the request -- it takes no endpoint
+argument -- so the caller states it: <code>resolve_bearer_session</code> carries a retain
+flag, and only <code>decide_handler</code> passes TRUE. After the signed token, live
+service session, access-token record, ACTIVE registry tuple and tenant have
+matched exactly, the retained lease is transferred into a request-unique,
+one-shot decision authority that holds it through request-context insertion,
+policy query, context removal and terminal release.</p>
+<p>Every other bearer caller releases inside the resolver as before, through the
+checked terminal release that reports a failed release and emits the
+RESOLVER_RELEASED checkpoint. Two of them -- the guarded-session action and the
+service management front door -- then acquire a READ lease of their own on the
+same thread, which the coordination authority refuses while one is already
+held, so retaining for them would turn every service-bearer management request
+into <code>WYRELOG_E_BUSY</code>. Human decisions keep using the public <code>wyl_decide()</code>
+path.</p>
+<p><code>POST /decide</code> permits a human bearer holding
+<code>wr.service_principal.manage</code> to inspect a same-tenant <code>svc:</code> subject. A service
+bearer remains self-subject only, and human subjects remain self-subject only.
+The caller's management permission is checked before the target decision, so a
+failed check does not reveal the target's policy result. The legacy
+<code>session_token</code> query parameter contains the policy scope, such as the
+credential tenant, rather than the bearer token.</p>
+<p><code>tools/check-daemon-bearer-resolver-structure.py</code> pins both halves: the retain
+mode at each of the six call sites, and the shape of the retained lease itself
+-- <code>service_lease</code> is assigned in exactly one place, its address reaches
+exactly one consumer, and it has exactly one terminal release, the last-resort
+one in the auth context destructor.</p>
+<p>Service lifecycle state is projected from the durable <code>service_principals</code>
+records into <code>service_principal_state</code>; it is never borrowed from the human
+<code>principal_states</code> table. The resolver authority contributes an ephemeral
+<code>service_request_auth(context, subject, tenant)</code> row. Signed policy permits a
+service decision only when that exact subject is active, the requested
+permission is in <code>approved_data_plane_permission</code>, the subject has the
+permission, and the credential tenant is the requested scope. Cleanup failure
+poisons the engine pair, and terminal-release uncertainty leaves the response
+DENY.</p>
+<p>Which walls apply to a service bearer. <code>decide_authenticated_request</code> routes a
+validated service bearer to <code>wyl_decide_with_service_authority</code>, which never
+enters the <code>wyl_decide</code> core. The transient <code>principal_state</code> injection
+(<code>#740</code> WALL 1) and the transient <code>perm_state</code> injection (<code>#762</code> WALL 3) are
+therefore unreachable on <code>POST /decide</code> for service bearers, and are not
+needed: signed policy substitutes <code>service_principal_state(U, "active")</code> for
+the first and <code>approved_data_plane_permission(P)</code> for the second. Both
+substitutions are stronger than what they replace, because both are evaluated
+inside the signed artifact rather than asserted from C. The other decide sites
+in the daemon still call <code>wyl_decide</code>, so both walls remain live there.</p>
+<p><code>service_armed</code> carries <code>!frozen(S)</code> on the same relation as
+<code>allow_guard_base</code>, and first among the same three negated atoms, so a <code>frozen</code>
+row covering the scope denies a service decide. Two limits are worth stating
+plainly. Nothing in the library writes <code>frozen/1</code> yet -- the relation is
+populated only by tests -- so there is no operator freeze control today and
+this gate is inert until that wiring lands. And the scope key differs between
+the two paths: <code>resource_id</code> comes from <code>session_token</code>, which is the session
+id for a human decide and the credential tenant for a service decide, so
+freezing a tenant denies service traffic at that tenant and does not touch
+human traffic. This is parity of the rule, not parity of the operator action.</p>
+<p><code>service_armed</code> carries <code>session_state</code>/<code>session_active</code>, on the same relation
+as <code>allow_guard_base</code>. <code>S</code> is the credential tenant, and every tenant has a
+scope state without any seeding:
+<code>wyl_handle_load_policy_store_session_states</code> projects the effective scope
+state, and <code>wyl_policy_store_foreach_effective_scope_state</code> synthesizes that
+from the <code>tenants</code> table itself -- <code>active</code> while <code>sealed</code> is 0, <code>closed</code>
+once sealed -- falling back to <code>session_states</code> only for scopes that are not
+tenants. A sealed tenant therefore denies at this rule as well as at the
+upstream tenant-active gate.</p>
+<p><code>armed/3</code> is deliberately excluded and must stay excluded. It is unreachable
+for a <code>svc:</code> subject, so requiring it would make <code>service_allow_bool</code>
+identically false rather than stricter. The template records this reasoning
+inline.</p>
+<p>That rests on engine sessions being mutually exclusive across threads:
+<code>wyl_engine_session_acquire</code> holds <code>engine_session_mutex</code> for the session's
+lifetime, and both <code>wyl_decide</code> and <code>wyl_decide_with_service_authority</code> hold
+one across their whole insert-probe-remove window, so the transient
+<code>perm_state</code> row that <code>wyl_decide</code> injects cannot be observed by another
+decide. The lock is a <code>GRecMutex</code>, so it permits same-thread nesting -- no
+decide path re-enters a decide inside that window, and the depth guard enforces
+reverse-order release. If the engine ever gains concurrent sessions, <code>armed/3</code>
+becomes race-dependent rather than false, which makes the exclusion more
+necessary, not less.</p>
+<p>A service DENY carries no deny reason. <code>wyl_decide_with_service_authority</code>
+leaves the deny tags NULL, so the response body reports <code>"deny_reason":null</code>
+whatever the cause. This is deliberate: a machine caller gets no map of the
+policy structure. Assertions that expect a named reason on this path are
+testing the human contract by mistake.</p>
+<p>On the HTTP wire, <code>session_token</code> remains the legacy <code>/decide</code> name for the
+policy scope; a service request must set it to the credential tenant. An
+invalid bearer returns 401. A valid service bearer with no matching role, a
+foreign scope, or a control-plane permission returns 200 with DENY. Granting a
+matching role can change the same token to ALLOW; revoking that role changes it
+back to DENY. A service subject passed directly to public <code>wyl_decide()</code> has no
+resolver-created authority and therefore cannot use this service-only rule.</p>
+<p>Each successful exchange carries an owned copy of its exact service authority
+identity (<code>session_id</code>, <code>jti</code>, credential ID and generation, principal, tenant,
+and expiry) from activation through the Soup response lifecycle. A failure
+after activation but before response handoff, Soup's <code>request-aborted</code>
+terminal signal, or destruction of an activated response identity that received
+neither terminal signal retires only that exact registry/session/access tuple.
+The last case is the fail-closed fallback for transports that discard a message
+without reporting a terminal signal. An already-absent exact tuple makes
+repeated cleanup harmless; a partial, cross-linked, or mismatched tuple leaves
+all observed state intact and latches service authentication unavailable.
+Soup's <code>request-finished</code> signal means the response was written and preserves
+the live tuple until explicit invalidation, key rotation, expiry retirement, or
+daemon shutdown.</p>
+<p>An aborted delivery does not refund its rate-limit permit and is not an
+idempotent exchange checkpoint. A caller retry performs a new exchange with a
+distinct session ID and JTI. Service bearer state is process-local, so restart
+does not restore an earlier live tuple; normal expiry retirement removes the
+registry entry and both live companions together. The successful JSON response
+buffer remains length-owned by the daemon while Soup writes it and is
+zeroized before release on both finished and aborted response paths.</p>
+<p>Client code that carries a credential secret or access token must first accept
+only a canonical literal loopback URL. Hostnames, ambiguous numeric addresses,
+IPv4-mapped IPv6, zone identifiers, userinfo, non-loopback authorities, and
+authority-changing redirects are rejected before the secret-bearing request is
+sent. Client cleanup wipes only buffers owned by the client; transport-library,
+kernel, and caller-owned immutable buffers are outside that guarantee.</p>
+<p>The daemon listener is loopback-only, so a non-loopback peer cannot reach the
+production route at the network layer. The HTTP smoke suite therefore covers a
+successful production-route exchange and exercises the core transport guard
+with a non-loopback marker for the denial path. Fence uncertainty is represented
+by the canonical <code>not_committed_terminal</code> reconciliation outcome; there is no
+separate uncertainty enum.</p>
+<h3 id="escrow-credential-handoff-wire-contract">Escrow credential handoff wire contract<a class="headerlink" href="#escrow-credential-handoff-wire-contract" title="Permanent link">&para;</a></h3>
+<p>The escrow issue/rotate handoff is exposed on two of the management routes
+above: issue is <code>POST /service-principals/{subject}/credentials</code> and rotate is
+<code>POST /service-credentials/{id}/rotate</code>. Both write the one-time secret to an
+owner-only publication file on the daemon host, so both are loopback-only: a
+non-loopback transport is rejected with <code>403 service_credential_denied</code> before
+any authentication, state read, or write. The caller must hold
+<code>wr.service_credential.manage</code> for the request tenant. See ADR 0001 for the
+design and the durable state machine behind this contract.</p>
+<p>The request body is a strict JSON object; every field value is a quoted string
+on the wire. Issue requires <code>version</code> (<code>"1"</code>), <code>tenant</code> (equal to the selected
+target tenant), <code>request_id</code>, <code>destination</code>, and <code>expires_at_us</code>. The subject
+path identifies the principal but does not encode or establish the target
+tenant. Rotate requires <code>version</code>, <code>request_id</code>, <code>destination</code>, and
+<code>expires_at_us</code>; its principal and authoritative target tenant come from the
+retired credential. <code>request_id</code> is exactly 27 ASCII-alphanumeric characters
+(a canonical KSUID); it is the idempotency key. <code>destination</code> names the escrow publication
+target and <code>expires_at_us</code> is a quoted decimal count of microseconds since the
+epoch that must parse and be strictly greater than zero. Both <code>destination</code> and
+<code>expires_at_us</code> are mandatory: the daemon never server-recomputes an expiry.</p>
+<p>A successful call returns <code>200</code> with a non-secret JSON receipt of the exact
+shape <code>{state, request_id, credential_id, generation, destination,
+publication_receipt_id, delivered}</code>. <code>generation</code> is a JSON number and
+<code>delivered</code> is a JSON boolean; the remaining fields are strings or <code>null</code>. The
+credential secret is never placed in the response, an error body, or a log.
+<code>state</code> is one of the eight lowercase operation-state names: <code>prepared</code>,
+<code>server_committed</code>, <code>publication_planned</code>, <code>publication_prepared</code>,
+<code>file_published</code>, <code>cleanup_required</code>, <code>operator_action_required</code>, and
+<code>terminal</code>. <code>delivered</code> is <code>true</code> only at the <code>terminal</code> state whose reason is
+a durable file publication; every operator-action and non-delivery terminal
+outcome reports <code>delivered</code> as <code>false</code>.</p>
+<p>Delivery is at-least-once and idempotent by <code>request_id</code>: a repeated
+<code>request_id</code> returns the same operation, credential, and receipt and never
+mints a second secret. It is not observably exactly-once. A crash after the
+publication file is durably written but before its receipt is durable can leave
+a correct owner-only file without a durable acknowledgement, so a caller may
+observe the receipt zero or one time per attempt; the durable file and the
+policy authority, not the response, are the source of truth.</p>
+<p>The handoff module return code maps onto the HTTP status and error code as
+follows:</p>
+<table>
+<thead>
+<tr>
+<th>Return code</th>
+<th>HTTP status</th>
+<th>Error code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WYRELOG_E_OK</code></td>
+<td>200</td>
+<td>(JSON receipt)</td>
+</tr>
+<tr>
+<td><code>WYRELOG_E_NOT_FOUND</code> / <code>WYRELOG_E_BUSY</code></td>
+<td>503</td>
+<td><code>service_credential_unavailable</code></td>
+</tr>
+<tr>
+<td><code>WYRELOG_E_POLICY</code></td>
+<td>409</td>
+<td><code>service_credential_conflict</code></td>
+</tr>
+<tr>
+<td><code>WYRELOG_E_INVALID</code></td>
+<td>400</td>
+<td><code>invalid_service_credential_request</code></td>
+</tr>
+<tr>
+<td><code>WYRELOG_E_AUTH</code></td>
+<td>403</td>
+<td><code>service_credential_denied</code></td>
+</tr>
+<tr>
+<td>any other</td>
+<td>500</td>
+<td><code>service_credential_failed</code></td>
+</tr>
+</tbody>
+</table>
+<p>An unconfigured deployment (no owner-only operation or publication root) reports
+<code>503 service_credential_unavailable</code> and touches no state.</p>
+<h3 id="authority-retirement-replay-contract">Authority-retirement replay contract<a class="headerlink" href="#authority-retirement-replay-contract" title="Permanent link">&para;</a></h3>
+<p>Principal disable, credential revoke, tenant seal, and credential rotate use a
+caller-owned canonical request ID to recover a committed result after response
+loss. Principal disable and tenant seal accept exactly this JSON object, with a
+maximum body size of 1024 bytes:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"version"</span><span class="p">:</span><span class="s2">"1"</span><span class="p">,</span><span class="nt">"request_id"</span><span class="p">:</span><span class="s2">"&lt;canonical 27-character KSUID&gt;"</span><span class="p">}</span>
+</code></pre></div>
+<p>Missing, empty, duplicate, additional, wrongly typed, unsupported-version, and
+noncanonical fields are rejected with HTTP 400. Credential revoke retains the
+same strict body contract; rotate retains its escrow handoff body and operation
+receipt. The caller request ID is authority identity. It is deliberately
+different from the server-generated <code>X-Wyrelog-Request-Id</code> response header,
+which correlates one HTTP attempt and is also used for that attempt's policy
+decision audit.</p>
+<p>Every attempt performs current authorization before receipt lookup. An exact
+authorized retry returns the original typed result without another lifecycle
+event, audit/outbox intention, authority mutation, or registry barrier. A new
+key against an already terminal object records a separately authorized and
+audited no-op. Reuse of a key for a different operation, target, actor,
+fingerprint, or version returns HTTP 409. Tenant seal receipts also bind the
+tenant lifecycle and sealed generations: after unseal or another transition,
+an old seal key returns <code>409 tenant_seal_superseded</code> with recorded and current
+lifecycle/sealed generations and never reseals the tenant.</p>
+<p>Tenant lifecycle states <code>active</code>, <code>sealing</code>, and <code>unsealing</code> require the #549
+drain coordinator and return <code>503 tenant_lifecycle_coordination_required</code> from
+the seal route without mutation. Other authority coordination failures return
+503, while receipt, event, audit, or terminal-row structural failures return
+500. A 500 or 503 must not be retried with a new key: preserve the original key,
+restore authority availability as required, and retry so the durable receipt
+can classify the result.</p>
+<h2 id="private-service-credential-operation-retirement">Private service credential operation retirement<a class="headerlink" href="#private-service-credential-operation-retirement" title="Permanent link">&para;</a></h2>
+<p>Terminal handoff journal retirement is private library work. It has no daemon
+route, <code>wyctl</code> command, public API, timer, or scheduling policy. #517 delivered
+the public loopback issue/rotate ingress, but retirement itself stays private
+and operator-driven; automatic retirement scheduling is out of scope.</p>
+<p>Eligibility requires an exact version-6 <code>TERMINAL</code> snapshot: <code>FILE_PUBLISHED</code>
+with no remediation marker or the exact prior <code>RESUME</code> marker, or
+<code>OPERATOR_REVOKE_AND_WIPE</code> with its exact revoke marker. Version 5,
+<code>NOT_COMMITTED</code>, and every nonterminal state are excluded. The trusted clock
+must be at least 30 days beyond the greatest timestamp among the journal and
+all referenced delivery, remediation, and revoke-event provenance.</p>
+<p>The purge coordinator preserves this order for one original request id:
+lifecycle lock, service-authority write lease, short authority transaction,
+permanent receipt, transaction completion, then exact anchored journal
+deletion and synchronization. The authority transaction either validates an
+existing receipt or records and commits the exact non-secret provenance and
+dual escrow absence. No journal filesystem read or deletion occurs while that
+transaction is active. The lifecycle lock and write lease remain held through
+deletion; exact storage deletion takes the shorter operation lock inside that
+boundary.</p>
+<p>Crash recovery is receipt first. A validated permanent receipt supplies the
+exact delete expectation, and only that path may treat an already missing
+snapshot as success. If no receipt exists, the coordinator must load and
+validate an eligible version-6 terminal snapshot, obtain the authority receipt,
+and confirm its replay before deleting anything.</p>
+<p>Production operation creation must use the retirement-guarded begin path. It
+checks the permanent receipt while holding the same lifecycle lock and write
+lease used by purge, so a burned request id cannot create or replay a journal.
+The raw locked begin helper is restricted to the retirement coordinator and
+explicit test friends; it is not a production ingress contract.</p>
+<p>Permanent retirement receipts and lifecycle or operation lock artifacts must
+never be manually updated or deleted. There is no supported administrative
+reset that makes a retired request id reusable.</p>
+<h2 id="human-user-lifecycle">Human user lifecycle<a class="headerlink" href="#human-user-lifecycle" title="Permanent link">&para;</a></h2>
+<p>Human identity is explicit and system-wide. The <code>human_users</code> registry is the
+lifecycle authority; the principal FSM records authentication state separately.
+Create a user before granting a role or permission, enrolling MFA, or logging in.
+Human identifiers are 1–128 ASCII letters, digits, <code>.</code>, <code>_</code>, <code>:</code>, or <code>-</code>, excluding
+<code>.</code> and <code>..</code> and the reserved <code>svc:</code> and <code>wr.</code> prefixes.</p>
+<p><code>wyctl user create|list|disable|delete</code> uses typed client APIs and the <code>/users</code>
+daemon routes. Management requires a live MFA-assured human SYSTEM administrator
+with the root <code>wr.system_admin</code> membership. The guarded policy-management decision
+is rechecked under the authority write lease before mutation. Registry existence,
+last-administrator protection, and deletion prerequisites are checked in the SQL
+transaction. Disabled users may retain grants, but cannot authenticate. Revocation
+of stale grants remains available for unregistered subjects.</p>
+<p>Named login, human MFA and token publication, and human lifecycle mutations share
+a handle-owned recursive lifecycle lease. Entry points acquire it before authority,
+tenant admission, replay, engine, or token-map locks. They retain it through late
+session registration and token publication or revocation. Login refusal commits
+only an audit decision; it publishes no principal/session state or transition.
+Missing, disabled, and deleted users all receive <code>login_denied</code>; the SQL audit
+records the specific reason even in builds without the optional audit sink.</p>
+<p>Deletion uses one parent receipt and one transaction for all owned tenants and
+subject authority. Child tenant journals are inserted before their immutable
+parent associations. No public tenant-delete call is committed independently.
+The transaction marks the human tombstone and records the entire child vector;
+filesystem cleanup follows the existing identity-checked tenant manifests.
+Startup finishes child cleanup and verifies parent completion before admitting
+requests. An exact request retry reuses the saved fingerprint and child IDs.</p>
+<p>The one-time migration registers valid holders of role memberships, direct
+permissions, or TOTP enrollments. It reports each registered or skipped identity
+and retains <code>human_user_migration_report</code>. Principal-state-only and
+permission-state-only subjects are not evidence of registration. Tombstones never
+re-register on reopen. Readiness probe identities are seeded explicitly in the
+existing isolated readiness handle, not in the configured runtime store.</p>
+<p>This base has no owner-issued query-credential subsystem (#1341). Service
+credential <code>created_by</code> metadata is not an issuer-revocation contract. When #1341
+is implemented, its issuer-indexed revocation belongs in the same disable/delete
+transaction. Last-administrator MFA lockout remains a separate recovery problem.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "content.code.copy"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>

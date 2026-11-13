@@ -1,0 +1,1605 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Access-control and Datalog fact-store service">
+      
+      
+      
+        <link rel="canonical" href="https://semantic-reasoning.github.io/wyrelog/duckdb-transaction-abort-inventory/">
+      
+      
+        <link rel="prev" href="../duckdb-fixed-wal-lifecycle-evidence/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>DuckDB transaction aborts - wyrelog</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#duckdb-transactions-after-a-failed-statement" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="wyrelog" class="md-header__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            wyrelog
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              DuckDB transaction aborts
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="wyrelog" class="md-nav__button md-logo" aria-label="wyrelog" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    wyrelog
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/semantic-reasoning/wyrelog" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    semantic-reasoning/wyrelog
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operator-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operator runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../offline-restore-daemon-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore daemon API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-abort-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore abort recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-offline-restore-schema-transition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Offline restore schema transitions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ga-hardening-gates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GA hardening gates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth-session-restart-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth restart and JWT keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lobac-v0-tenant-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant lifecycle contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../engine-session-publication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine-session publication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fact-admission-enum-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fact admission enum evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../recursive-engine-qualification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recursive engine qualification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secure-duckdb-backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secure DuckDB backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-threat-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential threat model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-platform-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential platform support
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-credential-traceability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service credential traceability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-artifact-handle-verifier/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows artifact handle verifier
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-formatting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Formatting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../developer-lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle constraints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-after-walstart-test-seam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB AFTER_WAL_START seam
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../duckdb-fixed-wal-lifecycle-evidence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB fixed-WAL evidence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DuckDB transaction aborts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-duckdb-20-behaviour-the-arguments-rely-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The DuckDB 2.0 behaviour the arguments rely on
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-the-search-was-made-exhaustive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How the search was made exhaustive
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#statements-that-run-with-no-transaction-open" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Statements that run with no transaction open
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#open-items" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open items
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-duckdb-20-behaviour-the-arguments-rely-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The DuckDB 2.0 behaviour the arguments rely on
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-the-search-was-made-exhaustive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How the search was made exhaustive
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#statements-that-run-with-no-transaction-open" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Statements that run with no transaction open
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#open-items" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open items
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="duckdb-transactions-after-a-failed-statement">DuckDB transactions after a failed statement<a class="headerlink" href="#duckdb-transactions-after-a-failed-statement" title="Permanent link">&para;</a></h1>
+<p>Issue #1453 asks for every place that issues a statement inside an open
+DuckDB transaction and carries on after that statement fails other than by
+rolling back. This document is the inventory. No site carries on: every
+transaction that wyrelog opens is ended by a ROLLBACK, or by a COMMIT that
+DuckDB itself turns into one, once a statement in it fails. Two defects in
+the policy-store audit replay (T6) were fixed on the way: another thread's
+statement could run inside its transaction, and a rollback left an
+in-memory cache behind.</p>
+<p><code>wyrelog/policy/</code> uses SQLite only and has no DuckDB statements. <code>wyctl</code> and
+the client library have none either.</p>
+<h2 id="the-duckdb-20-behaviour-the-arguments-rely-on">The DuckDB 2.0 behaviour the arguments rely on<a class="headerlink" href="#the-duckdb-20-behaviour-the-arguments-rely-on" title="Permanent link">&para;</a></h2>
+<p><code>tests/test-audit-conn.c</code> pins each of these, so a DuckDB upgrade or a
+configuration change that alters them fails there first.
+<code>check_duckdb_transaction_abort_contract</code> uses a connection opened the way
+wyrelog opens the audit connection; <code>check_duckdb_failed_commit_ends_transaction</code>
+needs a commit-time conflict, which takes two connections, and wyrelog never
+opens two on one database, so it uses a plain <code>duckdb_open</code>. Both hold in
+the prebuilt build and in the secure bridge's source build alike.</p>
+<ul>
+<li><strong>F1. An error aborts the transaction.</strong> After a failed prepare, a failed
+  prepared execution, a statement that raises (<code>error()</code>), or an appender
+  flush that violates a key, every later statement fails with "Current
+  transaction is aborted" until ROLLBACK. This holds under the default
+  <code>default_transaction_invalidation_policy</code>,
+  <code>ALL_ERRORS_INVALIDATE_TRANSACTION</code>, which wyrelog never changes; the test
+  asserts the setting. It is not true of every error: a statement refused
+  because another result still holds the connection (<code>ResourceInUse</code>), and
+  appender errors raised before a flush (a wrong type, an incomplete row),
+  leave the transaction usable. wyrelog relies on neither.</li>
+<li><strong>F2. A COMMIT of an aborted transaction reports success and keeps
+  nothing.</strong> DuckDB rewrites it to a ROLLBACK
+  (<code>src/main/client_context.cpp</code>, the invalidated-transaction branch of the
+  commit path). So code that swallowed an error and then committed would
+  lose every write in the transaction while reporting success. This is the
+  hazard the inventory looks for at every COMMIT.</li>
+<li><strong>F3. A COMMIT that fails when it commits leaves no transaction.</strong> A
+  primary-key conflict found at commit time, for example, ends the transaction
+  before the error is reported, so a ROLLBACK issued next fails with "no
+  transaction is active" and the connection is usable again
+  (<code>src/transaction/transaction_context.cpp</code>, <code>Commit()</code>). One commit-time
+  failure means the opposite of what it says: "Transaction COMMIT succeeded
+  and is durable, but the autocheckpoint failed"
+  (<code>src/transaction/duck_transaction_manager.cpp</code>). For the initial database,
+  as wyrelog opens its stores, that error is FATAL and invalidates the
+  database instance. It is also not the only durable failure: when a large
+  commit skips the WAL and checkpoints directly, a checkpoint error is
+  reported as FATAL without that text, and the transaction is lost or kept
+  depending on whether the checkpoint got past its header.
+  <code>check_duckdb_autocheckpoint_failure_outcomes</code> in <code>tests/test-audit-conn.c</code>
+  pins all three outcomes. Neither the error type nor its text therefore tells
+  a durable commit from a lost one, so a COMMIT error has an unknown outcome.
+  wyrelog treats every COMMIT error as "not committed" for the transaction
+  itself. In the fact store a commit-time failure therefore also fails the
+  ROLLBACK that <code>wyl_fact_store_transaction_finish</code> issues next, which poisons
+  the store and returns an internal error, and <code>initialize_identity_unlocked</code>
+  returns an internal error rather than an open error. Both fail closed, as
+  intended.</li>
+<li><strong>F4. A ROLLBACK ends the transaction</strong> (<code>TransactionContext::Rollback()</code>
+  clears it before rolling back), provided the ROLLBACK reaches the
+  transaction: it does not if the database has already been invalidated by a
+  fatal error, if a result still holds the connection, or under the test
+  seam <code>WYL_DUCKDB_TEST_TRANSACTION_CONTROL</code>. In those cases the transaction
+  stays open and aborted.</li>
+</ul>
+<h2 id="how-the-search-was-made-exhaustive">How the search was made exhaustive<a class="headerlink" href="#how-the-search-was-made-exhaustive" title="Permanent link">&para;</a></h2>
+<p>Every execution form under <code>wyrelog/</code>, comments excluded:</p>
+<table>
+<thead>
+<tr>
+<th>Form</th>
+<th>Uses</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>duckdb_query</code></td>
+<td>30: <code>audit/conn.c</code> 18, <code>fact/store.c</code> 9, <code>daemon/delta.c</code> 2, <code>fact/compound.c</code> 1</td>
+</tr>
+<tr>
+<td><code>duckdb_prepare</code> / <code>duckdb_execute_prepared</code></td>
+<td>49 / 49: <code>audit/conn.c</code> 21, <code>fact/store.c</code> 20, <code>fact/compound.c</code> 4, <code>fact/legacy-store-identity-private.c</code> 3, <code>fact/replay-store-private.c</code> 1</td>
+</tr>
+<tr>
+<td>appender</td>
+<td>every call is in <code>fact/store.c</code>: <code>duckdb_appender_create</code> 2, <code>_begin_row</code> 2, <code>_end_row</code> 2, <code>_destroy</code> 3, <code>duckdb_append_*</code> 16; no <code>_flush</code></td>
+</tr>
+<tr>
+<td><code>duckdb_interrupt</code></td>
+<td>1, <code>fact/replay-store-private.c</code></td>
+</tr>
+<tr>
+<td>streaming, pending, arrow, <code>extract_statements</code>, <code>register_*</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td>C++ in the secure bridge</td>
+<td><code>Prepare</code> 2, <code>Execute</code> 2, <code>Query</code> 2 (one split across lines), <code>Interrupt</code> 1; no transaction statement</td>
+</tr>
+</tbody>
+</table>
+<p>The six <code>BEGIN TRANSACTION</code> literals (<code>fact/store.c</code> 1,
+<code>fact/store-identity-private.c</code> 2, <code>audit/conn.c</code> 3) were mapped to their
+functions, and every statement to the function that runs it and then
+through the wrappers to its callers: <code>exec_sql</code> (<code>fact/store.c</code>, <code>fact/compound.c</code>),
+<code>fact_identity_execute</code>, <code>execute_no_rows</code>/<code>query_count</code>
+(<code>fact/store-identity-private.c</code>), <code>query_ok</code>,
+<code>rollback_transaction_unlocked</code>, <code>commit_transaction_unlocked</code> and
+<code>audit_conn_run</code> (<code>audit/conn.c</code>) and <code>cpp_identity_execute</code> (the bridge).</p>
+<h2 id="transactions">Transactions<a class="headerlink" href="#transactions" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Opener</th>
+<th>What can fail inside</th>
+<th>Handling</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1</td>
+<td><code>wyl_fact_store_transaction_begin</code> / <code>_finish</code> (<code>fact/store.c</code>)</td>
+<td>Any statement of its nine callers: compound put, the two batch-shape and forget-intent-state migrations, schema migration, append, graph update, retract, forget completion, orphaned-forget repair</td>
+<td>Each step runs only if the previous one succeeded; <code>_finish</code> rolls back on any failure, and a failed ROLLBACK poisons the store</td>
+<td>Safe</td>
+</tr>
+<tr>
+<td>T2</td>
+<td><code>validate_identity_snapshot</code> (<code>fact/store-identity-private.c</code>)</td>
+<td>Catalog and metadata reads</td>
+<td>Stops at the first failure, then COMMITs on OK or POLICY and rolls back otherwise. A failed statement yields POLICY only through the bridge's permission or authority exceptions</td>
+<td>Safe: the snapshot is read-only, so the COMMIT keeps nothing either way (F2)</td>
+</tr>
+<tr>
+<td>T3</td>
+<td><code>initialize_identity_unlocked</code> (same file)</td>
+<td>CREATE, the identity inserts, re-validation</td>
+<td>Every failure rolls back</td>
+<td>Safe</td>
+</tr>
+<tr>
+<td>T4</td>
+<td><code>ensure_service_exchange_schema</code> metadata transaction (<code>audit/conn.c</code>)</td>
+<td>Prepare, bind or execution of the insert, the readback</td>
+<td>Rolls back. The final ROLLBACK's result is checked; the early one after a bind failure is not</td>
+<td>Safe (F4)</td>
+</tr>
+<tr>
+<td>T5</td>
+<td><code>wyl_audit_conn_service_exchange_project</code> (<code>audit/conn.c</code>)</td>
+<td>Preflight reads, both inserts, readback, COMMIT</td>
+<td>Exactly one ROLLBACK plus eviction of the stream's chain tail cache</td>
+<td>Safe</td>
+</tr>
+<tr>
+<td>T6</td>
+<td><code>wyl_handle_load_policy_store_audit_events</code> (<code>wyl-handle.c</code>), on the audit connection through <code>wyl_audit_conn_transaction_begin</code>/<code>_commit</code>/<code>_rollback</code></td>
+<td>Intention reconciliation, then one audit event and checkpoint insert per policy-store row</td>
+<td>The first failure stops the replay; the transaction is rolled back</td>
+<td>Safe, after the two fixes below</td>
+</tr>
+</tbody>
+</table>
+<p><strong>T6 let other threads into its transaction.</strong> The replay held only the
+engine session between BEGIN and COMMIT, while other threads use the audit
+connection without it: <code>wyl_audit_mirror_event</code> and
+<code>wyl_audit_complete_authoritative_event</code> run after the engine session is
+released, and the audit routes query it. The
+connection's own lock did not close the gap either: only the insert, the
+service-exchange projection and the sink identity took it, while
+<code>wyl_audit_conn_create_schema</code> (which the mirror runs before every insert),
+<code>_table_exists</code>, <code>_verify_chain</code>, <code>_query_events_json</code>, <code>_delete_event</code> and
+the user-stream functions ran their statements without it. Another thread's
+statement could therefore run inside the replay's transaction. If it succeeded, it was
+committed or rolled back with the replay, after being reported as written.
+If it failed, it aborted the transaction without the replay seeing it, the
+replay's COMMIT then reported success and kept nothing (F2), and the replay
+marked its intentions committed. Now every audit-connection function that
+runs a statement takes the connection's lock, a recursive one; the event
+query holds it for its statement only and redacts the materialised rows
+after releasing it, so the redactor's session state is never taken under
+it. The replay holds the lock for its whole transaction
+(<code>wyl_audit_conn_transaction_begin</code> to <code>_commit</code> or <code>_rollback</code>); its own
+calls re-enter it, and other threads wait.
+<code>check_audit_replay_holds_audit_connection</code> in <code>tests/test-audit-emit.c</code>
+checks from another thread that the lock is held inside the replay's
+transaction, then has a writer read the chain and mirror an event, and
+asserts that the read completes only after the replay ends, that the
+mirrored event is durable afterwards and that the chain verifies. It runs
+the replay both to its commit and into a rollback after an insert; in the
+rollback the waiting writer must not link its event to the rolled-back row.</p>
+<p><strong>T6 left a stale cache.</strong> Each insert advances the audit connection's
+chain tail cache. A replay that failed after inserting rows (a corrupt
+policy-store row, a failed engine projection, a failed COMMIT, or an insert
+that failed before executing: in prepare, bind or the duplicate check)
+rolled the rows back but left the cache pointing at them, so the next
+insert linked to a row that no longer existed and
+<code>wyl_audit_conn_verify_chain</code> reported <code>missing_link</code> from then on. Only a
+failed execution of the insert evicted the cache, which is why it went
+unnoticed. <code>wyl_audit_conn_transaction_rollback</code> now forgets the cache in
+the same lock hold as the ROLLBACK, so the next insert reads the tail from
+the durable rows.
+<code>check_policy_store_audit_replay_rollback_keeps_chain_contiguous</code> in
+<code>tests/test-audit-emit.c</code> drives a replay into a corrupt row after one
+insert, then replays again and verifies the chain.</p>
+<p>The replay runs when a handle opens and at runtime: from <code>daemon/checks.c</code>,
+<code>daemon/delta.c</code>, the audit query route and after an MFA enrollment is
+published (<code>daemon/http.c</code>).</p>
+<h2 id="statements-that-run-with-no-transaction-open">Statements that run with no transaction open<a class="headerlink" href="#statements-that-run-with-no-transaction-open" title="Permanent link">&para;</a></h2>
+<p>A failure in these rolls back only that statement:</p>
+<ul>
+<li>the fact store's probes, schema DDL, batch and forget-intent reads, and
+  the forget deletes and intent writes outside T1; <code>fact/compound.c</code>'s reads;
+  <code>fact/replay-store-private.c</code>; all of <code>fact/legacy-store-identity-private.c</code>;</li>
+<li>the audit connection's schema creation, <code>pragma_table_info</code> probes and
+  ALTERs, validators, preflight reads, user-stream statements, chain
+  verification and queries, and its post-commit CHECKPOINT and readbacks;</li>
+<li><code>daemon/delta.c</code>'s two queries and the bridge's own statements.</li>
+</ul>
+<p>That classification assumes no transaction is open on the same connection from
+elsewhere. The fact store runs one session at a time, and its transactions
+exist only inside a session. Once the audit connection is shared, every
+statement on it runs under its lock (the statements <code>wyl_audit_conn_open</code> runs
+come before that), and the replay holds the lock for its whole transaction. The
+only statements that bypass it are <code>daemon/delta.c</code>'s two readiness probes,
+which run through <code>wyl_audit_conn_get_connection</code> on the separate readiness
+handle the daemon opens and checks on one thread before it serves, so no
+transaction can be open on that connection.</p>
+<h2 id="open-items">Open items<a class="headerlink" href="#open-items" title="Permanent link">&para;</a></h2>
+<p>These are not statements carried on in an aborted transaction, so they are
+outside #1453, but the audit surfaced them:</p>
+<ul>
+<li><strong>A durable COMMIT reported as failed</strong> (#1499, resolved). After F3's
+  autocheckpoint failure the fact store poisons itself, which fails closed.
+  <code>WylFactStoreTransaction.commit_outcome_unknown</code> records that the COMMIT
+  was issued and failed, and the fact store then settles the physical quota
+  reservation from the observed artifacts instead of parking it in
+  <code>reconciling_bytes</code>; the observation is right whether or not the commit
+  landed. A retry of a commit that was lost, under the same idempotency key,
+  is a new attempt: the fact store reserves it only after finding no stored
+  batch for the key, and reopens the earlier attempt's settled reservation
+  (#1523).</li>
+<li><strong>Late replay cancellation</strong> (#1500, resolved). The reported next-session
+  transaction failure is not reproduced on the pinned DuckDB 2.0 prebuilt or
+  source/secure providers: ordinary query entry runs
+  <code>InitialCleanup</code> / <code>AbandonActiveQuery</code>, clearing a pending interrupt.
+  <code>/fact-replay/replay-store-late-cancel/{empty,populated,last-row}</code> cancels
+  after successful SQL execution or in its final row callback, then requires
+  the immediate next T1 append to commit on the same live store, with exact
+  readback on the original connection. There is no healing query, reopen or
+  retry before that writer. The measured defect was false adapter success for
+  empty results and cancellation in the last callback; the scheduler's own
+  terminal checkpoint concealed it. A final success-only checkpoint now runs
+  after interrupt-handler disconnection and before session release, preserving
+  prior errors and the existing per-row checks. A last-row cancellation may
+  have delivered that row; it returns cancellation, not successful completion.
+  This is a final cancellation observation, not an atomic guarantee against
+  cancellation arriving afterward or a reset contract for arbitrary DuckDB
+  versions/API routes. Live-query interruption remains tested separately.</li>
+<li><strong>One unchecked ROLLBACK</strong>, T4's after a bind failure, is safe by F4,
+  except after the fatal errors listed there.</li>
+<li><strong>Nothing checks the audit connection's lock order.</strong> It is not one of
+  the service-auth lock ranks (<code>WylServiceAuthRank</code> in
+  <code>auth/service-auth-coordination-private.h</code>), and no lock-order guard
+  covers it. Its order today is engine session, then the audit lock, and
+  nothing taken under the audit lock waits on another thread. A later
+  change that took the engine session, or any lock another thread holds
+  while waiting for the audit lock, under it would deadlock unnoticed.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "content.code.copy"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>
