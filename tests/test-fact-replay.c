@@ -3427,6 +3427,213 @@ replay_store_cancellation_job (WylFactReplayJobContext *job_context,
              job_context, replay_store_operation_probe_row, &rows);
 }
 
+typedef struct
+{
+  WylFactReplayStore *store;
+  const WylFactReplayStoreRequest *request;
+  GCancellable *cancellable;
+  duckdb_connection connection;
+  ReplayStoreOperationProbe rows;
+  wyrelog_error_t direct_rc;
+  guint completed_reads;
+  guint seen_rows;
+  guint commits;
+  gboolean cancel_on_row;
+} ReplayStoreLateCancelProbe;
+
+static void
+replay_store_late_cancel_hook (duckdb_connection connection,
+    WylFactReplayStoreOperation operation, WylFactReplayStoreTestPhase phase,
+    duckdb_state execute_state, gpointer user_data)
+{
+  ReplayStoreLateCancelProbe *probe = user_data;
+  if (phase != WYL_FACT_REPLAY_STORE_TEST_AFTER_EXECUTE)
+    return;
+  g_assert_cmpint (operation, ==, WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS);
+  g_assert_cmpint (execute_state, ==, DuckDBSuccess);
+  probe->completed_reads++;
+  if (probe->connection == NULL) {
+    probe->connection = connection;
+    g_assert_nonnull (probe->cancellable);
+    g_assert_false (g_cancellable_is_cancelled (probe->cancellable));
+    if (!probe->cancel_on_row)
+      g_cancellable_cancel (probe->cancellable);
+  } else {
+    /* Readback after the next writer still uses the original connection. */
+    g_assert_true (connection == probe->connection);
+  }
+}
+
+static wyrelog_error_t
+replay_store_late_cancel_row (const WylFactReplayCell *cells, gsize n_cells,
+    gpointer user_data)
+{
+  ReplayStoreLateCancelProbe *probe = user_data;
+  wyrelog_error_t rc = replay_store_operation_probe_row (cells, n_cells,
+          &probe->rows);
+  if (probe->cancel_on_row) {
+    g_assert_cmpuint (probe->rows.rows, ==, 1);
+    g_cancellable_cancel (probe->cancellable);
+  }
+  return rc;
+}
+
+static wyrelog_error_t
+replay_store_late_cancel_job (WylFactReplayJobContext *context,
+    gpointer user_data)
+{
+  ReplayStoreLateCancelProbe *probe = user_data;
+  probe->cancellable = wyl_fact_replay_job_context_get_cancellable (context);
+  probe->direct_rc = wyl_fact_replay_store_execute (probe->store,
+          WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, probe->request, context,
+          replay_store_late_cancel_row, probe);
+  probe->cancellable = NULL;
+  return probe->direct_rc;
+}
+
+static wyrelog_error_t
+replay_store_late_cancel_commit (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
+{
+  ReplayStoreLateCancelProbe *probe = user_data;
+  g_assert_cmpint (kind, ==, WYL_FACT_STORE_TRANSACTION_TEST_APPEND_CORE);
+  g_assert_cmpint (phase, ==, WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT);
+  probe->commits++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+replay_store_late_cancel_readback (const WylFactReplayCell *cells,
+    gsize n_cells, gpointer user_data)
+{
+  ReplayStoreLateCancelProbe *probe = user_data;
+  g_assert_cmpuint (n_cells, ==, 4);
+  g_assert_cmpint (cells[0].type, ==, WYL_FACT_REPLAY_CELL_TEXT);
+  g_assert_cmpint (cells[1].type, ==, WYL_FACT_REPLAY_CELL_INT64);
+  g_assert_cmpint (cells[2].type, ==, WYL_FACT_REPLAY_CELL_BOOL);
+  g_assert_cmpint (cells[3].type, ==, WYL_FACT_REPLAY_CELL_BOOL);
+  g_assert_true (cells[3].value.bool_value);
+  gboolean before = g_strcmp0 (cells[0].value.text, "before-cancel") == 0;
+  if (!before)
+    g_assert_cmpstr (cells[0].value.text, ==, "after-cancel");
+  guint bit = before ? 1 : 2;
+  g_assert_cmpuint (probe->seen_rows & bit, ==, 0);
+  probe->seen_rows |= bit;
+  g_assert_cmpint (cells[1].value.int64_value, ==, before ? 7 : 42);
+  g_assert_cmpint (cells[2].value.bool_value, ==, !before);
+  return WYRELOG_E_OK;
+}
+
+static void
+test_replay_store_late_cancel (gconstpointer user_data)
+{
+  gboolean populated = GPOINTER_TO_INT (user_data) != 0;
+  gboolean cancel_on_row = GPOINTER_TO_INT (user_data) == 2;
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-replay-late-cancel-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *path = g_build_filename (root, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema ("tenant-a",
+          "orders", columns, G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  g_assert_cmpint (wyl_fact_store_ensure_projection (store, &schema, &table),
+      ==, WYRELOG_E_OK);
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "before-cancel"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 7},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = FALSE},
+  };
+  const wyl_fact_row_t row = { values, G_N_ELEMENTS (values) };
+  wyl_fact_store_batch_t batch = {
+    .batch_id = "late-cancel-before",
+    .tenant_id = schema.tenant_id,
+    .graph_id = schema.graph_id,
+    .namespace_id = schema.namespace_id,
+    .relation_name = schema.relation_name,
+    .schema_version = schema.schema_version,
+    .source = "issue-1500",
+    .idempotency_key = "late-cancel-before",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = &row,
+    .n_rows = 1,
+  };
+  gboolean inserted = FALSE;
+  if (populated) {
+    g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+        &inserted), ==, WYRELOG_E_OK);
+    g_assert_true (inserted);
+  }
+  g_autoptr (WylFactReplayStore) replay = NULL;
+  g_assert_cmpint (wyl_fact_replay_store_new_c_store (store, NULL, &replay),
+      ==, WYRELOG_E_OK);
+  WylFactReplayStoreRequest request = {
+    .tenant_id = schema.tenant_id,
+    .graph_id = schema.graph_id,
+    .projection_schema = &schema,
+  };
+  ReplayStoreLateCancelProbe probe = {
+    .store = replay,
+    .request = &request,
+    .rows.expected_cells = 4,
+    .cancel_on_row = cancel_on_row,
+  };
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  wyl_fact_replay_store_set_before_execute_test_hook
+    (replay_store_late_cancel_hook, &probe);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler,
+      schema.tenant_id, schema.graph_id, NULL, replay_store_late_cancel_job,
+      &probe, NULL, &future), ==, WYRELOG_E_OK);
+  wyrelog_error_t future_rc = wyl_fact_replay_future_wait (future);
+  g_assert_cmpuint (probe.completed_reads, ==, 1);
+  g_assert_cmpuint (probe.rows.rows, ==, cancel_on_row ? 1 : 0);
+
+  /* The next store operation is a real T1 transaction: no healing query,
+   * reopen or retry between the cancelled replay and this writer. */
+  values[0].as.text = "after-cancel";
+  values[1].as.int64_value = 42;
+  values[2].as.bool_value = TRUE;
+  batch.batch_id = "late-cancel-after";
+  batch.idempotency_key = "late-cancel-after";
+  wyl_fact_store_test_set_transaction_hook (store,
+      replay_store_late_cancel_commit, &probe);
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+      &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_assert_cmpuint (probe.commits, ==, 1);
+  wyl_fact_store_test_set_transaction_hook (store, NULL, NULL);
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay,
+      WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, &request, NULL,
+      replay_store_late_cancel_readback, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.completed_reads, ==, 2);
+  g_assert_cmpuint (probe.seen_rows, ==, populated ? 3 : 2);
+  wyl_fact_replay_store_set_before_execute_test_hook (NULL, NULL);
+  g_clear_pointer (&future, wyl_fact_replay_future_unref);
+  g_clear_pointer (&scheduler, wyl_fact_replay_scheduler_unref);
+  g_clear_pointer (&replay, wyl_fact_replay_store_free);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  remove_tree (root);
+
+  /* The scheduler's terminal checkpoint must not hide adapter success. */
+  g_test_message ("late cancellation: adapter=%d future=%d; next T1 committed",
+      probe.direct_rc, future_rc);
+  g_assert_cmpint (future_rc, ==, WYRELOG_E_CANCELLED);
+  g_assert_cmpint (probe.direct_rc, ==, WYRELOG_E_CANCELLED);
+}
+
 static void
 test_replay_store_c_adapter_fixed_operations (void)
 {
@@ -3600,10 +3807,9 @@ test_replay_store_c_adapter_fixed_operations (void)
   g_autoptr (WylFactReplayScheduler) scheduler = NULL;
   g_assert_cmpint (wyl_fact_replay_scheduler_new (&scheduler_config, NULL,
       &scheduler), ==, WYRELOG_E_OK);
-  /* DuckDB clears a pending interrupt when a query starts, so the cancel
-   * has to land while the query is running.  A loaded runner can wake the
-   * cancel thread only after the query has finished; such an attempt proves
-   * nothing, so retry with a shorter delay until one interrupts the query. */
+  /* Only an execute error proves interruption while SQL is running. A loaded
+   * runner can cancel after execution finishes; the dedicated late-cancel
+   * cases cover that handoff, so retry here until SQL itself is interrupted. */
   static const gulong cancel_delays_us[] = {
     10 * 1000, 5 * 1000, 2 * 1000, 1000, 1000, 1000, 1000, 1000,
   };
@@ -8660,6 +8866,12 @@ main (int argc, char **argv)
       test_compound_replay_cache_reuses_nested_child);
   g_test_add_func ("/fact-replay/replay-store-c-fixed-operations",
       test_replay_store_c_adapter_fixed_operations);
+  g_test_add_data_func ("/fact-replay/replay-store-late-cancel/empty",
+      GINT_TO_POINTER (FALSE), test_replay_store_late_cancel);
+  g_test_add_data_func ("/fact-replay/replay-store-late-cancel/populated",
+      GINT_TO_POINTER (TRUE), test_replay_store_late_cancel);
+  g_test_add_data_func ("/fact-replay/replay-store-late-cancel/last-row",
+      GINT_TO_POINTER (2), test_replay_store_late_cancel);
   g_test_add_func ("/fact-replay/handle",
       test_handle_replay_is_idempotent_and_graph_local);
   g_test_add_func ("/fact-replay/handle-root-replacement",
