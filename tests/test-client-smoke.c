@@ -262,6 +262,141 @@ client_last_response_is (WylClient *client, guint expected_status,
          && g_strcmp0 (error_code, expected_error_code) == 0;
 }
 
+
+#define REGISTER_READY_FIELDS \
+  "\"committed\":true,\"mutation_class\":\"committed_ready\"," \
+  "\"queryable\":true,\"reconcile\":false,\"engine_generation\":7"
+
+static wyrelog_error_t
+register_schema_receipt (WylClient *client,
+    WylClientFactSchemaRegisterResult *result)
+{
+  const WylClientFactColumn column = { "value", "int64", FALSE, TRUE };
+  return wyl_client_fact_schema_register_with_max_rows_result (client,
+             "__wr_default", "g", "ns", "r", 1, &column, 1, 10, 123,
+             "trusted", 29, result);
+}
+
+static void
+check_schema_registration_receipts (WylClient *client, TestHttpServer *http)
+{
+  g_auto (WylClientFactSchemaRegisterResult) result = { 0 };
+  const gchar *classes[] = {
+    "committed_ready", "committed_degraded", "committed_barrier", "future_class"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (classes); i++) {
+    for (guint queryable = 0; queryable < 2; queryable++) {
+      g_autofree gchar *body = g_strdup_printf (
+        "{ \"ok\" : true, \"tenant_id\" : \"__wr_default\","
+        "\"graph_id\":\"g\",\"namespace_id\":\"ns\",\"relation_name\":\"r\","
+        "\"committed\":true, \"mutation_class\" : \"%s\","
+        "\"queryable\":%s,\"reconcile\":%s,\"engine_generation\":7%s}",
+        classes[i], queryable ? "true" : "false", i == 0 ? "false" : "true",
+        i == 1 ? ",\"degraded_class\":\"replay_failed\"" : "");
+      http->body = body;
+      g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_OK);
+      g_assert_true (result.has_outcome);
+      g_assert_true (result.committed);
+      g_assert_cmpstr (result.mutation_class, ==, classes[i]);
+      g_assert_cmpint (result.queryable, ==, queryable);
+      g_assert_cmpint (result.reconcile, ==, i != 0);
+      g_assert_cmpuint (result.engine_generation, ==, 7);
+      g_assert_cmpstr (result.degraded_class, ==, i == 1 ? "replay_failed" : NULL);
+      g_assert_true (client_last_response_is (client, 200, NULL));
+      g_assert_cmpstr (http->last_path, ==, "/facts/schema/register");
+      g_assert_cmpstr (http->last_method, ==, "POST");
+      g_assert_cmpstr (http->last_authorization, ==, "Bearer management-access");
+      g_assert_cmpstr (http->last_body, ==,
+          "column_name\tcolumn_type\tnullable\tvisible\nvalue\tint64\tfalse\ttrue\n");
+    }
+  }
+  const gchar *legacy[] = {
+    "{\"ok\":true}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"graph_id\":\"g\","
+    "\"namespace_id\":\"ns\",\"relation_name\":\"r\"}",
+    "{\"ok\":true,\"extra\":{\"committed\":true},\"future\":[1,null,false]}"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (legacy); i++) {
+    http->body = legacy[i];
+    g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_OK);
+    g_assert_false (result.has_outcome);
+    g_assert_false (result.committed);
+    g_assert_null (result.mutation_class);
+    g_assert_null (result.degraded_class);
+    g_assert_cmpuint (result.engine_generation, ==, 0);
+  }
+  const gchar *invalid[] = {
+    "{}", "{\"ok\":false}", "{\"ok\":true}junk",
+    "{\"ok\":true,\"committed\":true}",
+    "{\"ok\":true,\"mutation_class\":\"committed_ready\"}",
+    "{\"ok\":true,\"queryable\":true}",
+    "{\"ok\":true,\"reconcile\":false}",
+    "{\"ok\":true,\"engine_generation\":7}",
+    "{\"ok\":true,\"degraded_class\":\"replay_failed\"}",
+    "{\"ok\":true," REGISTER_READY_FIELDS ",\"committed\":true}",
+    "{\"ok\":true," REGISTER_READY_FIELDS ",\"comm\\u0069tted\":true}",
+    "{\"ok\":true," REGISTER_READY_FIELDS ",\"queryable\":\"false\"}",
+    "{\"ok\":true,\"committed\":false,\"mutation_class\":\"committed_ready\","
+    "\"queryable\":true,\"reconcile\":false,\"engine_generation\":7}",
+    "{\"ok\":true,\"committed\":true,\"mutation_class\":\"committed_degraded\","
+    "\"queryable\":true,\"reconcile\":true,\"engine_generation\":7}",
+    "{\"ok\":true,\"committed\":true,\"mutation_class\":\"bad\\nclass\","
+    "\"queryable\":true,\"reconcile\":false,\"engine_generation\":7}",
+    "{\"ok\":true,\"committed\":true,\"mutation_class\":\"committed_ready\","
+    "\"queryable\":true,\"reconcile\":false,\"engine_generation\":18446744073709551616}",
+    "{\"ok\":true,\"committed\":true,\"mutation_class\":\"committed_ready\","
+    "\"queryable\":true,\"reconcile\":false,\"engine_generation\":-1}",
+    "{\"ok\":true," REGISTER_READY_FIELDS ",\"degraded_class\":null}",
+    "{\"ok\":true," REGISTER_READY_FIELDS ",\"degraded_class\":\"bad class\"}",
+    "{\"ok\":true," REGISTER_READY_FIELDS ",\"tenant_id\":3}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"tenant_id\":\"__wr_default\"}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"tenant\\u005fid\":\"__wr_default\"}"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    /* Seed an owned result before each error to prove it is cleared. */
+    http->body = "{\"ok\":true," REGISTER_READY_FIELDS "}";
+    g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_OK);
+    http->body = invalid[i];
+    g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_IO);
+    g_assert_false (result.has_outcome);
+    g_assert_null (result.mutation_class);
+    g_assert_null (result.degraded_class);
+    g_assert_cmpuint (result.engine_generation, ==, 0);
+    g_assert_true (client_last_response_is (client, 200, NULL));
+  }
+  const gchar *ids[] = { "tenant_id", "graph_id", "namespace_id", "relation_name" };
+  for (gsize i = 0; i < G_N_ELEMENTS (ids); i++) {
+    g_autofree gchar *body = g_strdup_printf (
+      "{\"ok\":true," REGISTER_READY_FIELDS ",\"%s\":\"other\"}", ids[i]);
+    http->body = body;
+    g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_IO);
+    g_assert_false (result.has_outcome);
+  }
+  http->body = "{\"ok\":true," REGISTER_READY_FIELDS "}";
+  g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_OK);
+  guint before = http->request_count;
+  g_assert_cmpint (wyl_client_fact_schema_register_with_max_rows_result (client,
+      "__wr_default", NULL, "ns", "r", 1, NULL, 0, 0, 123, "trusted", 29,
+      &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpuint (http->request_count, ==, before);
+  g_assert_null (result.mutation_class);
+  http->status = 403;
+  http->body = "{\"error\":\"schema_denied\"}";
+  g_assert_cmpint (register_schema_receipt (client, &result), ==, WYRELOG_E_POLICY);
+  g_assert_false (result.has_outcome);
+  g_assert_true (client_last_response_is (client, 403, "schema_denied"));
+  http->status = 0;
+  /* Both old signatures remain status-only, even for an unreadable body. */
+  http->body = "unreadable";
+  const WylClientFactColumn column = { "value", "int64", FALSE, TRUE };
+  g_assert_cmpint (wyl_client_fact_schema_register (client, "__wr_default", "g",
+      "ns", "r", 1, &column, 1, 123, "trusted", 29), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_fact_schema_register_with_max_rows (client,
+      "__wr_default", "g", "ns", "r", 1, &column, 1, 10, 123, "trusted", 29),
+      ==, WYRELOG_E_OK);
+  http->body = "{\"ok\":true}";
+}
+
 typedef wyrelog_error_t (*LocalInvalidServiceManagementCall) (WylClient *);
 
 static wyrelog_error_t
@@ -1335,6 +1470,7 @@ main (void)
     g_assert_cmpint (wyl_client_user_create (management_client, "alice", request_id,
         123, "trusted", 0), ==, WYRELOG_E_IO);
   }
+  check_schema_registration_receipts (management_client, &http);
   g_auto (WylClientFactStatus) fact_status = { 0 };
   http.body =
       "{\"status\":\"degraded\",\"graphs_total\":1,"

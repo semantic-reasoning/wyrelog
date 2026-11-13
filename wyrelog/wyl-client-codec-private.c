@@ -2387,3 +2387,115 @@ wyl_client_user_preview_decode (const gchar *document, gsize size, WylClientUser
 invalid:
   wyl_client_user_delete_preview_clear (out); return WYRELOG_E_INVALID;
 }
+
+
+void
+wyl_client_fact_schema_register_result_clear
+  (WylClientFactSchemaRegisterResult *result)
+{
+  if (result == NULL)
+    return;
+  g_clear_pointer (&result->mutation_class, g_free);
+  g_clear_pointer (&result->degraded_class, g_free);
+  *result = (WylClientFactSchemaRegisterResult) { 0 };
+}
+
+static gboolean
+schema_receipt_token_is_valid (const gchar *value)
+{
+  if (value == NULL || value[0] == '\0' || strlen (value) > 64)
+    return FALSE;
+  for (const guchar *p = (const guchar *) value; *p != '\0'; p++)
+    if (!g_ascii_isalnum (*p) && *p != '_' && *p != '-')
+      return FALSE;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_client_fact_schema_register_result_decode (const gchar *document,
+    gsize document_len, const gchar *tenant, const gchar *graph,
+    const gchar *namespace_id, const gchar *relation,
+    WylClientFactSchemaRegisterResult *out_result)
+{
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_schema_register_result_clear (out_result);
+  JsonCursor cursor;
+  WylClientFactSchemaRegisterResult parsed = { 0 };
+  gboolean ok = FALSE;
+  guint seen = 0;
+  static const gchar *const names[] = {
+    "ok", "committed", "mutation_class", "queryable", "reconcile",
+    "degraded_class", "engine_generation", "tenant_id", "graph_id",
+    "namespace_id", "relation_name",
+  };
+  const gchar *expected[] = { tenant, graph, namespace_id, relation };
+  if (!document_init (document, document_len, &cursor)
+      || !take (&cursor, '{'))
+    goto invalid;
+  while (TRUE) {
+    g_autofree gchar *key = NULL;
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    gsize field = 0;
+    while (field < G_N_ELEMENTS (names)
+        && strcmp (key, names[field]) != 0)
+      field++;
+    if (field == G_N_ELEMENTS (names)) {
+      if (!fact_status_skip_value (&cursor, 0))
+        goto invalid;
+    } else {
+      if ((seen & (1u << field)) != 0)
+        goto invalid;
+      seen |= 1u << field;
+      gboolean valid = FALSE;
+      switch (field) {
+        case 0: valid = parse_bool (&cursor, &ok); break;
+        case 1: valid = parse_bool (&cursor, &parsed.committed); break;
+        case 2:
+          valid = parse_string (&cursor, &parsed.mutation_class)
+              && schema_receipt_token_is_valid (parsed.mutation_class);
+          break;
+        case 3: valid = parse_bool (&cursor, &parsed.queryable); break;
+        case 4: valid = parse_bool (&cursor, &parsed.reconcile); break;
+        case 5:
+          valid = parse_string (&cursor, &parsed.degraded_class)
+              && schema_receipt_token_is_valid (parsed.degraded_class);
+          break;
+        case 6: valid = parse_uint64 (&cursor, &parsed.engine_generation); break;
+        default: {
+          g_autofree gchar *identity = NULL;
+          valid = parse_string (&cursor, &identity)
+              && g_strcmp0 (identity, expected[field - 7]) == 0;
+          break;
+        }
+      }
+      if (!valid)
+        goto invalid;
+    }
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  if (!document_done (&cursor) || (seen & 1u) == 0 || !ok)
+    goto invalid;
+  /* Outcome keys are all-or-nothing; absence alone is legacy/hidden. */
+  /* committed, mutation_class, queryable, reconcile, engine_generation */
+  const guint required_outcome_keys = (1u << 1) | (1u << 2) | (1u << 3)
+      | (1u << 4) | (1u << 6);
+  const guint outcome_keys = required_outcome_keys | (1u << 5);
+  if ((seen & outcome_keys) != 0) {
+    if ((seen & required_outcome_keys) != required_outcome_keys
+        || !parsed.committed
+        || (g_strcmp0 (parsed.mutation_class, "committed_degraded") == 0
+        && parsed.degraded_class == NULL))
+      goto invalid;
+    parsed.has_outcome = TRUE;
+  }
+  *out_result = parsed;
+  return WYRELOG_E_OK;
+invalid:
+  wyl_client_fact_schema_register_result_clear (&parsed);
+  return WYRELOG_E_INVALID;
+}

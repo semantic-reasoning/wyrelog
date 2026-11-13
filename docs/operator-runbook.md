@@ -1883,6 +1883,44 @@ policy store contains internal version-activation machinery, but the public
 daemon/CLI does not yet provide the staged migration workflow needed to use it
 safely.
 
+For a visible relation, a successful `fact schema register` prints a runtime
+publication receipt, for example:
+
+```
+mutation_class=committed_ready reconcile=false
+```
+
+HTTP 200 means the schema committed, including when the engine refresh did
+not finish. These outcomes all exit 0; automation must inspect the receipt:
+
+| `mutation_class` | Operator action |
+| --- | --- |
+| `committed_ready` | The refresh published; use the new relation. `reconcile=false`. |
+| `committed_degraded` | The schema is durable, but refresh failed. Inspect `degraded_class`, tenant-scoped `GET /facts/status` and the daemon's replay/BOOT diagnostics. Correct the replay or storage problem, then use the documented daemon restart lifecycle to rebuild from durable state. Verify graph readiness and query the new relation before relying on it. `reconcile=true`. |
+| `committed_barrier` | The schema is durable, but runtime admission closed before publication completed. Inspect the graph's admission/seal state and any shutdown or restore in progress. Complete that lifecycle or perform the documented controlled restart, then verify the graph and new relation. A deliberately sealed graph remains sealed. `reconcile=true`. |
+
+The JSON response exposes `committed`, `mutation_class`, `queryable`,
+`reconcile`, and `engine_generation`; `degraded_class` is present for
+`committed_degraded`. The `X-Wyrelog-Mutation` header carries the same class.
+`queryable=true` can describe a surviving **previous** engine generation; it
+does not prove that the newly registered relation was published. The client
+result API exposes these fields through
+`wyl_client_fact_schema_register_with_max_rows_result()`.
+
+Registration is already durable for degraded and barrier outcomes. Repeating
+registration returns `schema_already_registered` and does not repair runtime
+publication. `fact schema status` confirms the stored columns, not engine
+readiness. A malformed or lost response instead leaves the outcome unknown;
+the CLI retains its existing recovery guidance.
+
+Hidden relations do not trigger an engine refresh, and their response omits
+the runtime fields and mutation header. Older daemons also omit them. For
+either response, the CLI preserves plain `ok`, acknowledging registration
+without asserting publication. The result API reports `has_outcome=false`;
+its runtime booleans and generation have no readiness meaning in that case.
+The two existing registration API signatures retain their status-only
+behavior. After a restart, obtain fresh credentials as described below.
+
 `fact schema status` reads a relation's registered schema back, so you can
 confirm what a registration left, including one whose outcome was unknown or
 that answered `schema_already_registered`. It needs the same

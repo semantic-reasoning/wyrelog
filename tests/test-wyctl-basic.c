@@ -5701,6 +5701,53 @@ test_fact_verify (void)
   "graph_count` shows the limit in force\n"
 
 static void
+test_fact_schema_register_outcomes (void)
+{
+  static const gchar *const args[] = {
+    "fact", "schema", "register", "--tenant", "t", "--graph", "g",
+    "--namespace", "ns", "--relation", "r", "--schema-version", "1",
+    "--columns", "value:int64", "--max-rows", "10",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  const gchar *classes[] = {
+    "committed_degraded", "committed_ready", "committed_barrier",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (classes); i++) {
+    gboolean reconcile = i != 1;
+    g_autofree gchar *body = g_strdup_printf (
+      "{\"ok\":true,\"tenant_id\":\"t\",\"graph_id\":\"g\","
+      "\"namespace_id\":\"ns\",\"relation_name\":\"r\","
+      "\"committed\":true,\"mutation_class\":\"%s\","
+      "\"queryable\":false,\"reconcile\":%s,\"engine_generation\":7%s}",
+      classes[i], reconcile ? "true" : "false",
+      i == 0 ? ",\"degraded_class\":\"replay_failed\"" : "");
+    g_autofree gchar *expected = g_strdup_printf (
+      "mutation_class=%s reconcile=%s\n", classes[i],
+      reconcile ? "true" : "false");
+    g_auto (FactForgetRun) run = { 0 };
+    run_fake_daemon_case (200, body, NULL, args, FALSE, &run);
+    assert_fact_forget_exit (&run, 0);
+    g_assert_cmpstr (run.out, ==, expected);
+    g_assert_cmpstr (run.err, ==, "");
+    g_assert_nonnull (strstr (run.request, "max_rows=10"));
+  }
+
+  g_auto (FactForgetRun) legacy = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true}", NULL, args, FALSE, &legacy);
+  assert_fact_forget_exit (&legacy, 0);
+  g_assert_cmpstr (legacy.out, ==, "ok\n");
+
+  g_auto (FactForgetRun) partial = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"committed\":true}", NULL,
+      args, FALSE, &partial);
+  assert_fact_forget_exit (&partial, 5);
+  g_assert_cmpstr (partial.out, ==, "");
+  g_assert_cmpstr (partial.err, ==,
+      "wyctl: fact schema register failed: schema_register_failed\n"
+      SCHEMA_REGISTER_UNKNOWN);
+}
+
+static void
 assert_unknown_outcome_case (guint status, guint delay_ms,
     const gchar *const *args, const gchar *request_prefix,
     const gchar *expected_err)
@@ -6886,6 +6933,8 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/fact-verify", test_fact_verify);
   g_test_add_func ("/wyctl/graph-list", test_graph_list);
   g_test_add_func ("/wyctl/fact-schema-status", test_fact_schema_status);
+  g_test_add_func ("/wyctl/fact-schema-register-outcomes",
+      test_fact_schema_register_outcomes);
   g_test_add_func ("/wyctl/fact-rule-pack-register",
       test_fact_rule_pack_register);
   g_test_add_func ("/wyctl/graph-seal", test_graph_seal);

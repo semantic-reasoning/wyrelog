@@ -2751,10 +2751,12 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
     client_fact_columns_clear (columns, n_columns);
     return client_rc;
   }
-  wyrelog_error_t rc = wyl_client_fact_schema_register_with_max_rows (client,
+  g_auto (WylClientFactSchemaRegisterResult) result = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_schema_register_with_max_rows_result (client,
           tenant,
           graph, opts.namespace_id, opts.relation, schema_version, columns,
-          n_columns, max_rows, guard_timestamp, opts.guard_loc_class, guard_risk);
+          n_columns, max_rows, guard_timestamp, opts.guard_loc_class, guard_risk,
+          &result);
   client_fact_columns_clear (columns, n_columns);
   int exit_rc = fact_remote_exit (client, "fact schema register", rc,
           "schema_register_failed");
@@ -2765,8 +2767,13 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
         "the same command is safe, and schema_already_registered then means "
         "the relation already has a schema, possibly from an earlier "
         "registration; `wyctl fact schema status` shows its columns\n");
-  if (exit_rc == 0)
-    g_print ("ok\n");
+  if (exit_rc == 0) {
+    if (result.has_outcome)
+      g_print ("mutation_class=%s reconcile=%s\n", result.mutation_class,
+          result.reconcile ? "true" : "false");
+    else
+      g_print ("ok\n");
+  }
   return exit_rc;
 }
 

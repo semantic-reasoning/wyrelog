@@ -3935,13 +3935,15 @@ wyl_client_fact_repair_batch (WylClient *client, const gchar *tenant,
 }
 
 wyrelog_error_t
-wyl_client_fact_schema_register_with_max_rows (WylClient *client,
+wyl_client_fact_schema_register_with_max_rows_result (WylClient *client,
     const gchar *tenant,
     const gchar *graph, const gchar *namespace_id, const gchar *relation,
     guint32 schema_version, const WylClientFactColumn *columns,
     gsize n_columns, guint max_rows, gint64 guard_timestamp,
-    const gchar *guard_loc_class, gint64 guard_risk)
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactSchemaRegisterResult *out_result)
 {
+  wyl_client_fact_schema_register_result_clear (out_result);
   if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
       namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
       schema_version == 0 || columns == NULL || n_columns == 0)
@@ -3988,7 +3990,30 @@ wyl_client_fact_schema_register_with_max_rows (WylClient *client,
   g_autoptr (GBytes) body = g_bytes_new (tsv->str, tsv->len);
   soup_message_set_request_body_from_bytes (message,
       "text/tab-separated-values", body);
-  return client_send_fact_message (client, message, NULL);
+  g_autoptr (GBytes) response = NULL;
+  rc = client_send_fact_message (client, message,
+          out_result != NULL ? &response : NULL);
+  if (rc != WYRELOG_E_OK || out_result == NULL)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (response, &size);
+  if (wyl_client_fact_schema_register_result_decode (data, size, tenant,
+      graph, namespace_id, relation, out_result) != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_fact_schema_register_with_max_rows (WylClient *client,
+    const gchar *tenant, const gchar *graph, const gchar *namespace_id,
+    const gchar *relation, guint32 schema_version,
+    const WylClientFactColumn *columns, gsize n_columns, guint max_rows,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk)
+{
+  return wyl_client_fact_schema_register_with_max_rows_result (client, tenant,
+             graph, namespace_id, relation, schema_version, columns,
+             n_columns, max_rows, guard_timestamp, guard_loc_class, guard_risk,
+             NULL);
 }
 
 wyrelog_error_t

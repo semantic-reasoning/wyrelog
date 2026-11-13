@@ -42,6 +42,8 @@ REQUIRED = {
     "wyl_client_fact_status",
     "wyl_client_fact_graph_verification_clear",
     "wyl_client_fact_graph_verify",
+    "wyl_client_fact_schema_register_with_max_rows_result",
+    "wyl_client_fact_schema_register_result_clear",
     "wyl_client_fact_forget_result_clear",
     "wyl_client_fact_forget_batch",
     "wyl_client_graph_clear",
