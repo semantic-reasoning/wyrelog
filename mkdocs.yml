@@ -1,0 +1,64 @@
+site_name: wyrelog
+site_description: Access-control and Datalog fact-store service
+site_url: https://semantic-reasoning.github.io/wyrelog/
+repo_url: https://github.com/semantic-reasoning/wyrelog
+repo_name: semantic-reasoning/wyrelog
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+exclude_docs: |
+  adr/
+
+nav:
+  - Home: index.md
+  - Installation Guide: installation.md
+  - Operations:
+      - Operator runbook: operator-runbook.md
+      - Offline restore runbook: fact-offline-restore-runbook.md
+      - Offline restore daemon API: offline-restore-daemon-api.md
+      - Offline restore abort recovery: fact-offline-restore-abort-recovery.md
+      - Offline restore schema transitions: fact-offline-restore-schema-transition.md
+      - GA hardening gates: ga-hardening-gates.md
+  - Design:
+      - Auth restart and JWT keys: auth-session-restart-model.md
+      - Tenant lifecycle contract: lobac-v0-tenant-contract.md
+      - Engine-session publication: engine-session-publication.md
+      - Fact admission enum evolution: fact-admission-enum-evolution.md
+      - Recursive engine qualification: recursive-engine-qualification.md
+      - Secure DuckDB backend: secure-duckdb-backend.md
+      - Service credential threat model: service-credential-threat-model.md
+      - Service credential platform support: service-credential-platform-support.md
+      - Service credential traceability: service-credential-traceability.md
+      - Windows artifact handle verifier: windows-artifact-handle-verifier.md
+  - Developer:
+      - Formatting: developer-formatting.md
+      - Lifecycle constraints: developer-lifecycle.md
+      - DuckDB AFTER_WAL_START seam: duckdb-after-walstart-test-seam.md
+      - DuckDB fixed-WAL evidence: duckdb-fixed-wal-lifecycle-evidence.md
+      - DuckDB transaction aborts: duckdb-transaction-abort-inventory.md
