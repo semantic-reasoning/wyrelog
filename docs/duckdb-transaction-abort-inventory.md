@@ -185,12 +185,23 @@ outside #1453, but the audit surfaced them:
   is a new attempt: the fact store reserves it only after finding no stored
   batch for the key, and reopens the earlier attempt's settled reservation
   (#1523).
-- **A late interrupt carries over** (#1500). The replay store wires
-  `duckdb_interrupt` to the fact store connection it borrows. An interrupt
-  that lands after its statement has returned stays set and fails the next
-  statement on that connection, possibly another session's inside a T1
-  transaction; T1 then rolls back, so nothing is kept, but the failure is
-  spurious.
+- **Late replay cancellation** (#1500, resolved). The reported next-session
+  transaction failure is not reproduced on the pinned DuckDB 2.0 prebuilt or
+  source/secure providers: ordinary query entry runs
+  `InitialCleanup` / `AbandonActiveQuery`, clearing a pending interrupt.
+  `/fact-replay/replay-store-late-cancel/{empty,populated,last-row}` cancels
+  after successful SQL execution or in its final row callback, then requires
+  the immediate next T1 append to commit on the same live store, with exact
+  readback on the original connection. There is no healing query, reopen or
+  retry before that writer. The measured defect was false adapter success for
+  empty results and cancellation in the last callback; the scheduler's own
+  terminal checkpoint concealed it. A final success-only checkpoint now runs
+  after interrupt-handler disconnection and before session release, preserving
+  prior errors and the existing per-row checks. A last-row cancellation may
+  have delivered that row; it returns cancellation, not successful completion.
+  This is a final cancellation observation, not an atomic guarantee against
+  cancellation arriving afterward or a reset contract for arbitrary DuckDB
+  versions/API routes. Live-query interruption remains tested separately.
 - **One unchecked ROLLBACK**, T4's after a bind failure, is safe by F4,
   except after the fatal errors listed there.
 - **Nothing checks the audit connection's lock order.** It is not one of

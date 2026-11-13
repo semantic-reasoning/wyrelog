@@ -392,6 +392,10 @@ cleanup:
   duckdb_destroy_result (&result);
   if (interrupt_handler != 0)
     g_cancellable_disconnect (cancellable, interrupt_handler);
+  /* Empty results and cancellation in the last row callback bypass the next
+   * per-row checkpoint. Observe cancellation after interrupt callbacks stop. */
+  if (rc == WYRELOG_E_OK)
+    rc = checkpoint (job_context);
   wyl_fact_store_connection_session_end (&session);
   return rc;
 }

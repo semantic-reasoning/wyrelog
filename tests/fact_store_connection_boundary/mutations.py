@@ -136,6 +136,25 @@ def replay_session_mutation_source(files: dict[str, str]) -> str:
     return source.replace(marker, alias, 1)
 
 
+def _move_replay_cleanup_after_release(source: str, operation: str) -> str:
+    body = function_body(source, "c_store_execute (gpointer provider")
+    marker = "\ncleanup:\n"
+    release = "  wyl_fact_store_connection_session_end (&session);\n"
+    if source.count(body) != 1 or body.count(marker) != 1:
+        raise AssertionError("replay cleanup mutation region drifted")
+    prefix, cleanup = body.split(marker)
+    if cleanup.count(operation) != 1 or cleanup.count(release) != 1:
+        raise AssertionError("replay cleanup mutation operation drifted")
+    if cleanup.index(operation) >= cleanup.index(release):
+        raise AssertionError("replay cleanup mutation requires safe baseline order")
+    moved = cleanup.replace(operation, "", 1).replace(
+        release, release + operation, 1,
+    )
+    if moved == cleanup or moved.index(operation) <= moved.index(release):
+        raise AssertionError("replay cleanup mutation did not move operation")
+    return source.replace(body, prefix + marker + moved, 1)
+
+
 def source_key(root: PurePath, path: PurePath) -> str:
     return path.relative_to(root).as_posix()
 
@@ -407,22 +426,10 @@ def self_test(files: dict[str, str]) -> None:
 
     changed = dict(files)
     provider_source = changed["wyrelog/fact/replay-store-private.c"]
-    cleanup_order = (
-        "  duckdb_destroy_prepare (&stmt);\n"
-        "  duckdb_destroy_result (&result);\n"
-        "  if (interrupt_handler != 0)\n"
-        "    g_cancellable_disconnect (cancellable, interrupt_handler);\n"
-        "  wyl_fact_store_connection_session_end (&session);\n"
-    )
-    cleanup_after_release = (
-        "  duckdb_destroy_prepare (&stmt);\n"
-        "  if (interrupt_handler != 0)\n"
-        "    g_cancellable_disconnect (cancellable, interrupt_handler);\n"
-        "  wyl_fact_store_connection_session_end (&session);\n"
-        "  duckdb_destroy_result (&result);\n"
-    )
-    changed["wyrelog/fact/replay-store-private.c"] = provider_source.replace(
-        cleanup_order, cleanup_after_release, 1
+    changed["wyrelog/fact/replay-store-private.c"] = (
+        _move_replay_cleanup_after_release(
+            provider_source, "  duckdb_destroy_result (&result);\n",
+        )
     )
     mutations.append(changed)
     require_boundary_rejection(
@@ -433,15 +440,12 @@ def self_test(files: dict[str, str]) -> None:
 
     changed = dict(files)
     provider_source = changed["wyrelog/fact/replay-store-private.c"]
-    disconnect_after_release = (
-        "  duckdb_destroy_prepare (&stmt);\n"
-        "  duckdb_destroy_result (&result);\n"
-        "  wyl_fact_store_connection_session_end (&session);\n"
+    disconnect = (
         "  if (interrupt_handler != 0)\n"
         "    g_cancellable_disconnect (cancellable, interrupt_handler);\n"
     )
-    changed["wyrelog/fact/replay-store-private.c"] = provider_source.replace(
-        cleanup_order, disconnect_after_release, 1
+    changed["wyrelog/fact/replay-store-private.c"] = (
+        _move_replay_cleanup_after_release(provider_source, disconnect)
     )
     mutations.append(changed)
     require_boundary_rejection(
