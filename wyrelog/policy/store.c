@@ -168,6 +168,8 @@ struct wyl_policy_store_t
   gpointer encrypted_publication_hook_data;
   WylPolicyStoreEncryptedReplacementRetryHook encrypted_replacement_retry_hook;
   gpointer encrypted_replacement_retry_hook_data;
+  WylPolicyStoreRuntimeLeaseDowngradeHook runtime_lease_downgrade_hook;
+  gpointer runtime_lease_downgrade_hook_data;
   gboolean fact_logical_settle_fail_once;
   gboolean fact_physical_settle_fail_once;
 #endif
@@ -350,6 +352,13 @@ policy_store_runtime_writer_begin (wyl_policy_store_t *store)
   return WYRELOG_E_OK;
 }
 
+/* Ending the last writer downgrades the runtime lease, which is file-lock
+ * I/O on a plaintext file store (no other store has a runtime lease).  The
+ * commits call this after leaving the SQLite connection mutex, so the
+ * connection's readers never wait on that I/O; runtime_writer_depth itself is
+ * guarded by graph_authority_mutex, which every writer holds from begin to
+ * end.  A writer inside a coordinator fence still ends under the fence's
+ * connection mutex. */
 static wyrelog_error_t
 policy_store_runtime_writer_end (wyl_policy_store_t *store)
 {
@@ -365,6 +374,11 @@ policy_store_runtime_writer_end (wyl_policy_store_t *store)
       store->runtime_writer_depth = 1;
       return WYRELOG_E_IO;
     }
+#if defined(WYL_TEST_HANDLE_SEAMS)
+    if (store->runtime_lease_downgrade_hook != NULL)
+      store->runtime_lease_downgrade_hook (store,
+          store->runtime_lease_downgrade_hook_data);
+#endif
     wyrelog_error_t rc = wyl_policy_store_runtime_lease_downgrade
           (store->runtime_lease);
     if (rc != WYRELOG_E_OK) {
@@ -9108,6 +9122,12 @@ wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
   if (store == NULL || store->db == NULL
       || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
+  /* The connection mutex spans the commit and an encrypted store's
+   * publication, so no same-connection reader sees the commit before the
+   * image is durable.  A plaintext store takes it too, for one rule in both
+   * commits: it holds nothing that can block once the writer lease ends
+   * after it is left (see policy_store_runtime_writer_end), and RELEASE
+   * already takes it inside sqlite3_exec on a serialized connection. */
   sqlite3_mutex *connection_mutex = sqlite3_db_mutex (store->db);
   sqlite3_mutex_enter (connection_mutex);
   wyrelog_error_t rc = exec_sql (store->db,
@@ -9126,10 +9146,10 @@ wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
     policy_store_make_terminal (store, rc);
   } else
     rc = policy_store_publish_outer_commit (store);
+  sqlite3_mutex_leave (connection_mutex);
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
   if (rc == WYRELOG_E_OK)
     rc = lease_rc;
-  sqlite3_mutex_leave (connection_mutex);
   policy_store_transaction_leave (store);
   return rc;
 }
@@ -9190,23 +9210,26 @@ wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
   if (store == NULL || store->db == NULL
       || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
+  /* Every store needs the connection mutex here, not only one that
+   * publishes: a read snapshot takes only this mutex, so without it a
+   * snapshot BEGIN could land between the autocommit reads below and the
+   * COMMIT, which would then end the snapshot's transaction or leave this
+   * frame open.  The writer lease ends after it is left: see
+   * policy_store_runtime_writer_end. */
   sqlite3_mutex *connection_mutex = sqlite3_db_mutex (store->db);
   sqlite3_mutex_enter (connection_mutex);
   if (sqlite3_get_autocommit (store->db)) {
     /* SQLite already rolled the transaction back under a failed statement.
      * There is nothing to commit, but the writer lease and this frame are
      * still the caller's and end here, as rollback_checked ends them. */
-    (void) policy_store_runtime_writer_end (store);
     sqlite3_mutex_leave (connection_mutex);
+    (void) policy_store_runtime_writer_end (store);
     policy_store_transaction_leave (store);
     return WYRELOG_E_INVALID;
   }
   wyrelog_error_t rc = exec_sql (store->db, "COMMIT;");
   if (rc == WYRELOG_E_OK)
     rc = policy_store_publish_outer_commit (store);
-  wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
-  if (rc == WYRELOG_E_OK)
-    rc = lease_rc;
   /* The frame ends with the transaction.  A COMMIT that failed while the
    * transaction stayed open (a vetoed commit, say) keeps the frame for the
    * owner's rollback, which every publication caller performs -- the fences
@@ -9214,6 +9237,9 @@ wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
    * above; one SQLite rolled back on its own has ended it. */
   gboolean ended = sqlite3_get_autocommit (store->db);
   sqlite3_mutex_leave (connection_mutex);
+  wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  if (rc == WYRELOG_E_OK)
+    rc = lease_rc;
   if (ended)
     policy_store_transaction_leave (store);
   return rc;
@@ -10623,6 +10649,17 @@ wyl_policy_store_set_encrypted_publication_hook_for_test
     return;
   store->encrypted_publication_hook = hook;
   store->encrypted_publication_hook_data = data;
+}
+
+void
+wyl_policy_store_set_runtime_lease_downgrade_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreRuntimeLeaseDowngradeHook hook,
+    gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->runtime_lease_downgrade_hook = hook;
+  store->runtime_lease_downgrade_hook_data = data;
 }
 
 void

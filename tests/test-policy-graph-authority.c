@@ -9221,6 +9221,133 @@ test_operator_owner_assignments (void)
   g_assert_cmpstr (kept, ==, "dave");
 }
 
+/* The runtime writer lease downgrade is file-lock I/O on the lease.  A
+ * commit must not hold the SQLite connection mutex across it, or every
+ * same-connection operation -- read snapshots included -- would wait on that
+ * I/O (#1463).  Only a plaintext file store has a runtime lease, so each case
+ * opens one and probes the connection mutex from another thread at the
+ * moment of the downgrade: the mutex is recursive, so the committing thread
+ * itself could always take it again. */
+enum
+{
+  LEASE_DOWNGRADE_MUTATION_COMMIT = 0,
+  LEASE_DOWNGRADE_PUBLICATION_COMMIT,
+  LEASE_DOWNGRADE_PUBLICATION_AUTO_ROLLBACK,
+  LEASE_DOWNGRADE_MUTATION_RELEASE_DENIED,
+  LEASE_DOWNGRADE_CASE_COUNT,
+};
+
+typedef struct
+{
+  sqlite3_mutex *mutex;
+  guint downgrades;
+  guint publications;
+  int mutex_result;
+} LeaseDowngradeProbe;
+
+static gpointer
+run_lease_downgrade_mutex_try (gpointer data)
+{
+  LeaseDowngradeProbe *probe = data;
+  probe->mutex_result = sqlite3_mutex_try (probe->mutex);
+  if (probe->mutex_result == SQLITE_OK)
+    sqlite3_mutex_leave (probe->mutex);
+  return NULL;
+}
+
+static void
+probe_lease_downgrade (wyl_policy_store_t *store, gpointer data)
+{
+  (void) store;
+  LeaseDowngradeProbe *probe = data;
+  probe->downgrades++;
+  GThread *thread = g_thread_new ("lease-downgrade-mutex-try",
+          run_lease_downgrade_mutex_try, probe);
+  g_thread_join (thread);
+}
+
+static void
+count_plaintext_publication (wyl_policy_store_t *store, gpointer data)
+{
+  (void) store;
+  LeaseDowngradeProbe *probe = data;
+  probe->publications++;
+}
+
+static void
+test_lease_downgrade_outside_connection_mutex (void)
+{
+  for (guint mode = 0; mode < LEASE_DOWNGRADE_CASE_COUNT; mode++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    g_autofree gchar *lock = g_strconcat (path, ".wyrelog-lock", NULL);
+    {
+      g_autoptr (wyl_policy_store_t) store = NULL;
+      g_assert_cmpint (wyl_policy_store_open (path, &store), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+          WYRELOG_E_OK);
+      sqlite3 *db = wyl_policy_store_get_db (store);
+      LeaseDowngradeProbe probe = {
+        .mutex = sqlite3_db_mutex (db),
+        .mutex_result = SQLITE_ERROR,
+      };
+      g_assert_nonnull (probe.mutex);
+      wyl_policy_store_set_runtime_lease_downgrade_hook_for_test (store,
+          probe_lease_downgrade, &probe);
+      wyl_policy_store_set_encrypted_publication_hook_for_test (store,
+          count_plaintext_publication, &probe);
+
+      gboolean publication = mode == LEASE_DOWNGRADE_PUBLICATION_COMMIT
+          || mode == LEASE_DOWNGRADE_PUBLICATION_AUTO_ROLLBACK;
+      g_assert_cmpint (publication
+          ? wyl_policy_store_publication_transaction_begin (store)
+          : wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_user_register (store,
+          "downgrade-user"), ==, WYRELOG_E_OK);
+      wyrelog_error_t rc;
+      guint rejected = 0;
+      switch (mode) {
+        case LEASE_DOWNGRADE_MUTATION_COMMIT:
+          rc = wyl_policy_store_commit_mutation (store);
+          g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+          break;
+        case LEASE_DOWNGRADE_PUBLICATION_COMMIT:
+          rc = wyl_policy_store_publication_transaction_commit (store);
+          g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+          break;
+        case LEASE_DOWNGRADE_PUBLICATION_AUTO_ROLLBACK:
+          g_assert_cmpint (sqlite3_exec (db, "ROLLBACK;", NULL, NULL, NULL),
+              ==, SQLITE_OK);
+          rc = wyl_policy_store_publication_transaction_commit (store);
+          g_assert_cmpint (rc, ==, WYRELOG_E_INVALID);
+          break;
+        case LEASE_DOWNGRADE_MUTATION_RELEASE_DENIED:
+          g_assert_cmpint (sqlite3_set_authorizer (db,
+              deny_savepoint_release, &rejected), ==, SQLITE_OK);
+          rc = wyl_policy_store_commit_mutation (store);
+          sqlite3_set_authorizer (db, NULL, NULL);
+          g_assert_cmpuint (rejected, >=, 1);
+          g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+          break;
+        default:
+          g_assert_not_reached ();
+      }
+      g_assert_false (wyl_policy_store_transaction_owned_by_caller (store));
+      g_assert_cmpuint (probe.downgrades, ==, 1);
+      g_assert_cmpint (probe.mutex_result, ==, SQLITE_OK);
+      g_assert_cmpuint (probe.publications, ==, 0);
+      wyl_policy_store_set_runtime_lease_downgrade_hook_for_test (store,
+          NULL, NULL);
+      wyl_policy_store_set_encrypted_publication_hook_for_test (store,
+          NULL, NULL);
+    }
+    (void) g_remove (lock);
+    cleanup_store_path (root, path);
+    g_assert_false (g_file_test (root, G_FILE_TEST_EXISTS));
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -9443,5 +9570,8 @@ main (int argc, char **argv)
       test_fact_graph_backup_snapshot);
   g_test_add_func ("/policy/graph-authority/graph-provisioning-selected-list",
       test_graph_provisioning_selected_list);
+  g_test_add_func
+    ("/policy/graph-authority/lease-downgrade-outside-connection-mutex",
+      test_lease_downgrade_outside_connection_mutex);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
