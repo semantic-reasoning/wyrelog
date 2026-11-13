@@ -84,6 +84,13 @@ typedef void (*WylPolicyStoreEncryptedPublicationHook)
 void wyl_policy_store_set_encrypted_publication_hook_for_test
   (wyl_policy_store_t *store, WylPolicyStoreEncryptedPublicationHook hook,
     gpointer data);
+/* Immediately before a runtime writer lease is downgraded back to shared,
+ * after the last writer on a plaintext file store ends.  Seams build only. */
+typedef void (*WylPolicyStoreRuntimeLeaseDowngradeHook)
+  (wyl_policy_store_t *store, gpointer data);
+void wyl_policy_store_set_runtime_lease_downgrade_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreRuntimeLeaseDowngradeHook hook,
+    gpointer data);
 /* After a native Windows replacement failure, before retry identity/reparse
  * checks. Seams build only. */
 typedef void (*WylPolicyStoreEncryptedReplacementRetryHook)
