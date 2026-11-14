@@ -18175,6 +18175,103 @@ policy_count_rows (WylHandle *handle, const gchar *sql, gint64 *out_count)
   return ok;
 }
 
+
+#ifdef WYL_HAS_FACT_STORE
+/* #1446: exercise the real handoff route with configured encrypted storage
+ * and publication roots. A terminal fence must stop both a first attempt and
+ * a repeat without producing a credential or publishing another secret. */
+static gboolean
+reconciled_credential_requests_are_refused (WylHandle *handle,
+    SoupSession *session, const gchar *base_url, const gchar *query,
+    const gchar *access_token, const gchar *publication_root,
+    SpPublication *publication)
+{
+  gchar seed_id[WYL_REQUEST_ID_STRING_BUF];
+  wyl_service_credential_issue_result_t seed = { 0 };
+  if (wyl_request_id_new (seed_id, sizeof seed_id) != WYRELOG_E_OK)
+    return FALSE;
+  wyrelog_error_t seed_rc = wyl_service_credential_issue (handle,
+          "svc:tenant-a:worker", "tenant-a", "human-principal-admin", seed_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US, &seed);
+  g_autofree gchar *old_id = g_strdup (seed.credential.credential_id);
+  guint64 old_generation = seed.credential.generation;
+  wyl_service_credential_issue_result_clear (&seed);
+  if (seed_rc != WYRELOG_E_OK || old_id == NULL)
+    return FALSE;
+  gboolean all_refused = TRUE;
+  const gchar *counts[] = {
+    "SELECT count(*) FROM service_credentials;",
+    "SELECT count(*) FROM service_credential_events;",
+    "SELECT count(*) FROM service_domain_requests;",
+  };
+  for (guint rotate = 0; rotate < 2; rotate++) {
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+    if (wyl_request_id_new (request_id, sizeof request_id) != WYRELOG_E_OK)
+      return FALSE;
+    g_autofree gchar *reconcile = rotate ? g_strdup_printf (
+      "{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
+      "\"target\":{\"old_credential_id\":\"%s\"}}", request_id, old_id)
+        : g_strdup_printf (
+      "{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:tenant-a:worker\",\"tenant\":\"tenant-a\"}}",
+      request_id);
+    guint status = 0;
+    g_autofree gchar *response = NULL;
+    if (send_raw_reconcile_bearer (session, "POST", base_url, query,
+        access_token, reconcile, &status, &response) != 0 || status != 200
+        || response == NULL
+        || strstr (response, "\"status\":\"not_committed_terminal\"") == NULL)
+      return FALSE;
+    gint64 before[G_N_ELEMENTS (counts)] = { 0 };
+    for (gsize j = 0; j < G_N_ELEMENTS (counts); j++)
+      if (!policy_count_rows (handle, counts[j], &before[j]))
+        return FALSE;
+    guint stage_calls = publication->stage_calls;
+    guint commit_calls = publication->commit_calls;
+    const gchar *destination = rotate ? "closed-rotate.json" : "closed-issue.json";
+    g_autofree gchar *destination_path = g_build_filename (publication_root,
+            destination, NULL);
+    g_autofree gchar *path = rotate
+        ? g_strdup_printf ("/service-credentials/%s/rotate", old_id)
+        : g_strdup ("/service-principals/svc:tenant-a:worker/credentials");
+    g_autofree gchar *request = g_strdup_printf (
+      "{\"version\":\"1\",\"request_id\":\"%s\",\"destination\":\"%s\","
+      "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"%s}",
+      request_id, destination, rotate ? "" : ",\"tenant\":\"tenant-a\"");
+    for (guint attempt = 0; attempt < 2; attempt++) {
+      g_clear_pointer (&response, g_free);
+      if (send_raw_service_principal_bearer (session, "POST", base_url, path,
+          query, access_token, request, &status, &response) != 0
+          || status != 409 || g_strcmp0 (response,
+          "{\"error\":\"service_credential_conflict\"}") != 0) {
+        g_printerr ("WYRELOG_TEST_DIAG reconciled_credential_refusal "
+            "operation=%s attempt=%u status=%u\n",
+            rotate ? "rotate" : "issue", attempt, status);
+        all_refused = FALSE;
+      }
+      for (gsize j = 0; j < G_N_ELEMENTS (counts); j++) {
+        gint64 after = 0;
+        if (!policy_count_rows (handle, counts[j], &after) || after != before[j])
+          return FALSE;
+      }
+      if (publication->stage_calls != stage_calls
+          || publication->commit_calls != commit_calls
+          || g_file_test (destination_path, G_FILE_TEST_EXISTS))
+        return FALSE;
+      wyl_policy_service_credential_info_t old = { 0 };
+      wyrelog_error_t lookup_rc = wyl_policy_store_lookup_service_credential_by_id
+            (wyl_handle_get_policy_store (handle), old_id, &old);
+      gboolean unchanged = lookup_rc == WYRELOG_E_OK
+          && old.generation == old_generation && g_strcmp0 (old.state, "active") == 0;
+      wyl_policy_service_credential_info_clear (&old);
+      if (!unchanged)
+        return FALSE;
+    }
+  }
+  return all_refused;
+}
+#endif
+
 static gint
 check_service_principal_management_contract (void)
 {
@@ -18512,6 +18609,13 @@ check_service_principal_management_contract (void)
     rc = 1987;
     goto cleanup;
   }
+#ifdef WYL_HAS_FACT_STORE
+  if (!reconciled_credential_requests_are_refused (handle, session, base_url,
+      tenant_query, access_token, publication_root, &publication)) {
+    rc = 1988;
+    goto cleanup;
+  }
+#endif
   const gchar *issue_body =
       "{\"version\":\"1\",\"tenant\":\"tenant-a\","
       "\"request_id\":\"111111111111111111111111111\","

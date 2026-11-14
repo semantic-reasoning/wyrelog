@@ -5970,6 +5970,23 @@ test_service_change_unknown_outcome (void)
       "wyctl: service-credential issue failed: service_credential_conflict\n"
       "wyctl: service-credential issue "
       "request_id=222222222222222222222222222\n");
+
+  static const gchar *const explicit_rotate_args[] = {
+    "service-credential", "rotate", "--credential-id",
+    "wlc_000000000000000000000000001", "--tenant", "__wr_default",
+    "--destination", "@DEST@", "--expires-at-us", "1893456000000000",
+    "--request-id", "222222222222222222222222223", SERVICE_GUARDS, NULL,
+  };
+  const gchar *explicit_rotate[G_N_ELEMENTS (explicit_rotate_args)];
+  for (gsize i = 0; i < G_N_ELEMENTS (explicit_rotate_args); i++)
+    explicit_rotate[i] = g_strcmp0 (explicit_rotate_args[i], "@DEST@") == 0
+        ? destination : explicit_rotate_args[i];
+  assert_service_change_case (409,
+      "{\"error\":\"service_credential_conflict\"}", 0, FALSE, explicit_rotate, 5,
+      "POST /service-credentials/wlc_000000000000000000000000001/rotate",
+      "wyctl: service-credential rotate failed: service_credential_conflict\n"
+      "wyctl: service-credential rotate "
+      "request_id=222222222222222222222222223\n");
   g_assert_false (g_file_test (destination, G_FILE_TEST_EXISTS));
 }
 
