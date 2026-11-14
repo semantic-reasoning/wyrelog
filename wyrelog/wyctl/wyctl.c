@@ -6408,16 +6408,30 @@ service_credential_resolve_request_id (const gchar *request_id_arg,
 /* Issue and rotate replay under the same id.  Recover only reads what the
  * daemon recorded for the id; when it has nothing, or the daemon has no
  * operation store to ask, the same command with the same id is the way on
- * (#1332). */
+ * (#1332).  Reconcile is named on its own line as the way to give the
+ * attempt up, never as a retry (#1448): when the id never committed it
+ * closes the id for good, and run while the attempt is still in flight it
+ * makes that attempt fail (#1270).  Its target is the issue's subject or the
+ * credential the rotate supersedes. */
 static void
 wyctl_print_credential_unknown (const gchar *verb, const gchar *request_id,
-    const gchar *tenant)
+    const gchar *tenant, const gchar *target)
 {
+  const gchar *target_flag = g_strcmp0 (verb, "issue") == 0
+      ? "--subject" : "--credential-id";
   g_printerr ("wyctl: the service-credential %s outcome is unknown; `wyctl "
       "service-credential recover --request-id %s --tenant %s` reports what "
       "the daemon recorded for it, and if it finds no such operation, or the "
       "daemon offers no recover, re-run the same command with --request-id "
       "%s, never a new id\n", verb, request_id, tenant, request_id);
+  g_printerr ("wyctl: to abandon the attempt instead, and only once it can "
+      "no longer be running on the daemon, never right away, run `wyctl "
+      "service-credential reconcile --operation %s --request-id %s %s %s "
+      "--tenant %s` with the token and guard options; if the id never "
+      "committed, that closes it for good, every later issue or rotate with "
+      "it is refused, and a new attempt needs a new id, and if it did "
+      "commit, reconcile reports the credential and undoes nothing\n", verb,
+      request_id, target_flag, target, tenant);
 }
 
 static int
@@ -6521,7 +6535,8 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   wyctl_print_service_request_id (client, rc, "service-credential issue",
       request_id);
   if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
-    wyctl_print_credential_unknown ("issue", request_id, tenant);
+    wyctl_print_credential_unknown ("issue", request_id, tenant,
+        opts.subject);
   if (exit_rc == 0)
     print_service_credential_receipt (&receipt);
   return exit_rc;
@@ -6622,7 +6637,8 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
   wyctl_print_service_request_id (client, rc, "service-credential rotate",
       request_id);
   if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
-    wyctl_print_credential_unknown ("rotate", request_id, tenant);
+    wyctl_print_credential_unknown ("rotate", request_id, tenant,
+        opts.credential_id);
   if (exit_rc == 0)
     print_service_credential_receipt (&receipt);
   return exit_rc;

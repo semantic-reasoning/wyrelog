@@ -1089,7 +1089,9 @@ After a timeout or a server error, `wyctl` names `service-credential recover
 --request-id <id> --tenant <tenant>`, which only reports what the daemon
 recorded for that id (see "Publication failure and orphan recovery"); if it
 finds no such operation, or the daemon offers no `recover`, re-run the same
-command with that id.
+command with that id. A second line names `service-credential reconcile`, with
+the id and its target, solely as the way to give the attempt up, and only once
+it can no longer be running on the daemon (see "Reconcile versus recover").
 The daemon emits a static, secret-free policy diagnostic naming the refusal
 check when `WYL_LOG=policy:debug` is enabled.
 

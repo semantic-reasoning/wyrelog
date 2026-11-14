@@ -5862,12 +5862,21 @@ assert_service_change_case (guint status, const gchar *body, guint delay_ms,
   "--access-token-file", "@TOKEN@", "--guard-timestamp", "123", \
   "--guard-loc-class", "public", "--guard-risk", "10"
 #define LATE_403 "{\"error\":\"denied_late\"}"
-#define ISSUE_UNKNOWN(verb) \
+#define ISSUE_UNKNOWN(verb, target) \
   "wyctl: the service-credential " verb " outcome is unknown; `wyctl " \
   "service-credential recover --request-id @ID@ --tenant __wr_default` " \
   "reports what the daemon recorded for it, and if it finds no such " \
   "operation, or the daemon offers no recover, re-run the same command " \
-  "with --request-id @ID@, never a new id\n"
+  "with --request-id @ID@, never a new id\n" \
+  "wyctl: to abandon the attempt instead, and only once it can no longer " \
+  "be running on the daemon, never right away, run `wyctl " \
+  "service-credential reconcile --operation " verb " --request-id @ID@ " \
+  target " --tenant __wr_default` with the token and guard options; if " \
+  "the id never committed, that closes it for good, every later issue or " \
+  "rotate with it is refused, and a new attempt needs a new id, and if it " \
+  "did commit, reconcile reports the credential and undoes nothing\n"
+#define ISSUE_TARGET "--subject svc:tenant-a:worker"
+#define ROTATE_TARGET "--credential-id wlc_000000000000000000000000001"
 
 static void
 test_service_change_unknown_outcome (void)
@@ -5923,13 +5932,13 @@ test_service_change_unknown_outcome (void)
       "wyctl: service-credential issue failed: "
       "service_credential_issue_failed\n"
       "wyctl: service-credential issue request_id=@ID@\n"
-      ISSUE_UNKNOWN ("issue"));
+      ISSUE_UNKNOWN ("issue", ISSUE_TARGET));
   assert_service_change_case (403, LATE_403, 2000, FALSE, credential_rotate,
       5, "POST /service-credentials/wlc_000000000000000000000000001/rotate",
       "wyctl: service-credential rotate failed: "
       "service_credential_rotate_failed\n"
       "wyctl: service-credential rotate request_id=@ID@\n"
-      ISSUE_UNKNOWN ("rotate"));
+      ISSUE_UNKNOWN ("rotate", ROTATE_TARGET));
   assert_service_change_case (403, LATE_403, 2000, FALSE, credential_revoke,
       5, "DELETE /service-credentials/wlc_000000000000000000000000001",
       "wyctl: service-credential revoke failed: "
@@ -5944,7 +5953,7 @@ test_service_change_unknown_outcome (void)
       "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
       "wyctl: service-credential issue failed: denied_late\n"
       "wyctl: service-credential issue request_id=@ID@\n"
-      ISSUE_UNKNOWN ("issue"));
+      ISSUE_UNKNOWN ("issue", ISSUE_TARGET));
   /* A refusal whose headers arrived is known, so no outcome line; the id is
    * still printed, since the daemon saw it. */
   assert_service_change_case (403, LATE_403, 2000, TRUE, credential_revoke,
