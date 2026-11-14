@@ -652,6 +652,21 @@ test_terminal_fence_blocks_issue_before_rng (void)
       "fence-block-issue", 0, &issue_result), ==, WYRELOG_E_POLICY);
   g_assert_null (issue_result.secret);
   g_assert_null (issue_result.credential.credential_id);
+  wyl_id_t escrow_id;
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 1 };
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id, .target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  wyl_service_credential_handoff_result_t handoff_result = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+      "svc:fence:issue-block", "tenant-a", "admin", "fence-block-issue", 0,
+      &handoff, NULL, &handoff_result), ==, WYRELOG_E_CONFLICT);
+  g_assert_null (handoff_result.credential.credential_id);
+  g_assert_null (handoff_result.handoff.request_id);
+  wyl_service_credential_handoff_result_clear (&handoff_result);
+
   g_assert_cmpint (scalar (db_of (handle),
       "SELECT count(*) FROM service_domain_requests WHERE request_id="
       "'fence-block-issue';"), ==, 0);
@@ -677,6 +692,7 @@ test_terminal_fence_blocks_rotate_before_rng (void)
       "svc:fence:rotate-block", "tenant-a", "admin", "fence-rotate-old",
       0, &issued), ==, WYRELOG_E_OK);
   g_autofree gchar *old_id = g_strdup (issued.credential.credential_id);
+  guint64 old_generation = issued.credential.generation;
   wyl_service_credential_issue_result_clear (&issued);
 
   Txn t = { 0 };
@@ -719,12 +735,28 @@ test_terminal_fence_blocks_rotate_before_rng (void)
   wyl_service_credential_issue_result_t rotated = { 0 };
   wyl_service_credential_rotate_runtime_t rotate_runtime = {
     .credential_runtime = &runtime,
+    .old_credential_generation = old_generation,
   };
   g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
       old_id, "admin", "fence-block-rotate", 0, &rotate_runtime,
       &rotated), ==, WYRELOG_E_POLICY);
   g_assert_null (rotated.secret);
   g_assert_null (rotated.credential.credential_id);
+  wyl_id_t escrow_id;
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 2 };
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id, .target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  wyl_service_credential_handoff_result_t handoff_result = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate_handoff_checked_with_runtime
+        (handle, old_id, "admin", "fence-block-rotate", 0, &handoff,
+      &rotate_runtime, &handoff_result), ==, WYRELOG_E_CONFLICT);
+  g_assert_null (handoff_result.credential.credential_id);
+  g_assert_null (handoff_result.handoff.request_id);
+  wyl_service_credential_handoff_result_clear (&handoff_result);
+
   g_assert_cmpuint (state.ids, ==, 0);
   g_assert_cmpuint (state.allocs, ==, 0);
   g_assert_cmpuint (state.frees, ==, 0);

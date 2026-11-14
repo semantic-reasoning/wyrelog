@@ -967,6 +967,8 @@ service_mutation_precheck_handoff_fence (ServiceMutation *mutation,
     return WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (fence.state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL)
+    return WYRELOG_E_CONFLICT;
   if (fence.state != WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED)
     return WYRELOG_E_POLICY;
   *out_replay = TRUE;

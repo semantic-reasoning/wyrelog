@@ -1075,7 +1075,13 @@ For service-credential issue and rotation, HTTP 403
 was refused; it is not a request-id conflict. HTTP 409
 `service_credential_conflict` means the request id is already bound to different
 immutable operation inputs, or its operation has been retired and the id remains
-reserved. Do not mint a replacement id to get around either response. HTTP
+reserved. In particular, after reconcile reports `not_committed_terminal`,
+issue or rotate with that closed ID returns HTTP 409
+`service_credential_conflict`. This refusal is final: `wyctl` prints the failed
+command and request ID without the unknown-outcome/recover hint. Stop retrying
+that ID. A deliberate new attempt after this terminal verdict uses a new
+`--request-id`, as described in the reconciliation section; changing inputs
+under a reserved ID is never a retry. HTTP
 500/503 can occur after the credential mutation has committed
 but before escrow publication or delivery finishes; keep the original request
 id, inspect `service-credential status`/`recover`, and retry only with that id.
