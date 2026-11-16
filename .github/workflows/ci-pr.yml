@@ -304,6 +304,7 @@ jobs:
             fact-store-provisioned \
             fact-graph-seal \
             daemon-http-facts \
+            daemon-http-facts-empty-schema \
             fact-store-forget-transaction \
             fact-store-forget-transaction-provisioned \
             --print-errorlogs
@@ -1265,6 +1266,7 @@ jobs:
             fact-runtime \
             fact-store \
             daemon-http-facts \
+            daemon-http-facts-empty-schema \
             --logbase recursive-sanitizer \
             --num-processes 2 \
             --timeout-multiplier 3 \

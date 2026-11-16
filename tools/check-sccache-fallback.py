@@ -118,6 +118,7 @@ def main() -> int:
             "            fact-runtime \\\n"
             "            fact-store \\\n"
             "            daemon-http-facts \\\n"
+            "            daemon-http-facts-empty-schema \\\n"
             "            --logbase recursive-sanitizer \\\n"
             "            --num-processes 2 \\\n"
             "            --timeout-multiplier 3 \\\n", path)

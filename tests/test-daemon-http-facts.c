@@ -5666,12 +5666,20 @@ run_fact_http_fixture (gboolean empty_schema_only)
   return wyl_test_normalize_exit_status (rc);
 }
 
+/* Each run builds one fixture.  The empty-schema checks and the main contract
+ * both need a fresh default tenant, so meson registers them as two tests,
+ * daemon-http-facts and daemon-http-facts-empty-schema (#1467). */
 int
 main (int argc, char **argv)
 {
-  gint rc = run_fact_http_fixture (TRUE);
-  if (rc == 0 && !(argc == 2 && g_strcmp0 (argv[1],
-      "--empty-schema-only") == 0))
-    rc = run_fact_http_fixture (FALSE);
+  gboolean empty_schema_only = argc == 2
+      && g_strcmp0 (argv[1], "--empty-schema-only") == 0;
+  gint rc;
+  if (argc == 1 || empty_schema_only)
+    rc = run_fact_http_fixture (empty_schema_only);
+  else {
+    g_printerr ("usage: %s [--empty-schema-only]\n", argv[0]);
+    rc = 2;
+  }
   return wyl_test_normalize_exit_status (rc);
 }
