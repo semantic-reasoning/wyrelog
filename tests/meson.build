@@ -1123,6 +1123,23 @@ if build_client
       env : test_daemon_http_facts_env,
       timeout : test_daemon_http_facts_timeout,
     )
+    # The empty-schema checks need a fresh default tenant, and so does the
+    # main contract: the contract asserts zero committed graphs and rows, then
+    # leaves the tenant's write-rate bucket empty.  They used to build a second
+    # fixture inside the run above; as their own test, the default run builds
+    # one (#1467).  On one Linux host, base and change run back to back, the
+    # run above went from 48.4-48.5 to 44.6-45.5 seconds and this one takes
+    # about 3.4.  Windows is unmeasured, so its budget is twice the Linux one,
+    # like the run above.
+    test_daemon_http_facts_empty_schema_timeout = 60
+    if host_machine.system() == 'windows'
+      test_daemon_http_facts_empty_schema_timeout = 120
+    endif
+    test('daemon-http-facts-empty-schema', test_daemon_http_facts,
+      args : ['--empty-schema-only'],
+      env : test_daemon_http_facts_env,
+      timeout : test_daemon_http_facts_empty_schema_timeout,
+    )
   endif
 endif
 

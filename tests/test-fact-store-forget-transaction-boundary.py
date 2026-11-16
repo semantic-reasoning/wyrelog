@@ -781,6 +781,7 @@ def validate(files: dict[str, str]) -> None:
         "            fact-store-provisioned \\\n"
         "            fact-graph-seal \\\n"
         "            daemon-http-facts \\\n"
+        "            daemon-http-facts-empty-schema \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
@@ -1634,6 +1635,7 @@ def self_test(baseline: dict[str, str]) -> None:
         "            fact-store-provisioned \\\n"
         "            fact-graph-seal \\\n"
         "            daemon-http-facts \\\n"
+        "            daemon-http-facts-empty-schema \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
@@ -1686,6 +1688,15 @@ def self_test(baseline: dict[str, str]) -> None:
             baseline,
             workflow_path,
             workflow_runtime_block,
+            workflow_runtime_block.replace(
+                "            daemon-http-facts-empty-schema \\\n", ""
+            ),
+            f"missing secure daemon-http-facts-empty-schema in {workflow_path}",
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            workflow_runtime_block,
             '          if [ "$RUNNER_OS" = Linux ]; then\n'
             + workflow_runtime_block.replace("          ", "            ", 1)
             + "\n          fi",
@@ -1727,11 +1738,13 @@ def self_test(baseline: dict[str, str]) -> None:
             "            fact-store-provisioned \\\n"
             "            fact-graph-seal \\\n"
             "            daemon-http-facts \\\n"
+            "            daemon-http-facts-empty-schema \\\n"
             "            fact-store-forget-transaction \\\n"
             "            fact-store-forget-transaction-provisioned \\\n"
             "            --print-errorlogs",
             "          meson test -C build-secure-duckdb --no-rebuild \\\n"
             "            fact-graph-seal \\\n"
+            "            daemon-http-facts-empty-schema \\\n"
             "            fact-store-forget-transaction \\\n"
             "            fact-store-forget-transaction-provisioned \\\n"
             "            --print-errorlogs",
