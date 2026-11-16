@@ -1077,8 +1077,9 @@ was refused; it is not a request-id conflict. HTTP 409
 immutable operation inputs, or its operation has been retired and the id remains
 reserved. In particular, after reconcile reports `not_committed_terminal`,
 issue or rotate with that closed ID returns HTTP 409
-`service_credential_conflict`. This refusal is final: `wyctl` prints the failed
-command and request ID without the unknown-outcome/recover hint. Stop retrying
+`service_credential_conflict`. For issue and rotate, HTTP 409 exits with code 4,
+as listed below. This refusal is final: `wyctl` prints the failed command and
+request ID without the unknown-outcome/recover hint. Stop retrying
 that ID. A deliberate new attempt after this terminal verdict uses a new
 `--request-id`, as described in the reconciliation section; changing inputs
 under a reserved ID is never a retry. HTTP

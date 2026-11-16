@@ -5954,6 +5954,34 @@ test_service_change_unknown_outcome (void)
       "wyctl: service-credential issue failed: denied_late\n"
       "wyctl: service-credential issue request_id=@ID@\n"
       ISSUE_UNKNOWN ("issue", ISSUE_TARGET));
+  assert_service_change_case (500, LATE_403, 0, FALSE, credential_rotate, 5,
+      "POST /service-credentials/wlc_000000000000000000000000001/rotate",
+      "wyctl: service-credential rotate failed: denied_late\n"
+      "wyctl: service-credential rotate request_id=@ID@\n"
+      ISSUE_UNKNOWN ("rotate", ROTATE_TARGET));
+  assert_service_change_case (503, LATE_403, 0, FALSE, credential_issue, 5,
+      "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
+      "wyctl: service-credential issue failed: denied_late\n"
+      "wyctl: service-credential issue request_id=@ID@\n"
+      ISSUE_UNKNOWN ("issue", ISSUE_TARGET));
+  /* Other service-management conflicts retain their existing exit status. */
+  assert_service_change_case (409,
+      "{\"error\":\"service_principal_exists\"}", 0, FALSE,
+      principal_create, 5, "POST /service-principals",
+      "wyctl: service-principal create failed: service_principal_exists\n");
+  /* A minted request ID is reported just like an explicit ID on refusal. */
+  assert_service_change_case (409,
+      "{\"error\":\"service_credential_conflict\"}",
+      0, FALSE, credential_issue, 4,
+      "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
+      "wyctl: service-credential issue failed: service_credential_conflict\n"
+      "wyctl: service-credential issue request_id=@ID@\n");
+  assert_service_change_case (409,
+      "{\"error\":\"service_credential_conflict\"}",
+      0, FALSE, credential_rotate, 4,
+      "POST /service-credentials/wlc_000000000000000000000000001/rotate",
+      "wyctl: service-credential rotate failed: service_credential_conflict\n"
+      "wyctl: service-credential rotate request_id=@ID@\n");
   /* A refusal whose headers arrived is known, so no outcome line; the id is
    * still printed, since the daemon saw it. */
   assert_service_change_case (403, LATE_403, 2000, TRUE, credential_revoke,
@@ -5974,7 +6002,7 @@ test_service_change_unknown_outcome (void)
         ? destination : explicit_issue_args[i];
   assert_service_change_case (409,
       "{\"error\":\"service_credential_conflict\"}",
-      0, FALSE, explicit_issue, 5,
+      0, FALSE, explicit_issue, 4,
       "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
       "wyctl: service-credential issue failed: service_credential_conflict\n"
       "wyctl: service-credential issue "
@@ -5991,7 +6019,7 @@ test_service_change_unknown_outcome (void)
     explicit_rotate[i] = g_strcmp0 (explicit_rotate_args[i], "@DEST@") == 0
         ? destination : explicit_rotate_args[i];
   assert_service_change_case (409,
-      "{\"error\":\"service_credential_conflict\"}", 0, FALSE, explicit_rotate, 5,
+      "{\"error\":\"service_credential_conflict\"}", 0, FALSE, explicit_rotate, 4,
       "POST /service-credentials/wlc_000000000000000000000000001/rotate",
       "wyctl: service-credential rotate failed: service_credential_conflict\n"
       "wyctl: service-credential rotate "
