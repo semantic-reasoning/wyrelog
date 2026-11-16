@@ -6530,8 +6530,11 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   g_auto (WylClientServiceCredentialHandoffReceipt) receipt = { 0 };
   wyrelog_error_t rc = wyl_client_service_credential_issue (client, &request,
           guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
-  int exit_rc = fact_remote_exit (client, "service-credential issue", rc,
-          "service_credential_issue_failed");
+  /* Handoff conflicts use the documented definite-refusal exit status. */
+  int exit_rc = fact_remote_exit (client, "service-credential issue",
+          rc == WYRELOG_E_CONFLICT
+          && wyl_client_get_last_http_status (client) == 409
+          ? WYRELOG_E_POLICY : rc, "service_credential_issue_failed");
   wyctl_print_service_request_id (client, rc, "service-credential issue",
       request_id);
   if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
@@ -6632,8 +6635,11 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
   wyrelog_error_t rc = wyl_client_service_credential_rotate_for_tenant (client,
           opts.credential_id, request_id, opts.destination, expires_at_us,
           tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
-  int exit_rc = fact_remote_exit (client, "service-credential rotate", rc,
-          "service_credential_rotate_failed");
+  /* Handoff conflicts use the documented definite-refusal exit status. */
+  int exit_rc = fact_remote_exit (client, "service-credential rotate",
+          rc == WYRELOG_E_CONFLICT
+          && wyl_client_get_last_http_status (client) == 409
+          ? WYRELOG_E_POLICY : rc, "service_credential_rotate_failed");
   wyctl_print_service_request_id (client, rc, "service-credential rotate",
       request_id);
   if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
