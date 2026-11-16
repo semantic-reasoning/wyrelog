@@ -87,6 +87,7 @@ COVERAGE = {
     "/tenants/transfer-owner": ("tenant", "transfer-owner"),
     "/tenants/seal": ("tenant", "seal"),
     "/tenants/unseal": ("tenant", "unseal"),
+    "/tenants/delete": ("tenant", "delete"),
     "/graphs/create": ("graph", "create"),
     "/graphs": ("graph", "list"),
     "/graphs/seal": ("graph", "seal"),
@@ -114,11 +115,7 @@ HTTP_ONLY = {
         "the system profile; not an operator action",
 }
 
-UNSUPPORTED = {
-    "/tenants/delete":
-        "the daemon answers 501 tenant_delete_unsupported; retire a tenant "
-        "with a tenant seal",
-}
+UNSUPPORTED: dict[str, str] = {}
 
 # #1477 adds the wyctl commands for the #1474 data-credential routes.
 PENDING: dict[str, tuple[str, ...]] = {
@@ -435,7 +432,8 @@ def self_test(root: Path) -> None:
         return copy
 
     def mutated(label, mutate, fragment, coverage=COVERAGE,
-                http_only=HTTP_ONLY, pending=PENDING):
+                http_only=HTTP_ONLY, pending=PENDING,
+                unsupported=UNSUPPORTED):
         # Each mutation must fail on the error it names, not merely fail.
         with tempfile.TemporaryDirectory() as scratch:
             target = Path(scratch)
@@ -444,7 +442,8 @@ def self_test(root: Path) -> None:
                 mutate(target)
             try:
                 errors = check(target, coverage=coverage,
-                               http_only=http_only, pending=pending)
+                               http_only=http_only, pending=pending,
+                               unsupported=unsupported)
             except GateError as error:
                 errors = [str(error)]
             expect(errors, fragment, label)
@@ -472,6 +471,11 @@ def self_test(root: Path) -> None:
             lambda t: edit(t, "tests/test-wyctl-runbook-options.py",
                            '    ("audit", "query"): 2,\n', ""),
             "audit query is not in test-wyctl-runbook-options.py")
+    mutated("tenant delete missing from COMMAND_PATHS",
+            lambda t: edit(t, "tests/test-wyctl-runbook-options.py",
+                           '    ("tenant", "delete"): 2,\n', ""),
+            "/tenants/delete: tenant delete is not in "
+            "test-wyctl-runbook-options.py")
     mutated("step dispatched under the wrong parent", None,
             "wyctl does not dispatch graph status",
             coverage=with_entry(COVERAGE, "/healthz", ("graph", "status")))
@@ -482,10 +486,11 @@ def self_test(root: Path) -> None:
             lambda t: edit(t, "docs/operator-runbook.md", "`/profile/events`",
                            "profile events"),
             "/profile/events: not listed in the runbook section")
-    mutated("unsupported route outside its heading",
-            lambda t: edit(t, "docs/operator-runbook.md", UNSUPPORTED_HEADING,
-                           "### Removed heading"),
-            "/tenants/delete: not listed under")
+    # Reclassify a real HTTP-only route only inside this synthetic fixture.
+    # Its existing mention outside the unsupported heading must not suffice.
+    mutated("unsupported route outside its heading", None,
+            "/profile/events: not listed under", http_only={},
+            unsupported={"/profile/events": "synthetic unsupported route"})
     mutated("new daemon route",
             lambda t: edit(t, "tools/check-daemon-http-route-registrations.py",
                            '    RouteSpec("/datalog", "datalog_query_handler"),'

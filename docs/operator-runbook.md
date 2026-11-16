@@ -2641,11 +2641,14 @@ collecting.
 
 ## Tenants
 
-Tenant management uses a `__wr_default` human session and the usual guard
-options. Global list and create require `wr.tenant.manage` there. Show,
-ownership transfer and seal also permit the current owner, even without
-tenant permission rows. Show, transfer, seal and unseal require MFA assurance;
-create retains its existing authorization requirements.
+Tenant management uses a live MFA-verified `__wr_default` human session and
+the usual guard options. Global list requires `wr.tenant.manage` there;
+creation accepts an armed `wr.tenant.create` or `wr.tenant.manage` permission.
+Show, ownership transfer, seal, unseal and delete also permit the current owner,
+subject to the seal-capacity restrictions below, even without tenant permission
+rows. A tenant-bound session cannot substitute for the default-tenant session.
+See the [lifecycle contract](lobac-v0-tenant-contract.md) for the self-service
+creation capability and migration from global management grants.
 
 ```sh
 wyctl --daemon-url "$BASE_URL" tenant list \
@@ -2685,37 +2688,93 @@ uncertain outcome. The original actor may retrieve that recorded result after
 losing ownership, without applying the transfer again. Reusing an id for a
 different intent is refused. The new owner must be an active registered human user.
 
-Delete a sealed tenant permanently with:
+### Delete a sealed tenant
+
+Deletion is supported. The current owner or a caller with guarded global
+`wr.tenant.manage` authority needs a live MFA-verified default-tenant human
+session. This workflow creates and deletes a disposable tenant; use an unused
+name. The owner also needs an armed creation capability for the first command,
+as described in the [lifecycle contract](lobac-v0-tenant-contract.md#migrating-self-service-users).
+
+Set `BASE_URL` to your daemon URL, `TOKEN` to that human's owner-only token
+file, and `TENANT` to the disposable target name. Each command refreshes the
+guard timestamp in microseconds:
 
 ```sh
-wyctl --daemon-url "$BASE_URL" tenant delete --tenant acme \
+set -eu
+: "${BASE_URL:?set the daemon URL}" "${TOKEN:?set the MFA token file}"
+: "${TENANT:?set an unused disposable tenant name}"
+wyctl --daemon-url "$BASE_URL" tenant create --name "$TENANT" \
   --access-token-file "$TOKEN" \
-  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+  --guard-timestamp "$(python3 -c 'import time; print(time.time_ns() // 1000)')" \
+  --guard-loc-class trusted --guard-risk 0
+wyctl --daemon-url "$BASE_URL" tenant show --name "$TENANT" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(python3 -c 'import time; print(time.time_ns() // 1000)')" \
+  --guard-loc-class trusted --guard-risk 0
 ```
 
-The current owner or a SYSTEM administrator needs a live MFA session. The
-lifecycle must be `sealed`; `tenant_not_sealed` also refuses transitional and
-unclassified legacy tenants. A fresh operator seal request drains in-flight
-fact users and classifies legacy tenants, including tenants containing graphs.
-Unseal and reseal use the same coordinated lifecycle transitions. Pending
-restore, reconciliation or provisioning work must finish before those transitions.
-Any role, direct permission, or permission state held by another subject,
-including a service principal, causes `tenant_delete_in_use`; the response and
-CLI diagnostics list the holders. Revoke those grants explicitly before retrying.
-The owner's grants are removed with the tenant.
+Before continuing, remove every *other subject's* role, direct permission and
+permission-state holding in the target, including service principals' grants.
+The owner's own grants do not block deletion, even when a different
+administrator deletes the tenant. Data credentials are revoked and removed
+with it, rather than blocking deletion as policy holders.
 
-Deletion removes scoped policy, graph/schema metadata, quota and restore state,
-credentials, and canonical tenant fact directories. Global principal identities
-and audit records remain. A permanent tombstone prevents reusing the tenant id.
-The deletion audit records the removed categories, row count, and disk manifest.
+An active, transitional or unclassified legacy tenant returns
+`409 tenant_not_sealed`. A fresh operator seal drains in-flight fact users and
+classifies legacy tenants, including tenants with populated graphs. Pending
+restore, reconciliation or provisioning work must finish first. Seal and delete
+with the same default-tenant session:
 
-The command prints `tenant=<tenant> deleted=true request_id=<id>`. Save its
-request id and retry with `--request-id <id>` after an uncertain outcome. Only
-the original actor and exact request may replay that result. After the policy
-commit the tenant is unknown to ordinary routes while journaled disk cleanup
-finishes. Startup resumes pending cleanup before serving requests. A cleanup
-identity mismatch fails closed; preserve the journal and investigate the root
-rather than replacing files under the deleted tenant's name.
+```sh
+wyctl --daemon-url "$BASE_URL" tenant seal --name "$TENANT" --confirm \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(python3 -c 'import time; print(time.time_ns() // 1000)')" \
+  --guard-loc-class trusted --guard-risk 0
+DELETE_RECEIPT_FILE=$(mktemp)
+trap 'rm -f "$DELETE_RECEIPT_FILE"' EXIT
+wyctl --daemon-url "$BASE_URL" tenant delete --name "$TENANT" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(python3 -c 'import time; print(time.time_ns() // 1000)')" \
+  --guard-loc-class trusted --guard-risk 0 > "$DELETE_RECEIPT_FILE"
+cat "$DELETE_RECEIPT_FILE"
+DELETE_REQUEST_ID=$(sed -n 's/^.*request_id=//p' "$DELETE_RECEIPT_FILE")
+: "${DELETE_REQUEST_ID:?missing deletion request ID}"
+# An exact retry returns the recorded result; retain this ID for future retries.
+wyctl --daemon-url "$BASE_URL" tenant delete --name "$TENANT" \
+  --request-id "$DELETE_REQUEST_ID" --access-token-file "$TOKEN" \
+  --guard-timestamp "$(python3 -c 'import time; print(time.time_ns() // 1000)')" \
+  --guard-loc-class trusted --guard-risk 0
+rm -f "$DELETE_RECEIPT_FILE"
+trap - EXIT
+```
+
+The receipt is `tenant=<tenant> deleted=true request_id=<id>`. If the first
+delete fails without a success receipt, use the request ID printed on stderr;
+do not execute the retry with an empty ID or replace an uncertain ID. Keep the
+original actor, tenant and ID, a live MFA default-tenant session and valid
+fresh guards. A different actor/ID or reused request intent returns
+`409 tenant_delete_conflict`. A permanent tombstone prevents tenant-ID reuse.
+`409 tenant_delete_in_use` lists the remaining `holders` in the response and
+CLI diagnostics; resolve those grants explicitly. The default tenant returns
+`409 tenant_builtin` and cannot be deleted.
+
+Deletion removes tenant-scoped policy, graph/schema metadata, quota and restore
+state, credentials and the canonical fact artifacts recorded in the disk
+manifest. Global human/service identities, audit records and the permanent
+deletion journal/tombstone remain; the journal retains the manifest and removed
+row count. External backups, exports and unmanaged files are not erased.
+
+After the policy commit, ordinary routes see an unknown tenant while journaled
+disk cleanup finishes. Old tenant-bound bearers return `401 tenant_invalid`,
+and an authorized `tenant show` returns `unknown_tenant`. Exact retries can
+finish pending cleanup (`503 tenant_delete_pending`); startup also resumes it
+before serving requests. A cleanup identity mismatch fails closed: preserve
+the journal and investigate the root rather than replacing files under the
+deleted name. The [deletion contract](lobac-v0-tenant-contract.md#deleting-a-tenant)
+lists the request fields and errors.
+
+### Seal and unseal a tenant
 
 The seal records whether the actor acted as `owner` or `system_admin`.
 Administrator capacity takes precedence when both apply. An owner seal may be
@@ -2775,8 +2834,8 @@ wyctl --daemon-url "$BASE_URL" tenant unseal --name acme \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
 
-Tenants cannot be deleted (`/tenants/delete` answers `501`); seal one to
-retire it.
+Sealing retires a tenant reversibly. For permanent removal, follow
+[Delete a sealed tenant](#delete-a-sealed-tenant).
 
 ### Tenant owners
 
@@ -3242,11 +3301,9 @@ route, covered by the `wyctl service-principal` and
 `wyctl service-credential` commands, so an operation added inside either one
 is not detected.
 
-### Unsupported by the daemon
-
-- `/tenants/delete`: the daemon answers every valid request with
-  `501 tenant_delete_unsupported`. Tenants cannot be deleted; retire one by
-  sealing it.
+`/tenants/delete` is supported by `wyctl tenant delete`; see
+[Delete a sealed tenant](#delete-a-sealed-tenant). It is not an HTTP-only or
+unsupported route.
 
 ## Which Endpoint Reports What
 
