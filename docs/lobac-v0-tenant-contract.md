@@ -126,9 +126,10 @@ Once another tenant or human state exists, opening such a template fails
 closed. A declared `session_state` relation must have exactly two non-compound
 symbol columns.
 
-Tenant seal does not perform the graph-drain lifecycle owned by #549.
-`active`, `sealing`, or `unsealing` therefore returns
-`503 tenant_lifecycle_coordination_required` without mutation. If an earlier
+The operator tenant seal coordinates the graph-drain lifecycle. Pending
+restore, reconciliation or provisioning work can prevent completion and return
+`503 tenant_lifecycle_coordination_required`; resolve that work and retry the
+same seal request ID. If an earlier
 seal receipt is no longer authoritative after unseal/reseal or another
 lifecycle transition, the old key returns `409 tenant_seal_superseded` and the
 body includes `recorded_lifecycle_generation`,
@@ -136,6 +137,74 @@ body includes `recorded_lifecycle_generation`,
 `current_sealed_generation`. Other key collisions return
 `409 tenant_seal_conflict`; authority unavailability returns 503, and durable
 receipt/audit/terminal-row corruption returns 500.
+
+## Deleting a tenant
+
+Deletion is supported through `POST /tenants/delete?name=<target>&request_id=<id>`.
+Both fields are query parameters: `name` selects the tenant to delete, while
+`tenant` selects the request/authentication tenant and must remain
+`__wr_default`. The deletion `request_id` is a canonical 27-character KSUID,
+not the per-attempt `X-Wyrelog-Request-Id` response header. Unlike seal, delete
+has no request-ID JSON body. See the executable
+[owner workflow](operator-runbook.md#delete-a-sealed-tenant).
+
+The caller must be a registered, active human with a live MFA-verified
+`__wr_default` session and valid guard options. The current owner may delete
+without global `wr.tenant.manage`; an administrator with that guarded global
+authority may also delete. Tenant-scoped credentials cannot manage this
+lifecycle, and the built-in `__wr_default` tenant cannot be deleted. Creation
+is a separate capability: `wr.tenant.create` alone does not grant global
+management authority.
+
+The target must have reached the stable `sealed` lifecycle state. Active,
+transitional and unclassified legacy states return `tenant_not_sealed`.
+Use the operator seal command with `--confirm` to coordinate graph draining
+and reach that state; pending restore, reconciliation or provisioning work
+must first finish. This is not a requirement that the tenant have no graphs.
+
+Every other subject's tenant-scoped role membership, direct permission or
+permission-state row blocks deletion, including grants to service principals.
+The `tenant_delete_in_use` response lists `holders`; resolve these grants
+explicitly, preferably before sealing. The excluded subject is the tenant's
+owner, even when an administrator performs deletion. Owner grants are removed
+with the tenant. Data credentials are revoked and removed rather than counted
+as another subject's policy holdings; see the
+[data-credential boundary](service-credential-threat-model.md).
+
+A completed request returns HTTP 200 with `ok:true`, the tenant name,
+`deleted:true` and the deletion request ID. `wyctl` prints
+`tenant=<name> deleted=true request_id=<id>`. Save that ID. After a timeout or
+uncertain failure, repeat the same tenant and ID as the original actor, with a
+live MFA default-tenant session and fresh valid guards. An exact retry returns
+the recorded result and completes any pending cleanup; it does not delete
+again. A different actor or ID cannot replay that result, and a reused ID
+cannot name another deletion intent. Do not create a replacement request ID
+to retry a deletion that may have committed.
+
+| HTTP | Error | Meaning |
+| --- | --- | --- |
+| 400 | `invalid_tenant_request` | Invalid target or missing/noncanonical query request ID. |
+| 403 | `tenant_denied`, `tenant_mfa_required` | Missing lifecycle authority or required MFA assurance. |
+| 404 | `unknown_tenant` | No target or recorded deletion, after authentication/authorization checks. |
+| 409 | `tenant_builtin`, `tenant_not_sealed` | Built-in target or lifecycle prerequisite not satisfied. |
+| 409 | `tenant_delete_in_use` | Another policy holder remains; inspect `holders`. |
+| 409 | `tenant_delete_conflict` | The recorded actor/tenant/request intent does not match. |
+| 503 | `tenant_delete_pending`, `tenant_delete_failed` | Cleanup is pending or the operation could not complete; preserve the original request ID. |
+
+Deletion removes tenant-scoped policy, graph/schema metadata, quota/restore
+state, credentials and canonical fact artifacts recorded in the disk manifest.
+It retains global human/service identities, audit history and the permanent
+deletion journal/tombstone, including the manifest and removed-row count.
+This evidence prevents tenant-ID reuse; it is not live tenant data. External
+backups, exports and arbitrary files outside the managed artifacts are not
+erased by this operation.
+
+After the policy commit, ordinary routes see an unknown tenant while journaled
+disk cleanup finishes. Old tenant-bound bearers fail with `401 tenant_invalid`;
+authorized `tenant show` returns `unknown_tenant`. Startup resumes pending
+cleanup before serving requests. A cleanup identity mismatch fails closed:
+preserve the journal and investigate the configured root rather than replacing
+files under the deleted name.
 
 ## Wire-Format Error Codes
 
