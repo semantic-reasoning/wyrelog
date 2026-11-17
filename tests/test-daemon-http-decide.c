@@ -14005,11 +14005,10 @@ check_audit_query_session_token_fallback (WylHandle *handle,
 }
 
 /*
- * The session id /auth/login returns is the session token ?session_token=
- * accepts, and the audit log records it: as the subject of session_state and
- * session_fired_delta_* rows, and in any column of a row written for a
- * session-scoped request.  /audit/events must show a handle in its place, or
- * reading the log hands the reader every live session.
+ * Client credentials and internal session identities are distinct. Fresh
+ * emitters store stable session handles; historical rows can still contain
+ * internal identities, which /audit/events masks with keyed legacy handles.
+ * Exercise both layers without weakening write-time anonymization.
  *
  * Absence is only ever asserted on a response already shown to contain the
  * victim's rows: the route returns the newest 100 rows, so an unfiltered
@@ -14103,6 +14102,245 @@ audit_first_created_at_us (const gchar *body)
   if (field == NULL)
     return -1;
   return g_ascii_strtoll (field + strlen ("\"created_at_us\":"), NULL, 10);
+}
+
+/* Exact immutable identities keep a newest-100 response from passing on an
+ * unrelated row. Historical copies below are explicitly separate evidence. */
+typedef struct
+{
+  gchar *field[7]; /* id, subject, action, resource, reason, origin, request */
+  gint64 created_at_us;
+  wyl_decision_t decision;
+} SessionEmitterRow;
+
+typedef struct
+{
+  const gchar *action;
+  const gchar *subject;
+  const gchar *resource;
+  const gchar *origin;
+  const gchar *request;
+  gint64 since;
+  GPtrArray *rows;
+} SessionEmitterCapture;
+
+static void
+session_emitter_row_free (gpointer data)
+{
+  SessionEmitterRow *row = data;
+  for (guint i = 0; i < G_N_ELEMENTS (row->field); i++)
+    g_free (row->field[i]);
+  g_free (row);
+}
+
+static wyrelog_error_t
+session_emitter_capture_cb (const gchar *id, gint64 when,
+    const gchar *subject, const gchar *action, const gchar *resource,
+    const gchar *reason, const gchar *origin, const gchar *request,
+    wyl_decision_t decision, gpointer data)
+{
+  SessionEmitterCapture *capture = data;
+  if (when < capture->since
+      || (capture->action && g_strcmp0 (action, capture->action) != 0)
+      || (capture->subject && g_strcmp0 (subject, capture->subject) != 0)
+      || (capture->resource && g_strcmp0 (resource, capture->resource) != 0)
+      || (capture->origin && g_strcmp0 (origin, capture->origin) != 0)
+      || (capture->request && g_strcmp0 (request, capture->request) != 0))
+    return WYRELOG_E_OK;
+  const gchar *fields[] = {id, subject, action, resource, reason, origin, request};
+  SessionEmitterRow *row = g_new0 (SessionEmitterRow, 1);
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    row->field[i] = g_strdup (fields[i]);
+  row->created_at_us = when;
+  row->decision = decision;
+  g_ptr_array_add (capture->rows, row);
+  return WYRELOG_E_OK;
+}
+
+static GPtrArray *
+session_emitter_rows (WylHandle *handle, const gchar *action,
+    const gchar *subject, const gchar *resource, const gchar *origin,
+    const gchar *request, gint64 since)
+{
+  GPtrArray *rows = g_ptr_array_new_with_free_func (session_emitter_row_free);
+  SessionEmitterCapture capture = {action, subject, resource, origin, request,
+                                   since, rows};
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (handle), session_emitter_capture_cb,
+      &capture), ==, WYRELOG_E_OK);
+  return rows;
+}
+
+static gchar *
+session_emitter_json_row (const gchar *body, const gchar *id)
+{
+  g_autofree gchar *key = g_strdup_printf ("\"id\":\"%s\"", id);
+  const gchar *start = strstr (body, key);
+  g_assert_nonnull (start);
+  const gchar *end = strchr (start, '}');
+  g_assert_nonnull (end);
+  return g_strndup (start, end - start);
+}
+
+static void
+assert_session_emitter_export (WylHandle *handle, SoupSession *http,
+    const gchar *url, const gchar *reader, const SessionEmitterRow *row,
+    const gchar *column, const gchar *expected, const gchar *identity,
+    const gchar *secret)
+{
+  g_autofree gchar *filter = row->field[6] != NULL
+      ? g_strdup_printf ("request_id(\"%s\")", row->field[6])
+      : g_strdup_printf ("action(\"%s\")", row->field[2]);
+  g_autofree gchar *stored = NULL;
+  g_assert_cmpint (wyl_audit_conn_query_events_json
+        (wyl_handle_get_audit_conn (handle), filter, &stored), ==, WYRELOG_E_OK);
+  g_autofree gchar *mirror = session_emitter_json_row (stored, row->field[0]);
+  g_autofree gchar *mirror_value = extract_json_string (mirror, column);
+  g_assert_true (g_strcmp0 (mirror_value, expected) == 0);
+  g_autofree gchar *body = NULL;
+  g_assert_cmpint (audit_redaction_query (http, url, reader, filter, &body), ==, 0);
+  g_autofree gchar *exact = session_emitter_json_row (body, row->field[0]);
+  g_autofree gchar *value = extract_json_string (exact, column);
+  g_assert_true (g_strcmp0 (value, expected) == 0);
+  g_assert_true (wyl_audit_is_session_handle (value));
+  /* Do not print either sensitive value when a regression is detected. */
+  g_assert_null (strstr (exact, identity));
+  g_assert_null (strstr (exact, secret));
+  g_assert_null (strstr (mirror, identity));
+  g_assert_null (strstr (mirror, secret));
+  g_assert_cmpint (audit_redaction_replay (http, url, exact), ==, 0);
+}
+
+/* Exercise the incremental emitter from a genuine, durable transition input.
+ * Snapshot publication itself need not issue incremental callbacks. */
+typedef struct
+{
+  const gchar *scope;
+  const gchar *subject;
+  const gchar *permission;
+  gint64 event_id;
+  guint matches;
+  gchar **symbols;
+} AuditTransitionInput;
+
+static wyrelog_error_t
+audit_permission_input_cb (gint64 id, const gchar *subject,
+    const gchar *permission, const gchar *scope, const gchar *event,
+    const gchar *from, const gchar *to, gpointer data)
+{
+  AuditTransitionInput *input = data;
+  if (g_strcmp0 (subject, input->subject) != 0
+      || g_strcmp0 (permission, input->permission) != 0
+      || g_strcmp0 (scope, input->scope) != 0
+      || g_strcmp0 (event, "grant") != 0 || g_strcmp0 (to, "armed") != 0)
+    return WYRELOG_E_OK;
+  input->matches++;
+  if (id <= input->event_id)
+    return WYRELOG_E_OK;
+  input->event_id = id;
+  g_strfreev (input->symbols);
+  const gchar *values[] = {subject, permission, scope, event, from, to};
+  input->symbols = g_new0 (gchar *, G_N_ELEMENTS (values) + 1);
+  for (guint i = 0; i < G_N_ELEMENTS (values); i++)
+    input->symbols[i] = g_strdup (values[i]);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+audit_session_input_cb (gint64 id, const gchar *scope, const gchar *event,
+    const gchar *from, const gchar *to, gpointer data)
+{
+  AuditTransitionInput *input = data;
+  if (g_strcmp0 (scope, input->scope) != 0 || g_strcmp0 (to, "active") != 0)
+    return WYRELOG_E_OK;
+  input->matches++;
+  if (id <= input->event_id)
+    return WYRELOG_E_OK;
+  input->event_id = id;
+  g_strfreev (input->symbols);
+  const gchar *values[] = {scope, event, from, to};
+  input->symbols = g_new0 (gchar *, G_N_ELEMENTS (values) + 1);
+  for (guint i = 0; i < G_N_ELEMENTS (values); i++)
+    input->symbols[i] = g_strdup (values[i]);
+  return WYRELOG_E_OK;
+}
+
+static void
+audit_drive_persisted_transition (WylHandle *handle, WylDaemonRuntime *runtime,
+    const gchar *scope, gboolean permission)
+{
+  guint64 audit_errors_before = runtime->audit_errors;
+  AuditTransitionInput input = {scope, "human-principal-admin",
+                                "wr.service_credential.manage", 0, 0, NULL};
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = permission
+      ? wyl_policy_store_foreach_permission_state_event (store,
+          audit_permission_input_cb, &input)
+      : wyl_policy_store_foreach_session_event (store, audit_session_input_cb,
+          &input);
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  g_auto (GStrv) symbols = input.symbols;
+  g_assert_cmpint (input.event_id, >, 0);
+  g_assert_nonnull (symbols);
+  guint count = permission ? 7 : 5;
+  gint64 row[7] = {input.event_id};
+  gint64 fired[7] = {input.event_id};
+  const gchar *source = permission ? "perm_state_event" : "session_event";
+  const gchar *output = permission ? "perm_state_fired" : "session_fired";
+  {
+    g_autoptr (WylEngineSession) engine = wyl_engine_session_acquire (handle);
+    g_assert_nonnull (engine);
+    for (guint i = 1; i < count; i++)
+      g_assert_cmpint (intern_symbol (engine, symbols[i - 1], &row[i]), ==,
+          WYRELOG_E_OK);
+    memcpy (fired, row, count * sizeof row[0]);
+    guint event_column = permission ? 4 : 2;
+    fired[event_column] = row[event_column + 1];
+    fired[event_column + 1] = row[event_column];
+    if (permission) {
+      runtime->expect_perm_state_fired = TRUE;
+      memcpy (runtime->expected_perm_state_fired, fired, count * sizeof row[0]);
+      runtime->matched_perm_state_fired_insert = FALSE;
+      runtime->matched_perm_state_fired_remove = FALSE;
+    } else {
+      runtime->expect_session_fired = TRUE;
+      memcpy (runtime->expected_session_fired, fired, count * sizeof row[0]);
+      runtime->matched_session_fired_insert = FALSE;
+      runtime->matched_session_fired_remove = FALSE;
+    }
+    gboolean present = FALSE;
+    g_assert_cmpint (wyl_engine_session_contains (engine, output, fired, count,
+        &present), ==, WYRELOG_E_OK);
+    g_assert_true (present);
+    g_assert_cmpint (wyl_engine_session_remove (engine, source, row, count), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_engine_session_contains (engine, output, fired, count,
+        &present), ==, WYRELOG_E_OK);
+    g_assert_false (present);
+    g_assert_cmpint (wyl_engine_session_insert (engine, source, row, count), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_engine_session_contains (engine, output, fired, count,
+        &present), ==, WYRELOG_E_OK);
+    g_assert_true (present);
+  }
+  g_assert_true (permission ? runtime->matched_perm_state_fired_insert
+      : runtime->matched_session_fired_insert);
+  g_assert_true (permission ? runtime->matched_perm_state_fired_remove
+      : runtime->matched_session_fired_remove);
+  g_assert_cmpuint (runtime->audit_errors, ==, audit_errors_before);
+  AuditTransitionInput after = {scope, input.subject, input.permission, 0, 0, NULL};
+  rc = permission ? wyl_policy_store_foreach_permission_state_event (store,
+          audit_permission_input_cb, &after)
+      : wyl_policy_store_foreach_session_event (store, audit_session_input_cb,
+          &after);
+  g_auto (GStrv) unchanged = after.symbols;
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.matches, ==, input.matches);
+  g_assert_cmpint (after.event_id, ==, input.event_id);
+  for (guint i = 0; i < count - 1; i++)
+    g_assert_true (g_strcmp0 (symbols[i], unchanged[i]) == 0);
+  runtime->expect_perm_state_fired = FALSE;
+  runtime->expect_session_fired = FALSE;
 }
 
 static gint
@@ -14199,7 +14437,7 @@ assert_session_secret_not_stored (WylHandle *handle, const gchar *secret,
 static gint
 check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
     const gchar *base_url, const gchar *reader_token,
-    const gchar *reader_session_token)
+    const gchar *reader_session_token, WylDaemonRuntime *runtime)
 {
   wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
   register_test_human (wyl_handle_get_policy_store (handle), "audit-leak-victim");
@@ -14415,6 +14653,11 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   /* Once the victim logs out its id matches no registration, so only the
    * structural rule still hides it -- as it must during login, before the
    * registration exists.  The handle is the one shown while it was live. */
+  gint64 before_delta_cycle = g_get_real_time ();
+  audit_drive_persisted_transition (handle, runtime, victim_id, FALSE);
+  g_autoptr (GPtrArray) native_inserts = session_emitter_rows (handle,
+          "session_fired_delta_insert", victim_audit_handle, NULL, NULL, NULL, t0);
+  g_assert_cmpuint (native_inserts->len, >, 0);
   g_autofree gchar *logout_path = g_strdup_printf
         ("/auth/logout?session_token=%s", victim);
   if (send_raw_path (http, "POST", base_url, logout_path, &status, &body) != 0
@@ -14455,6 +14698,27 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   }
   if (!victim_fired || strstr (fired_after, victim) != NULL)
     return 12638;
+  g_autoptr (GPtrArray) native_removes = session_emitter_rows (handle,
+          "session_fired_delta_remove", victim_audit_handle, NULL, NULL, NULL,
+          before_delta_cycle);
+  g_assert_cmpuint (native_removes->len, ==, 1);
+  SessionEmitterRow *removed_transition = NULL;
+  for (guint r = 0; r < native_removes->len; r++) {
+    SessionEmitterRow *removed = native_removes->pdata[r];
+    for (guint i = 0; i < native_inserts->len; i++) {
+      SessionEmitterRow *inserted = native_inserts->pdata[i];
+      if (g_strcmp0 (removed->field[3], inserted->field[3]) == 0
+          && g_strcmp0 (removed->field[4], inserted->field[4]) == 0
+          && g_strcmp0 (removed->field[5], inserted->field[5]) == 0)
+        removed_transition = removed;
+    }
+  }
+  g_assert_nonnull (removed_transition);
+  assert_session_emitter_export (handle, http, base_url, reader_token,
+      native_inserts->pdata[0], "subject_id", victim_audit_handle,
+      victim_id, victim);
+  assert_session_emitter_export (handle, http, base_url, reader_token,
+      removed_transition, "subject_id", victim_audit_handle, victim_id, victim);
   /* A retired secret must not fall through as an arbitrary policy scope. */
   g_assert_cmpint (send_raw_decide_bearer (http, "POST", base_url,
       "http-audit-user", "wr.audit.read", victim,
@@ -19448,8 +19712,9 @@ typedef struct
 } ServiceDenialEnv;
 
 static gint
-service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
-    gboolean arm_principal, gboolean arm_credential)
+service_denial_env_init_with_runtime (ServiceDenialEnv *env,
+    gboolean session_active, gboolean arm_principal, gboolean arm_credential,
+    WylDaemonRuntime *runtime)
 {
   g_mutex_init (&env->barrier.mutex);
   g_cond_init (&env->barrier.changed);
@@ -19504,7 +19769,15 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   };
   g_autoptr (GError) error = NULL;
   env->http.loop = g_main_loop_new (env->context, FALSE);
-  env->http.server = wyl_daemon_start_http_server (&opts, env->handle, &error);
+  if (runtime != NULL) {
+    runtime->handle = env->handle;
+    if (wyl_daemon_start_delta_callbacks (env->handle, runtime) != WYRELOG_E_OK) {
+      g_main_context_pop_thread_default (env->context);
+      return 2118;
+    }
+  }
+  env->http.server = wyl_daemon_start_http_server_with_runtime (&opts,
+          env->handle, runtime, &error);
   g_main_context_pop_thread_default (env->context);
   if (env->http.server == NULL)
     return 2106;
@@ -19581,6 +19854,14 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
   env->tenant_query = g_strdup ("tenant=tenant-a&guard_timestamp=1&"
           "guard_loc_class=trusted&guard_risk=0");
   return 0;
+}
+
+static gint
+service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
+    gboolean arm_principal, gboolean arm_credential)
+{
+  return service_denial_env_init_with_runtime (env, session_active,
+             arm_principal, arm_credential, NULL);
 }
 
 static void
@@ -20711,6 +20992,300 @@ self_arm_post (ServiceDenialEnv *env, guint *status)
              env->base_url, "/service-management-authority/arm", env->query,
              env->access_token, "{}", status, &body);
 }
+
+#if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+/* Fresh rows are proof about actual emitters. The separately tagged copies
+ * model their historical, pre-anonymization encoding, not new writer output. */
+static gboolean
+audit_live_value_witness (ServiceDenialEnv *env, const gchar *reader,
+    const SessionEmitterRow *row, guint column, const gchar *marker,
+    gchar **legacy_handle)
+{
+  g_autofree gchar *filter = g_strdup_printf ("request_id(\"%s\")", row->field[6]);
+  g_autofree gchar *body = NULL;
+  g_assert_cmpint (audit_redaction_query (env->session, env->base_url, reader,
+      filter, &body), ==, 0);
+  g_autofree gchar *exact = session_emitter_json_row (body, row->field[0]);
+  const gchar *name = column == 3 ? "resource_id" : "deny_origin";
+  g_autofree gchar *shown = extract_json_string (exact, name);
+  gboolean ok = audit_value_is_session_handle (shown)
+      && strlen (shown) == strlen ("session#") + 16
+      && strstr (exact, env->session_token) == NULL
+      && strstr (exact, env->access_token) == NULL;
+  if (ok && *legacy_handle == NULL)
+    *legacy_handle = g_strdup (shown);
+  if (ok)
+    ok = g_strcmp0 (shown, *legacy_handle) == 0;
+  /* Accumulate witnesses so one mutant run proves both resource and origin
+   * failures. Never print the returned values, row, identity or credential. */
+  if (!ok) {
+    g_printerr ("WYRELOG_TEST_DIAG audit value witness=%s redacted=false\n",
+        marker);
+    return FALSE;
+  }
+  g_assert_cmpint (audit_redaction_replay (env->session, env->base_url, exact),
+      ==, 0);
+  return TRUE;
+}
+
+static gboolean
+audit_legacy_emitter_witness (ServiceDenialEnv *env, const gchar *reader,
+    const SessionEmitterRow *source, guint column, const gchar *marker,
+    gchar **legacy_handle)
+{
+  wyl_id_t value = WYL_ID_NIL;
+  gchar id[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_new (&value), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&value, id, sizeof id), ==, WYRELOG_E_OK);
+  const gchar *fields[7];
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    fields[i] = source->field[i];
+  fields[column] = env->session_token;
+  g_autoptr (WylAuditEvent) legacy = NULL;
+  g_assert_cmpint (wyl_audit_event_new_from_fields (id, g_get_real_time (),
+      fields[1], fields[2], fields[3], fields[4], fields[5], marker,
+      source->decision, &legacy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_audit_emit (env->handle, legacy), ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) persisted = session_emitter_rows (env->handle,
+          source->field[2], source->field[1], NULL, NULL, marker, 0);
+  g_assert_cmpuint (persisted->len, ==, 1);
+  SessionEmitterRow *stored = persisted->pdata[0];
+  g_assert_true (g_strcmp0 (stored->field[column], env->session_token) == 0);
+  g_assert_true (g_strcmp0 (stored->field[0], id) == 0);
+  return audit_live_value_witness (env, reader, stored, column, marker,
+             legacy_handle);
+}
+
+static gint
+check_audit_real_service_emitters (void)
+{
+  ServiceDenialEnv env = { 0 };
+  WylDaemonRuntime runtime = { 0 }; /* Outlives callbacks and handle cleanup. */
+  g_autofree gchar *reader = NULL;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *denied_rid = NULL;
+  g_autofree gchar *arm_rid = NULL;
+  g_autofree gchar *issue_rid = NULL;
+  g_autofree gchar *payload = NULL;
+  g_autofree gchar *stable = NULL;
+  g_autofree gchar *legacy_handle = NULL;
+  g_autoptr (GPtrArray) management = NULL;
+  g_autoptr (GPtrArray) permission = NULL;
+  g_autoptr (GPtrArray) permission_removes = NULL;
+  g_autoptr (GPtrArray) issue_audits = NULL;
+  g_autoptr (GPtrArray) decisions = NULL;
+  g_autoptr (GPtrArray) fresh = NULL;
+  g_autoptr (GPtrArray) self_arm_rows = NULL;
+  g_autoptr (GPtrArray) collisions = NULL;
+  g_autoptr (WylSession) live = NULL;
+  g_autoptr (WylAuditEvent) collision = NULL;
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationRecord record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  wyl_service_principal_t principal = { 0 };
+  gchar reader_id[WYL_ID_STRING_BUF];
+  gchar operation_id[WYL_REQUEST_ID_STRING_BUF];
+  wyl_id_t reader_value = WYL_ID_NIL;
+  guint status = 0;
+  gint rc = service_denial_env_init_with_runtime (&env, TRUE, FALSE, FALSE,
+          &runtime);
+  if (rc != 0)
+    goto cleanup;
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  register_test_human (store, "audit-emitter-reader");
+  g_assert_cmpint (wyl_id_new (&reader_value), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&reader_value, reader_id, sizeof reader_id),
+      ==, WYRELOG_E_OK);
+  g_assert_true (seed_management_human_access_token (env.http.server,
+      reader_id, "audit-emitter-reader", &reader));
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
+      "audit-emitter-reader", "wr.auditor", WYL_TENANT_DEFAULT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store,
+      "audit-emitter-reader", "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, reader_id,
+      "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
+      "human-principal-admin", "wr.system_admin", WYL_TENANT_DEFAULT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store,
+      WYL_TENANT_DEFAULT, "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_principal_create (env.handle,
+      "svc:audit-emit:worker", "audit worker", "human-principal-admin",
+      "audit-emitter-principal", &principal), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (operation_id, sizeof operation_id), ==,
+      WYRELOG_E_OK);
+  payload = g_strdup_printf ("{\"version\":\"1\",\"request_id\":\"%s\","
+          "\"destination\":\"audit-emitter.json\",\"tenant\":\"tenant-a\","
+          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
+          operation_id);
+  stable = wyl_audit_session_handle (env.session_token);
+  g_assert_cmpint (send_raw_service_principal_bearer_full (env.session,
+      "POST", env.base_url,
+      "/service-principals/svc:audit-emit:worker/credentials", env.tenant_query,
+      env.access_token, payload, &status, &body, &denied_rid), ==, 0);
+  g_assert_cmpuint (status, ==, 403);
+  management = session_emitter_rows (env.handle, "wr.service_credential.manage",
+          "human-principal-admin", stable, NULL, denied_rid, 0);
+  g_assert_cmpuint (management->len, ==, 1);
+  SessionEmitterRow *management_row = management->pdata[0];
+  g_assert_cmpint (management_row->decision, ==, WYL_DECISION_DENY);
+
+  gint64 before_arm = g_get_real_time ();
+  g_assert_cmpint (send_raw_service_principal_bearer_full (env.session,
+      "POST", env.base_url, "/service-management-authority/arm", env.query,
+      env.access_token, "{}", &status, &body, &arm_rid), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  before_arm = g_get_real_time ();
+  audit_drive_persisted_transition (env.handle, &runtime, env.session_token,
+      TRUE);
+  permission = session_emitter_rows (env.handle, "perm_state_fired_delta_insert",
+          "human-principal-admin", "wr.service_credential.manage", stable, NULL,
+          before_arm);
+  g_assert_cmpuint (permission->len, ==, 1);
+  permission_removes = session_emitter_rows (env.handle,
+          "perm_state_fired_delta_remove", "human-principal-admin",
+          "wr.service_credential.manage", stable, NULL, before_arm);
+  g_assert_cmpuint (permission_removes->len, ==, 1);
+  SessionEmitterRow *permission_row = permission->pdata[0];
+  g_assert_true (g_strcmp0 (permission_row->field[4],
+      "dormant:grant:armed") == 0);
+
+  g_assert_cmpint (send_raw_service_principal_bearer_full (env.session,
+      "POST", env.base_url,
+      "/service-principals/svc:audit-emit:worker/credentials", env.tenant_query,
+      env.access_token, payload, &status, &body, &issue_rid), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_true (g_strcmp0 (issue_rid, operation_id) != 0);
+  g_assert_cmpuint (env.publication.stage_calls, ==, 1);
+  g_assert_cmpuint (env.publication.commit_calls, ==, 1);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open
+        (env.operation_root, &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+        (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
+      &anchor, operation_id, &record), ==, WYRELOG_E_OK);
+  g_assert_nonnull (record.successor_credential_id);
+  g_assert_true (g_strcmp0 (record.request_id, operation_id) == 0);
+  issue_audits = session_emitter_rows (env.handle, "service.credential.issue",
+          "human-principal-admin", NULL, NULL, operation_id, 0);
+  g_assert_cmpuint (issue_audits->len, ==, 1);
+  SessionEmitterRow *committed = issue_audits->pdata[0];
+  decisions = session_emitter_rows (env.handle, "wr.service_credential.manage",
+          "human-principal-admin", stable, NULL, issue_rid, 0);
+  g_assert_cmpuint (decisions->len, >, 1);
+  SessionEmitterRow *coordinator_row = NULL;
+  /* The HTTP front door precedes the durable credential audit. The later
+   * session-resource reauthorization is resume_committed_handoff's, not
+   * another front-door row with the same tuple. Pin its immutable row ID. */
+  for (guint i = 0; i < decisions->len; i++) {
+    SessionEmitterRow *candidate = decisions->pdata[i];
+    if (candidate->created_at_us > committed->created_at_us)
+      coordinator_row = candidate;
+  }
+  g_assert_nonnull (coordinator_row);
+  g_assert_cmpint (coordinator_row->decision, ==, WYL_DECISION_ALLOW);
+
+  g_assert_cmpint (grant_audit_read (env.handle, "audit-emitter-reader",
+      reader_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (grant_profile_auditor (env.handle, "audit-emitter-reader"),
+      ==, WYRELOG_E_OK);
+  assert_session_emitter_export (env.handle, env.session, env.base_url, reader,
+      management_row, "resource_id", stable, env.session_token, env.access_token);
+  assert_session_emitter_export (env.handle, env.session, env.base_url, reader,
+      permission_row, "deny_origin", stable, env.session_token, env.access_token);
+  assert_session_emitter_export (env.handle, env.session, env.base_url, reader,
+      coordinator_row, "resource_id", stable, env.session_token, env.access_token);
+  /* Pin current writer contracts before adding historical fixtures. Actual
+   * authoritative self-arm rows still retain raw internal scope; the three
+   * native emitter families above store stable handles. Credentials are
+   * absent globally, and no existing storage assertion is relaxed. */
+  fresh = session_emitter_rows (env.handle, NULL, NULL, NULL, NULL, NULL, 0);
+  for (guint i = 0; i < fresh->len; i++) {
+    SessionEmitterRow *row = fresh->pdata[i];
+    for (guint f = 0; f < G_N_ELEMENTS (row->field); f++) {
+      if (row->field[f] != NULL) {
+        g_assert_null (strstr (row->field[f], env.access_token));
+      }
+    }
+  }
+  const SessionEmitterRow *native_rows[] = {
+    management_row, permission_row, coordinator_row,
+  };
+  for (guint n = 0; n < G_N_ELEMENTS (native_rows); n++)
+    for (guint f = 0; f < G_N_ELEMENTS (native_rows[n]->field); f++)
+      if (native_rows[n]->field[f] != NULL)
+        g_assert_null (strstr (native_rows[n]->field[f], env.session_token));
+  self_arm_rows = session_emitter_rows (env.handle, "permission_state.grant",
+          "human-principal-admin", NULL, env.session_token, arm_rid, 0);
+  g_assert_cmpuint (self_arm_rows->len, ==, 2);
+  gboolean legacy_ok = TRUE;
+  for (guint n = 0; n < self_arm_rows->len; n++) {
+    SessionEmitterRow *authority = self_arm_rows->pdata[n];
+    g_assert_cmpint (authority->decision, ==, WYL_DECISION_ALLOW);
+    g_assert_true (g_strcmp0 (authority->field[4], "grant") == 0);
+    g_assert_true (g_strcmp0 (authority->field[3],
+        "wr.service_principal.manage") == 0
+        || g_strcmp0 (authority->field[3], "wr.service_credential.manage") == 0);
+    g_autofree gchar *filter = g_strdup_printf ("request_id(\"%s\")", arm_rid);
+    g_autofree gchar *mirror = NULL;
+    g_assert_cmpint (wyl_audit_conn_query_events_json
+          (wyl_handle_get_audit_conn (env.handle), filter, &mirror), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *exact = session_emitter_json_row (mirror, authority->field[0]);
+    g_autofree gchar *origin = extract_json_string (exact, "deny_origin");
+    g_assert_true (g_strcmp0 (origin, env.session_token) == 0);
+    legacy_ok &= audit_live_value_witness (&env, reader, authority, 5,
+            "real-1255-self-arm-origin", &legacy_handle);
+  }
+  legacy_ok &= audit_legacy_emitter_witness (&env, reader, management_row, 3,
+          "legacy-1255-management-resource", &legacy_handle);
+  legacy_ok &= audit_legacy_emitter_witness (&env, reader, permission_row, 5,
+          "legacy-1255-permission-origin", &legacy_handle);
+  legacy_ok &= audit_legacy_emitter_witness (&env, reader, coordinator_row, 3,
+          "legacy-1255-coordinator-resource", &legacy_handle);
+  if (!legacy_ok) {
+    rc = 12660;
+    goto cleanup;
+  }
+
+  /* Final, isolated corrupt identity fixture: the row really exists and the
+   * same live registration authenticates the management requests above. */
+  live = wyl_daemon_http_ref_session_by_id
+        (env.http.server, env.session_token);
+  g_assert_nonnull (live);
+  g_assert_cmpint (wyl_audit_event_new_from_fields (env.session_token,
+      g_get_real_time (), "human-principal-admin", "audit_id_collision",
+      "fixture", NULL, NULL, "1255-id-collision", WYL_DECISION_ALLOW,
+      &collision), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_audit_emit (env.handle, collision), ==, WYRELOG_E_OK);
+  collisions = session_emitter_rows (env.handle,
+          "audit_id_collision", NULL, NULL, NULL, "1255-id-collision", 0);
+  g_assert_cmpuint (collisions->len, ==, 1);
+  SessionEmitterRow *bad = collisions->pdata[0];
+  g_assert_true (g_strcmp0 (bad->field[0], env.session_token) == 0);
+  g_assert_cmpint (audit_redaction_query (env.session, env.base_url, reader,
+      "request_id(\"legacy-1255-management-resource\")", &body), ==, 0);
+  g_assert_cmpint (send_raw_audit_bearer (env.session, env.base_url,
+      "filter=request_id(%221255-id-collision%22)&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=69", reader, &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 500);
+  g_assert_true (g_strcmp0 (body, "{\"error\":\"audit_query_failed\"}") == 0);
+cleanup:
+  g_clear_object (&live);
+  wyl_service_principal_clear (&principal);
+  wyl_service_credential_operation_record_clear (&record);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  service_denial_env_clear (&env);
+  return rc;
+}
+#endif
 
 static gboolean
 self_arm_perm_armed (ServiceDenialEnv *env, const gchar *perm)
@@ -28710,6 +29285,11 @@ main (int argc, char **argv)
 static gint
 audit_variant_checks (void)
 {
+#ifdef WYL_HAS_FACT_STORE
+  gint emitter_rc = check_audit_real_service_emitters ();
+  if (emitter_rc != 0)
+    return emitter_rc;
+#endif
   gint actual_owner_finalize_rc =
       check_policy_write_actual_owner_finalize_contract ();
   if (actual_owner_finalize_rc != 0)
@@ -28921,7 +29501,7 @@ audit_variant_checks (void)
   g_autofree gchar *reader_token = wyl_client_dup_access_token (client);
   g_autofree gchar *reader_session = wyl_client_dup_session_token (client);
   audit_rc = check_audit_redacts_live_session_ids (handle, http.server,
-          base_url, reader_token, reader_session);
+          base_url, reader_token, reader_session, &runtime);
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_query_session_token_fallback (handle, base_url);
