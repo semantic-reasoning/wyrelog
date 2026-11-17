@@ -89,18 +89,17 @@ confinement, not on a network security layer:
 
 ## Owner-issued data credentials (#1341)
 
-**Status: partly implemented.** This section records the boundary that the
-implementation units must build: #1473 (storage), #1474 (management routes),
-#1475 (exchange and per-use checks), #1476 (lifecycle revocation) and #1477
-(`wyctl` and runbook). Storage, the management routes, the exchange, the
-per-use checks and lifecycle revocation have landed: a tenant owner can issue,
-list, rotate and revoke data credentials, a program can exchange one at
-`/auth/service-token` and use its bearer on the data routes, and the lifecycle
-events below revoke them. A credential's last-used time is the time
-of its last exchange. An exchange of an unknown credential id is refused
-sooner than one with a wrong secret, so its timing can tell whether an id
-exists; ids are not secrets, and the exchange limiter applies. Where the
-shipped behaviour differs from this section, #1477 corrects this document.
+**Status: implemented.** This section records the boundary that #1473
+(storage), #1474 (management routes), #1475 (exchange and per-use checks),
+#1476 (lifecycle revocation) and #1477 (`wyctl` and runbook) built. A tenant
+owner issues, lists, rotates and revokes data credentials with
+`wyctl tenant data-credential`, a program exchanges one at
+`/auth/service-token` and uses its bearer on the data routes, and the lifecycle
+events below revoke them. A credential's last-used time is the time of its
+last exchange. An exchange of an unknown credential id is refused sooner than
+one with a wrong secret, so its timing can tell whether an id exists; ids are
+not secrets, and the exchange limiter applies. The operator runbook ("Data
+credentials") describes the commands and their exit statuses.
 
 ### Why the boundary moves
 
@@ -123,12 +122,14 @@ principals.
 
 - **Bound at issuance** to `(tenant, issuer, operations, graphs, expiry)`. The
   tenant is the tenant that issued it. The issuer is the owner who issued it.
-  `graphs` is optional; when it is empty the credential covers every graph in
-  the tenant. A named graph is bound by its graph id, and a scope is never
-  emptied into "every graph". Graphs leave a tenant today only when the tenant
-  is deleted, which revokes every credential in it. Any future operation that
-  removes a single graph must revoke, in the same transaction, every credential
-  whose scope names that graph, so that a later graph with the same id is never
+  The graph scope is either 1 to 64 named graphs or, chosen explicitly, every
+  graph in the tenant (`"*"` on the route, `--all-graphs` in `wyctl`). An
+  empty scope is refused, so a tenant-wide credential is never an accident. A
+  named graph is bound by its graph id, and a scope is never emptied into
+  "every graph". Graphs leave a tenant today only when the tenant is deleted,
+  which revokes every credential in it. Any future operation that removes a
+  single graph must revoke, in the same transaction, every credential whose
+  scope names that graph, so that a later graph with the same id is never
   covered.
 - **Not a principal.** It has no `svc:` subject, is never granted a role, and is
   never named in `approved_data_plane_permission`. The data-plane allowlist for
@@ -141,10 +142,12 @@ principals.
   `tenants.owner_subject_id` or a `/decide` call on the actor, never sees the
   issuer through a data credential.
 - **Immutable scope.** Nothing widens a credential after issuance. Changing the
-  operations or graphs means issuing a new credential. Rotation keeps the scope
-  and the original expiry, and replaces only the secret, so rotating never
-  extends a credential's life. Rotation is owner-initiated; nothing rotates a
-  data credential automatically.
+  operations or graphs means issuing a new credential. Rotation issues a
+  successor with the same scope and the original expiry, under a new credential
+  id and the next generation, and revokes the old credential, so rotating never
+  extends a credential's life. A program switches to the successor's id as
+  well as its secret. Rotation is owner-initiated; nothing rotates a data
+  credential automatically.
 - **Stored as a verifier.** The store keeps a versioned salted verifier and
   lifecycle metadata, as for service credentials, and never the secret.
 
@@ -198,8 +201,9 @@ whatever its operations. In particular:
   SYSTEM admin means a principal allowed `wr.tenant.manage` on `__wr_default`,
   the capacity the existing tenant routes already recognize. Both stay
   available while the tenant is sealed. A listing shows id, operations, graphs,
-  issuer, created, expires and last-used time, and state. It never shows the
-  secret, salt or verifier.
+  issuer, generation, state, the created, expires and last-used times, the
+  revocation time, actor and reason, and the predecessor of a rotated
+  credential. It never shows the secret, salt or verifier.
 - **Never a credential's bearer:** a `svc:` bearer and a data-credential bearer
   are refused on every management route.
 
@@ -212,10 +216,11 @@ whatever its operations. In particular:
   1. the credential is active and unexpired;
   2. the request's tenant is the credential's tenant;
   3. a graph-addressed request names a graph in the credential's scope, when
-     the scope is set;
+     the scope names graphs;
   4. the route's operation is in the credential's operations;
-  5. the issuer is still the tenant's owner, is not disabled, and currently
-     holds, in the tenant, the permission the route checks;
+  5. the issuer is still the tenant's owner, is an active user whose principal
+     is neither locked nor revoked, and currently holds, in the tenant, the
+     permission the route checks;
   6. the tenant is not sealed.
 
   Revoking an owner's own permission therefore narrows their credentials on the
@@ -236,19 +241,26 @@ whatever its operations. In particular:
 ### Use
 
 A program exchanges the credential for a short-TTL bearer bound to the
-credential id, through `/auth/service-token` or a sibling route. As with
-service tokens, there is no refresh token: the program exchanges again.
+credential id, by posting
+`{"credential_id":"wdc_...","credential_secret":"..."}` to
+`/auth/service-token`. The bearer lives at most 300 seconds and never past the
+credential's expiry. As with service tokens, there is no refresh token: the
+program exchanges again. A well-formed exchange that is refused answers
+`401 service_token_auth_required` whatever the reason, and too many exchanges
+answer `429 service_token_rate_limited`.
 
 - The program presents the secret only in the body of the exchange request,
   never in a URL, a query parameter, a header, or argv. The daemon never logs
   it from the request.
 - The existing service-token exchange rate limiter applies to data-credential
   exchange.
-- There is no rate limit on the query routes today, for any caller. Fact
-  writes are limited only by the tenant's `write_rate` fact quota, which is off
-  until an operator sets it (operator runbook, "Tenant Resource Quotas"). A
-  data-credential bearer is limited exactly as a human bearer is. This is
-  accepted for this kind.
+- There is no rate limit on the query routes today, for any caller. The rate
+  of fact writes is limited only by the tenant's `write_rate` fact quota, which
+  is off until an operator sets it (operator runbook, "Tenant Resource
+  Quotas"). Their volume is limited separately by the `logical_bytes` and
+  `physical_bytes` quotas, which are likewise unlimited until an operator sets
+  them. A data-credential bearer is limited exactly as a human bearer is.
+  This is accepted for this kind.
 - Writes count against the tenant's fact quotas, including `write_rate`,
   exactly as human writes do. Those quotas are shared with the tenant's human
   writers.
@@ -265,38 +277,54 @@ to the daemon host.
   HTTP library's transport buffers fall under the in-process-memory caveat
   below. The daemon never writes the secret to a log line, an audit row, a
   header, or a later response.
-- A replayed issue or rotate request, for example one repeating an idempotency
-  key, never returns the secret again. It may report the credential id and
-  state only.
+- Every issue and rotate carries a request id. A request that repeats a
+  committed id with the same parameters is a replay: it never returns the
+  secret again and reports only the credential id and state. The same id with
+  other parameters is refused, normally with
+  `409 data_credential_request_conflict`.
 - If the issue response is lost, the credential still exists and counts
-  against the caps. The owner lists the tenant's credentials and revokes the
-  one whose secret never arrived, identified by its created time and scope and
-  by never showing a last-used time.
-- `wyctl` writes it to the file named by `--output`, created exclusively with
-  mode `0600`, and refuses to overwrite an existing file. It never prints the
-  secret to stdout or stderr and never takes it in argv. It zeroizes its own
-  buffer after writing.
+  against the caps. The daemon can also fail after the commit and still answer
+  with an error status. `wyctl` therefore prints the request id with every
+  failure that could follow a commit, and tells the owner to re-run with the
+  same `--request-id`: a committed credential then comes back as a replay,
+  which names it, and the owner revokes it; an uncommitted request is decided
+  again. `wyctl` leaves the hint out only for answers the daemon gives before
+  it can commit, and only for an id it minted itself. The set of such answers,
+  listed in the operator runbook, follows the order of the checks in the
+  daemon's data-credential mutation handler, so a change to that order must
+  revisit it. A listing does not show request ids; the audit row of the
+  original issue or rotate carries one.
+- `wyctl` writes the secret to the file named by `--output`, created
+  exclusively with mode `0600` and without following a symlink, and refuses to
+  overwrite an existing file. The file holds exactly the exchange body, so a
+  program posts it unchanged. `wyctl` assembles the file in one fixed buffer
+  and zeroizes it after writing, never prints the secret to stdout or stderr,
+  never takes it in argv, and writes no file for a replay or an unknown
+  outcome. Copies inside the HTTP library's buffers in the `wyctl` process fall
+  under the in-process-memory caveat below, and `wyctl` does not disable core
+  dumps, as no `wyctl` command does today.
 - A lost secret is rotated, never redisplayed.
 
 The response travels over loopback inside the host trust boundary described
-above, so a process that can read the loopback traffic or the daemon's memory
-is outside this boundary, as it is for every other secret here.
+above, so a process that can read the loopback traffic, or the memory of the
+daemon or of the `wyctl` process that received it, is outside this boundary,
+as it is for every other secret here. Once written, the secret is protected
+on disk only by the `--output` file's `0600` mode.
 
 ### Blast radius and limits
 
-Before this kind existed, no program identity could write a fact. A leaked data
-credential therefore widens what a leak can do: until it expires or is revoked,
-whoever holds it may perform its operations on its graphs, from any process
-that can reach the loopback listener. It cannot erase, repair, change schema,
-manage graphs or reach any control-plane action. Because the tenant's fact
-quotas are shared, a leaked write-capable credential can also exhaust them and
-so block the owner's own writes. Revoking it stops further consumption.
+Before this kind existed, no program identity could write a fact. A leaked
+data credential therefore widens what a leak can do: until it expires or is
+revoked, whoever holds it may perform its operations on its graphs, from any
+process that can reach the loopback listener. It cannot erase, repair, change
+schema, manage graphs or reach any control-plane action. Because the tenant's
+fact quotas are shared, a leaked write-capable credential can also exhaust them
+and so block the owner's own writes. Revoking it stops further consumption.
 `write_rate` recovers as its bucket refills, but rows and bytes committed under
 `logical_bytes` stay charged: nothing releases committed logical usage today,
 not even `forget`, so the owner's writes stay blocked until an operator raises
-that limit. Every
-operation it performs is audited with the credential id and its
-issuer, so the owner or a SYSTEM admin can find and revoke it.
+that limit. Every operation it performs is audited with the credential id and
+its issuer, so the owner or a SYSTEM admin can find and revoke it.
 
 The limits bound that exposure:
 
@@ -306,11 +334,19 @@ The limits bound that exposure:
   of which at most 8 may be write-capable (holding `insert`, `delete` or
   `update`). Revoked and expired credentials do not count.
 - **Fact quotas.** The tenant's existing fact quotas apply to writes made
-  through a credential. An operator who issues write-capable credentials may
-  set `write_rate` to bound how fast a leaked one can write.
+  through a credential. A deployment that allows write-capable credentials
+  should set `write_rate` to bound how fast a leaked one can write.
 
-The expiry maximum and the caps are deployment configuration. An operator may
-lower or raise them, and the store enforces whatever values are configured.
+The store reads the expiry maximum and the caps from deployment settings, but
+no route or command writes those settings yet, so every deployment runs on the
+defaults above. The store enforces whatever values are configured, with two
+exceptions, both from rotation, which matter once the settings can be changed:
+
+- Rotation ignores caps lowered since issue. The old credential is revoked
+  before its successor is inserted, so rotating never needs room under a cap.
+- Rotation keeps the original absolute expiry, even when the maximum has been
+  lowered since issue.
+
 The fact quotas stay per tenant, configured as they are today.
 
 ### Audit
@@ -400,8 +436,10 @@ does **not** defend against an adversary who already reads the daemon's live
 process memory. While secrets are held in locked, zeroized daemon memory where
 the implementation controls the buffer, copies that libraries such as SQLite
 keep in their own internal caches are outside the subsystem's control (see #363
-above). Live-process-memory disclosure is an accepted out-of-scope threat for
-v1.
+above). The same holds for `wyctl`: it zeroizes the buffers it owns that hold
+a data-credential secret, but not the HTTP library's copies in its process,
+and it does not disable core dumps. Live-process-memory disclosure, of the
+daemon or of a `wyctl` process, is an accepted out-of-scope threat for v1.
 
 ## Cross-references
 
