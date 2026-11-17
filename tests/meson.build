@@ -693,6 +693,9 @@ if build_client
   endif
   test_daemon_http_decide_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
+    # The data-credential log check needs the library's INFO records; tell
+    # the test whether the library compiled them in.
+    '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
     '-DWYL_TEST_DAEMON_HTTP',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     # The four daemon-http-decide variants share one source file with one
