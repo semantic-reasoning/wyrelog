@@ -2886,6 +2886,273 @@ not, when the migration still fails (another tenant remains unresolved; the
 warnings name it, and nothing was changed), or when the store could not be
 persisted. It exits `2` for an invalid request.
 
+### Data credentials
+
+A data credential lets a program read or write one tenant's data without a
+human session. The tenant's owner issues it. It is bound at issuance to the
+tenant, to the owner as its issuer, to a set of operations, to a set of
+graphs and to an expiry. A program exchanges it for a short-lived bearer and
+calls the query and fact routes with that bearer. It is not a service
+credential: it has no service principal, no escrow publication and no
+`wyctl service-credential` command.
+
+Issue, list, rotate and revoke all use the owner's live MFA-verified
+`__wr_default` session and the usual guard options. Only the current owner
+may issue or rotate. A SYSTEM administrator may list and revoke the
+credentials of any tenant, but never issue or rotate one. `--tenant` is
+always required; the configured `default-tenant` is never used.
+
+Each operation needs the permissions shown, which the owner must hold, armed,
+in the tenant. The daemon checks them when the credential is issued or
+rotated, and again on every use:
+
+| Operation | Owner must hold | Routes it opens |
+| --- | --- | --- |
+| `query` | `wr.datalog.query` and `wr.fact.read` | `POST /datalog/<tenant>/<graph>/query`, `GET /facts/verify` |
+| `infer` | `wr.datalog.infer` | Datalog queries on graphs with a published rule pack; also needs `query` |
+| `insert` | `wr.fact.append` | `POST /facts/<tenant>/<graph>/<relation>:append` |
+| `delete` | `wr.fact.retract` | the facts `:retract` route |
+| `update` | `wr.fact.update` | the facts `:update` routes |
+
+An owner without one of these permissions gets
+`403 data_credential_operation_denied`.
+
+Issue a query-only credential for graph `orders`:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant data-credential issue --tenant acme \
+  --ops query --graph orders --expires-in 30d --output ./orders-reader.json \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+- `--ops` lists operations, separated by commas: `--ops query,insert`.
+- `--graph` names one graph; repeat it for up to 64. Every name must be an
+  existing graph of the tenant (`400 data_credential_unknown_graph`
+  otherwise). To grant every graph of the tenant, including graphs created
+  later, pass `--all-graphs` instead. One of the two is required; a
+  tenant-wide credential is never implied by leaving `--graph` out.
+- `--expires-in` is required. It is a whole positive number followed by `s`,
+  `m`, `h` or `d`, such as `3600s`, `90m`, `12h` or `30d`. wyctl refuses a
+  missing or malformed value before sending anything. The daemon refuses a
+  lifetime above 90 days with `400 data_credential_expiry_exceeds_maximum`.
+- A tenant holds at most 32 live credentials, of which at most 8 may carry
+  `insert`, `delete` or `update`; beyond that the daemon answers
+  `409 data_credential_cap_exceeded`. The 90-day maximum and both caps are
+  fixed defaults; no route or command changes them.
+- `--output` names a new file. wyctl refuses an existing file, a symlink or an
+  unsafe parent directory before sending anything, and leaves an existing
+  file untouched. It creates the file exclusively, with mode `0600`.
+
+The file holds exactly the exchange request, on one line:
+
+```
+{"credential_id":"wdc_...","credential_secret":"..."}
+```
+
+The secret is written only to that file. wyctl never prints it, never takes
+it as an argument, and cannot show it again: keep the file as the only copy,
+and treat it as a password. On success wyctl prints
+`tenant=<tenant> credential_id=<id> state=active operations=<ops>
+graphs=<*|g1,g2> expires_at_us=<us> request_id=<id>` and, on stderr,
+`wyctl: secret written to <path> (mode 0600); it is not shown again`.
+Graph and issuer names are %-escaped.
+
+List a tenant's credentials; secrets are never shown:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant data-credential list --tenant acme \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+Each line reads `credential_id=<id> state=<active|expired|revoked>
+operations=<ops> graphs=<*|g1,g2> issuer=<subject> generation=<n>
+created_at_us=<us> expires_at_us=<us> last_used_at_us=<us|->
+revoked_at_us=<us|-> revoked_by=<subject|-> revoked_reason=<reason|->
+rotated_from=<id|->`.
+
+Rotate a credential to replace its secret:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant data-credential rotate --tenant acme \
+  --id "$CREDENTIAL_ID" --output ./orders-reader-2.json \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+Rotation creates a new credential with the same operations, graphs and
+original expiry, and revokes the old one (`revoked_reason=rotated`). Only an
+active credential can be rotated (`409 data_credential_not_active`). The new
+secret goes to `--output` exactly as for issue, and wyctl prints
+`tenant=<tenant> credential_id=<new> rotated_from=<old> generation=<n>
+state=active expires_at_us=<us> request_id=<id>`. To change the scope or the
+expiry, issue a new credential and revoke the old one.
+
+Revoke a credential at once:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant data-credential revoke --tenant acme \
+  --id "$CREDENTIAL_ID" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `tenant=<tenant> credential_id=<id> state=revoked
+changed=<true|false>`; revoking a revoked credential reports `changed=false`.
+Revocation also stops every bearer already exchanged from the credential.
+Repeating a revoke is always safe, so after an unknown outcome repeat it.
+
+The daemon also revokes credentials on its own, recording the reason:
+
+- `ownership_transfer`: the tenant's ownership was transferred. Every
+  credential the former owner issued is revoked.
+- `issuer_disabled` and `issuer_deleted`: the issuing user was disabled or
+  deleted.
+- `tenant_deleted`: the tenant was deleted.
+
+Sealing the tenant suspends its credentials instead: while the tenant is
+sealed the exchange still issues a bearer, but every data route answers
+`409 tenant_sealed`, and the credentials work again once it is unsealed.
+Revoke still works on a sealed tenant; issue and rotate answer
+`409 tenant_sealed`. A credential also stops working at its expiry, and
+whenever the issuer no longer holds a permission its operations need.
+
+#### Using a data credential from a program
+
+A program posts the file's bytes, unchanged, to the exchange route on the
+daemon host. Until remote transport (#1342) lands, the exchange and the data
+routes are served on the loopback address only:
+
+```sh
+curl --fail -H 'Content-Type: application/json' \
+  --data-binary @./orders-reader.json \
+  "http://127.0.0.1:$PORT/auth/service-token"
+```
+
+The answer is `{"access_token":"..."}`: a bearer that lives at most 300
+seconds, and never past the credential's expiry. There is no refresh token;
+exchange the file again for a new bearer. The program then calls the data
+routes its operations open with `Authorization: Bearer <access_token>` and the
+same query parameters a human bearer sends, the guard parameters included. For
+a query:
+
+```sh
+curl --fail -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"orders(O,A)","output":"json","limit":10}' \
+  "http://127.0.0.1:$PORT/datalog/acme/orders/query?tenant=acme&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+```
+
+A fact write posts its rows to
+`/facts/<tenant>/<graph>/<relation>:append` (or `:retract`, `:update`) with
+the `tenant`, `namespace`, `schema_version`, `batch_id` and
+`idempotency_key` parameters as well. A revoked, expired or unknown
+credential, and a wrong secret, all get `401 service_token_auth_required`
+from the exchange, and its earlier bearers get `401` on the data routes. Too
+many exchanges in a short time get `429 service_token_rate_limited` with a
+`Retry-After` header.
+
+A bearer is checked again on every use. A refused use answers with one of
+these codes:
+
+- `403 tenant_denied`: the route names another tenant.
+- `403 data_credential_graph_denied`: the graph is outside the credential's
+  scope.
+- `403 data_credential_operation_denied`: the operation is not one the
+  credential was issued with.
+- `403 data_credential_issuer_denied`: the issuer is no longer the tenant's
+  owner, is locked, disabled or deleted, or no longer holds a permission the
+  operation needs. A locked issuer suspends its credentials without revoking
+  them.
+- `409 tenant_sealed`: the tenant is sealed.
+- `403 data_credential_denied`: the route is not a data route the credential
+  can open, such as a management route.
+- `503` or `500` with `data_credential_failed`: the daemon could not
+  complete the check; retry later.
+
+`wyctl auth service-token` reads service-credential files only. It refuses a
+data-credential file locally, so a program must make the exchange itself.
+
+#### Unknown outcomes and `--request-id`
+
+Every issue and rotate carries a request id, which wyctl mints unless
+`--request-id` names one, and a failed issue or rotate prints it
+(`wyctl: tenant data-credential issue request_id=<id>`). The daemon can fail
+after it has committed the credential and still answer with an error, and a
+timeout or an unreadable answer leaves the outcome unknown as well. In those
+cases wyctl adds:
+
+```
+wyctl: the credential may have been created; re-run the same command with `--request-id <id>` to find out (a created credential comes back as a replay)
+```
+
+Re-run the same command with that id, never a new one, and a fresh
+`--output` path if the first one now exists. If the credential was created,
+the daemon answers with a replay: wyctl exits 4, writes no file, and reports
+`was already applied: credential <id> exists and its secret cannot be shown
+again`. That secret is lost; revoke the credential and issue a new one. If
+it was not created, the request is decided again. A
+`409 data_credential_request_conflict` means that id is already bound to a
+different request, for example one with other operations or in another
+tenant; repeating it gives the same answer. `list` does not show request
+ids, but the audit row of the original issue or rotate carries it.
+
+wyctl leaves the hint out only for answers the daemon gives before it can
+commit anything, and only when the request id was minted by that same run:
+any `401`, `400 data_credential_expiry_required`,
+`400 data_credential_expiry_invalid`, `400 invalid_tenant_request`,
+`400 invalid_tenant_auth`, `403 tenant_builtin_immutable`,
+`403 tenant_denied`, `403 tenant_mfa_required`,
+`403 data_credential_operation_denied` and `409 tenant_sealed`.
+
+When the daemon succeeded but wyctl could not write the file, wyctl exits 1
+and names the credential. After an issue, revoke it and issue again: the
+secret is gone. After a rotate, the old credential is already revoked, so
+rotate the new one again with `--id <new>` and a fresh `--output` path. If the
+file was written but its directory could not be flushed, wyctl exits 1 and
+says so; inspect the file before relying on it.
+
+#### Exit statuses
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 1 | Issue or rotate succeeded at the daemon, but the secret file could not be written, or its directory could not be flushed. |
+| 2 | Local refusal; nothing was sent. Missing or invalid options, a missing or malformed `--expires-in`, `--ops` or `--graph`, both or neither of `--graph` and `--all-graphs`, an invalid id, an existing or unsafe `--output`, an unreadable token file or a proxy setting. |
+| 3 | The daemon rejected the request as invalid (400). |
+| 4 | The daemon denied the request (403), it conflicts with the tenant's state (409), or an issue or rotate was a replay. |
+| 5 | Not found (404), busy (503), a server error, no answer, or an answer wyctl could not use. |
+| 6 | Authentication failed or is required (401). |
+
+| Daemon answer | Commands | Exit | May have created a credential |
+| --- | --- | --- | --- |
+| `400 invalid_data_credential_request` | issue, rotate, revoke | 3 | yes |
+| `400 data_credential_expiry_required` | issue | 3 | no |
+| `400 data_credential_expiry_invalid` | issue | 3 | no |
+| `400 data_credential_expiry_exceeds_maximum` | issue | 3 | yes |
+| `400 data_credential_unknown_graph` | issue | 3 | yes |
+| `400 invalid_tenant_request` | all | 3 | no |
+| `401 tenant_auth_required`, and every other 401 | all | 6 | no |
+| `403 data_credential_operation_denied` | issue, rotate | 4 | no |
+| `403 data_credential_denied` | all | 4 | yes |
+| `403 tenant_mfa_required`, `tenant_denied`, `tenant_builtin_immutable` | all | 4 | no |
+| `404 tenant_not_found` | all | 5 | yes |
+| `404 data_credential_not_found` | rotate, revoke | 5 | yes |
+| `409 data_credential_cap_exceeded` | issue | 4 | yes |
+| `409 data_credential_request_conflict`: the request id belongs to another request, in this tenant or another | issue, rotate | 4 | yes |
+| `409 data_credential_not_active` | rotate | 4 | yes |
+| `409 tenant_sealed` | issue, rotate | 4 | no |
+| `500 data_credential_failed`, `500 policy_write_cleanup_failed` | all | 5 | yes |
+| `503 data_credential_unavailable` | all | 5 | yes |
+| a replay (`200` with `replayed`) | issue, rotate | 4 | it exists; its secret is lost |
+| a `200` wyctl cannot use, or no answer | all | 5 | yes |
+
+"May have created a credential" applies to issue and rotate. "no" holds only
+for a request id minted by the same run: a repeated `--request-id` may name a
+credential an earlier attempt created, so wyctl prints the hint for every
+failure then. For revoke an unknown outcome is settled by repeating it.
+
 ## Tenant Resource Quotas
 
 A tenant is the admission boundary for shared resources. Six per-tenant quota

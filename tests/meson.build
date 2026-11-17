@@ -1652,6 +1652,17 @@ if host_machine.system() != 'windows' and build_client
           is_parallel : false,
           timeout : 600,
         )
+        # #1477: the owner issues, lists, rotates and revokes data
+        # credentials with wyctl; a program exchanges the 0600 file.
+        test('tenant-data-credential-e2e', python3,
+          args : [meson.current_source_dir() / 'check-tenant-data-credential-e2e.py',
+            wyrelogd_exe.full_path(), wyctl_exe.full_path(),
+            meson.project_source_root() / 'templates' / 'access',
+            wyrelog_log_max.to_string()],
+          depends : [wyrelogd_exe, wyctl_exe],
+          is_parallel : false,
+          timeout : 300,
+        )
       endif
       test('service-credential-provider-preflight-e2e', sh,
         args : [

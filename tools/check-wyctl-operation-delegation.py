@@ -20,6 +20,13 @@ the PERMITTED client tokens WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_ /
 WylClientServiceCredentialOperation are NOT tripped: the anchored spellings
 WYL_SERVICE_CREDENTIAL_OPERATION_ and WylServiceCredentialOperation are not
 substrings of their WYL_CLIENT_/WylClient- counterparts.
+
+`wyctl tenant data-credential` (#1477) is held to the same rule: it calls
+the wyl_client_tenant_data_credential_* client surface and must not reach
+the store's data-credential domain (WylDataCredential*,
+wyl_policy_store_data_credential_*, wyl_data_credential_*,
+WYL_DATA_CREDENTIAL_*).  The client spellings WylClientDataCredential and
+wyl_client_tenant_data_credential_ do not contain those anchored tokens.
 """
 
 from pathlib import Path
@@ -35,6 +42,10 @@ FORBIDDEN_DOMAIN_PATTERNS = (
     re.compile(r"\bWylServiceCredentialOperation"),
     re.compile(r"\bWyl(?:HumanUser|UserOperation|UserDeletePreview)\b"),
     re.compile(r"\bwyl_(?:handle_user_|policy_store_user_)"),
+    re.compile(r"\bWylDataCredential"),
+    re.compile(r"\bwyl_policy_store_data_credential_"),
+    re.compile(r"\bwyl_data_credential_"),
+    re.compile(r"\bWYL_DATA_CREDENTIAL_"),
 )
 
 # A duplicated predecessor state machine would surface as an enum defining
@@ -49,7 +60,7 @@ def scan_violations(text: str) -> list[str]:
     violations = []
     for pattern in FORBIDDEN_DOMAIN_PATTERNS:
         for match in pattern.finditer(text):
-            violations.append(f"forbidden #379 domain token: {match.group(0)}")
+            violations.append(f"forbidden store-domain token: {match.group(0)}")
     for block in ENUM_BLOCK.finditer(text):
         body = block.group(1)
         for infix in FORBIDDEN_ENUM_INFIXES:
@@ -75,6 +86,11 @@ def self_test() -> int:
         "WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE\n"
         "WylClientServiceCredentialOperationStatusEntry entry = { 0 };\n"
         "enum { WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE = 2 };\n"
+        "g_auto (WylClientDataCredentialSecretResult) result = { 0 };\n"
+        "wyl_client_tenant_data_credential_issue (client, &request, 1, \"x\", 0,"
+        " &result);\n"
+        "wyl_client_data_credential_list_clear (&list);\n"
+        "WYL_CLIENT_DATA_CREDENTIAL_SECRET_MAX_DOCUMENT\n"
     )
     if scan_violations(permitted):
         return 1
@@ -86,6 +102,10 @@ def self_test() -> int:
         "wyl_policy_store_user_require (store, subject, TRUE);",
         "WylUserDeletePreview preview;",
         "WylServiceCredentialOperation op;",
+        "WylDataCredentialInfo info = { 0 };",
+        "wyl_policy_store_data_credential_issue (store, tenant);",
+        "wyl_data_credential_id_is_canonical (id, len);",
+        "WYL_DATA_CREDENTIAL_MAX_GRAPHS",
         "enum { WYL_FOO_STATE_PREPARED = 1 };",
         "enum { WYL_FOO_JOURNAL_HEAD = 1 };",
         "enum { WYL_FOO_FENCE_ARMED = 1 };",
