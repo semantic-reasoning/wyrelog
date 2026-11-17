@@ -7,6 +7,10 @@
 #include "wyrelog/client.h"
 
 #define WYL_CLIENT_FACT_STATUS_MAX_DOCUMENT (4u * 1024u * 1024u)
+/* A data-credential list, and an issue or rotate answer that carries a
+ * secret: the largest bodies the client reads for them. */
+#define WYL_CLIENT_DATA_CREDENTIAL_LIST_MAX_DOCUMENT (4u * 1024u * 1024u)
+#define WYL_CLIENT_DATA_CREDENTIAL_SECRET_MAX_DOCUMENT (256u * 1024u)
 
 G_BEGIN_DECLS;
 
@@ -75,4 +79,18 @@ wyrelog_error_t wyl_client_fact_schema_register_result_decode
   (const gchar *document, gsize document_len, const gchar *tenant,
     const gchar *graph, const gchar *namespace_id, const gchar *relation,
     WylClientFactSchemaRegisterResult *out_result);
+/* The data-credential answers (#1477).  Each refuses a document that does
+ * not name tenant, or a credential of another tenant.  The secret result
+ * also refuses a rotated_from other than the given one (NULL for issue);
+ * on any refusal every copy of the secret is wiped. */
+wyrelog_error_t wyl_client_data_credential_list_decode
+  (const gchar * document, gsize document_len, const gchar * tenant,
+    WylClientDataCredentialList * out_list);
+wyrelog_error_t wyl_client_data_credential_secret_result_decode
+  (const gchar * document, gsize document_len, const gchar * tenant,
+    const gchar * rotated_from, WylClientDataCredentialSecretResult *
+    out_result);
+wyrelog_error_t wyl_client_data_credential_revoke_decode
+  (const gchar * document, gsize document_len, const gchar * tenant,
+    const gchar * credential_id, gboolean * out_changed);
 G_END_DECLS;

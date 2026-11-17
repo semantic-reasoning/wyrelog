@@ -2499,3 +2499,486 @@ invalid:
   wyl_client_fact_schema_register_result_clear (&parsed);
   return WYRELOG_E_INVALID;
 }
+
+/* Owner-issued data credentials (#1477). */
+static const gchar *const data_credential_operations[] = {
+  "query", "infer", "insert", "delete", "update",
+};
+
+void
+wyl_client_data_credential_clear (WylClientDataCredential *value)
+{
+  if (value == NULL)
+    return;
+  g_clear_pointer (&value->credential_id, g_free);
+  g_clear_pointer (&value->tenant_id, g_free);
+  g_clear_pointer (&value->issuer, g_free);
+  g_clear_pointer (&value->operations, g_strfreev);
+  g_clear_pointer (&value->graphs, g_strfreev);
+  g_clear_pointer (&value->state, g_free);
+  g_clear_pointer (&value->revoked_by, g_free);
+  g_clear_pointer (&value->revoked_reason, g_free);
+  g_clear_pointer (&value->rotated_from, g_free);
+  memset (value, 0, sizeof *value);
+}
+
+void
+wyl_client_data_credential_list_clear (WylClientDataCredentialList *value)
+{
+  if (value == NULL)
+    return;
+  for (gsize i = 0; i < value->len; i++)
+    wyl_client_data_credential_clear (&value->items[i]);
+  g_clear_pointer (&value->items, g_free);
+  value->len = 0;
+}
+
+void wyl_client_data_credential_secret_result_clear
+  (WylClientDataCredentialSecretResult * value)
+{
+  if (value == NULL)
+    return;
+  wyl_client_data_credential_clear (&value->credential);
+  wyl_client_sensitive_text_clear (&value->secret);
+  value->replayed = FALSE;
+}
+
+static gboolean
+data_credential_document_init (const gchar *document, gsize document_len,
+    gsize max_len, JsonCursor *cursor)
+{
+  if (document == NULL || document_len == 0 || document_len > max_len
+      || memchr (document, '\0', document_len) != NULL)
+    return FALSE;
+  *cursor = (JsonCursor) {
+    document, document_len, 0
+  };
+  return TRUE;
+}
+
+static gboolean
+data_credential_id_is_valid (const gchar *value)
+{
+  return value != NULL && wyl_data_credential_id_is_canonical (value,
+             strlen (value));
+}
+
+static gboolean
+data_credential_state_is_known (const gchar *value)
+{
+  return g_strcmp0 (value, "active") == 0
+         || g_strcmp0 (value, "expired") == 0
+         || g_strcmp0 (value, "revoked") == 0;
+}
+
+/* "null" is 0; a present timestamp is positive. */
+static gboolean
+parse_nullable_timestamp (JsonCursor *cursor, gint64 *out)
+{
+  skip_ws (cursor);
+  if (cursor->pos + 4 <= cursor->len
+      && memcmp (cursor->data + cursor->pos, "null", 4) == 0) {
+    cursor->pos += 4;
+    *out = 0;
+    return TRUE;
+  }
+  return parse_int64 (cursor, out) && *out > 0;
+}
+
+/* A JSON array of distinct strings, each 1 to max_bytes long.  With
+ * operations set, each must name a data-credential operation and the array
+ * must not be empty. */
+static gboolean
+parse_data_credential_names (JsonCursor *cursor, gsize max_bytes,
+    guint max_items, gboolean operations, gchar ***out)
+{
+  g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+  if (!take (cursor, '['))
+    return FALSE;
+  if (!take (cursor, ']')) {
+    while (TRUE) {
+      gchar *name = NULL;
+      if (names->len >= max_items
+          || !parse_string_bounded (cursor, &name, max_bytes))
+        return FALSE;
+      g_ptr_array_add (names, name);
+      if (name[0] == '\0')
+        return FALSE;
+      for (guint i = 0; i + 1 < names->len; i++)
+        if (g_str_equal (g_ptr_array_index (names, i), name))
+          return FALSE;
+      if (operations) {
+        gboolean known = FALSE;
+        for (guint i = 0; i < G_N_ELEMENTS (data_credential_operations); i++)
+          known = known || g_str_equal (name, data_credential_operations[i]);
+        if (!known)
+          return FALSE;
+      }
+      if (take (cursor, ']'))
+        break;
+      if (!take (cursor, ','))
+        return FALSE;
+    }
+  }
+  if (operations && names->len == 0)
+    return FALSE;
+  g_ptr_array_add (names, NULL);
+  *out = (gchar **) g_ptr_array_free (g_steal_pointer (&names), FALSE);
+  return TRUE;
+}
+
+/* Reads one credential object, which must belong to tenant. */
+static gboolean
+parse_data_credential_object (JsonCursor *cursor, const gchar *tenant,
+    WylClientDataCredential *out)
+{
+  static const gchar *const keys[] = {
+    "credential_id", "tenant", "issuer", "operations", "graphs", "all_graphs",
+    "generation", "state", "created_at_us", "expires_at_us",
+    "last_used_at_us", "revoked_at_us", "revoked_by", "revoked_reason",
+    "rotated_from",
+  };
+  gboolean seen[G_N_ELEMENTS (keys)] = { FALSE };
+  gchar *key = NULL;
+  wyl_client_data_credential_clear (out);
+  if (!take (cursor, '{'))
+    return FALSE;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (cursor, &key) || !take (cursor, ':'))
+      goto invalid;
+    guint field = G_N_ELEMENTS (keys);
+    for (guint i = 0; i < G_N_ELEMENTS (keys); i++)
+      if (g_str_equal (key, keys[i]))
+        field = i;
+    if (field == G_N_ELEMENTS (keys) || seen[field])
+      goto invalid;
+    seen[field] = TRUE;
+    gboolean ok = FALSE;
+    switch (field) {
+      case 0:
+        ok = parse_string (cursor, &out->credential_id)
+            && data_credential_id_is_valid (out->credential_id);
+        break;
+      case 1:
+        ok = parse_string (cursor, &out->tenant_id)
+            && g_strcmp0 (out->tenant_id, tenant) == 0;
+        break;
+      case 2:
+        ok = parse_string (cursor, &out->issuer)
+            && string_is_plain_token (out->issuer);
+        break;
+      case 3:
+        ok = parse_data_credential_names (cursor, 16, 5, TRUE,
+                &out->operations);
+        break;
+      case 4:
+        ok = parse_data_credential_names (cursor, 255,
+                WYL_DATA_CREDENTIAL_MAX_GRAPHS, FALSE, &out->graphs);
+        break;
+      case 5:
+        ok = parse_bool (cursor, &out->all_graphs);
+        break;
+      case 6:
+        ok = parse_uint64 (cursor, &out->generation) && out->generation > 0;
+        break;
+      case 7:
+        ok = parse_string (cursor, &out->state)
+            && data_credential_state_is_known (out->state);
+        break;
+      case 8:
+        ok = parse_int64 (cursor, &out->created_at_us)
+            && out->created_at_us > 0;
+        break;
+      case 9:
+        ok = parse_int64 (cursor, &out->expires_at_us)
+            && out->expires_at_us > 0;
+        break;
+      case 10:
+        ok = parse_nullable_timestamp (cursor, &out->last_used_at_us);
+        break;
+      case 11:
+        ok = parse_nullable_timestamp (cursor, &out->revoked_at_us);
+        break;
+      case 12:
+        ok = parse_nullable_string (cursor, &out->revoked_by)
+            && (out->revoked_by == NULL
+            || string_is_plain_token (out->revoked_by));
+        break;
+      case 13:
+        ok = parse_nullable_string (cursor, &out->revoked_reason)
+            && (out->revoked_reason == NULL
+            || string_is_plain_token (out->revoked_reason));
+        break;
+      default:
+        ok = parse_nullable_string (cursor, &out->rotated_from)
+            && (out->rotated_from == NULL
+            || data_credential_id_is_valid (out->rotated_from));
+        break;
+    }
+    if (!ok)
+      goto invalid;
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      goto invalid;
+  }
+  g_clear_pointer (&key, g_free);
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++)
+    if (!seen[i])
+      goto invalid;
+  if (out->all_graphs != (out->graphs[0] == NULL))
+    goto invalid;
+  return TRUE;
+invalid:
+  g_free (key);
+  wyl_client_data_credential_clear (out);
+  return FALSE;
+}
+
+wyrelog_error_t
+wyl_client_data_credential_list_decode (const gchar *document,
+    gsize document_len, const gchar *tenant,
+    WylClientDataCredentialList *out_list)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  gchar *echoed = NULL;
+  GArray *items = NULL;
+  if (out_list == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_data_credential_list_clear (out_list);
+  if (tenant == NULL || !data_credential_document_init (document,
+      document_len, WYL_CLIENT_DATA_CREDENTIAL_LIST_MAX_DOCUMENT, &cursor)
+      || !take (&cursor, '{'))
+    return WYRELOG_E_INVALID;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    if (g_str_equal (key, "tenant")) {
+      if (echoed != NULL || !parse_string (&cursor, &echoed)
+          || g_strcmp0 (echoed, tenant) != 0)
+        goto invalid;
+    } else if (g_str_equal (key, "credentials")) {
+      if (items != NULL || !take (&cursor, '['))
+        goto invalid;
+      items = g_array_new (FALSE, TRUE, sizeof (WylClientDataCredential));
+      if (!take (&cursor, ']')) {
+        while (TRUE) {
+          WylClientDataCredential item = { 0 };
+          if (!parse_data_credential_object (&cursor, tenant, &item))
+            goto invalid;
+          g_array_append_val (items, item);
+          if (take (&cursor, ']'))
+            break;
+          if (!take (&cursor, ','))
+            goto invalid;
+        }
+      }
+    } else {
+      goto invalid;
+    }
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  if (echoed == NULL || items == NULL || !document_done (&cursor))
+    goto invalid;
+  g_free (key);
+  g_free (echoed);
+  out_list->len = items->len;
+  out_list->items = (WylClientDataCredential *)
+      g_array_free (items, FALSE);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  g_free (echoed);
+  if (items != NULL) {
+    for (gsize i = 0; i < items->len; i++)
+      wyl_client_data_credential_clear
+        (&g_array_index (items, WylClientDataCredential, i));
+    g_array_free (items, TRUE);
+  }
+  wyl_client_data_credential_list_clear (out_list);
+  return WYRELOG_E_INVALID;
+}
+
+static gboolean
+data_credential_secret_char_is_valid (gchar value)
+{
+  return g_ascii_isalnum (value) || value == '-' || value == '_';
+}
+
+/* Copies the secret straight from the document into its own buffer.  The
+ * value must be exactly the base64url text with no escape, so it never goes
+ * through a growable string. */
+static gboolean
+parse_data_credential_secret (JsonCursor *cursor, WylClientSensitiveText *out)
+{
+  const gsize len = WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN;
+  if (out->text != NULL || !take (cursor, '"')
+      || cursor->len - cursor->pos < len + 1)
+    return FALSE;
+  const gchar *start = cursor->data + cursor->pos;
+  for (gsize i = 0; i < len; i++)
+    if (!data_credential_secret_char_is_valid (start[i]))
+      return FALSE;
+  if (start[len] != '"')
+    return FALSE;
+  out->text = g_malloc0 (len + 1);
+  memcpy (out->text, start, len);
+  out->len = len;
+  cursor->pos += len + 1;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_client_data_credential_secret_result_decode (const gchar *document,
+    gsize document_len, const gchar *tenant, const gchar *rotated_from,
+    WylClientDataCredentialSecretResult *out_result)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  gchar *echoed = NULL;
+  gboolean seen_ok = FALSE, ok = FALSE, seen_replayed = FALSE;
+  gboolean seen_credential = FALSE, seen_id = FALSE, seen_state = FALSE;
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_data_credential_secret_result_clear (out_result);
+  WylClientDataCredential *credential = &out_result->credential;
+  if (tenant == NULL || !data_credential_document_init (document,
+      document_len, WYL_CLIENT_DATA_CREDENTIAL_SECRET_MAX_DOCUMENT, &cursor)
+      || !take (&cursor, '{'))
+    return WYRELOG_E_INVALID;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    if (g_str_equal (key, "ok")) {
+      if (seen_ok || !parse_bool (&cursor, &ok))
+        goto invalid;
+      seen_ok = TRUE;
+    } else if (g_str_equal (key, "tenant")) {
+      if (echoed != NULL || !parse_string (&cursor, &echoed)
+          || g_strcmp0 (echoed, tenant) != 0)
+        goto invalid;
+    } else if (g_str_equal (key, "replayed")) {
+      if (seen_replayed || !parse_bool (&cursor, &out_result->replayed))
+        goto invalid;
+      seen_replayed = TRUE;
+    } else if (g_str_equal (key, "credential")) {
+      if (seen_credential || seen_id || seen_state
+          || !parse_data_credential_object (&cursor, tenant, credential))
+        goto invalid;
+      seen_credential = TRUE;
+    } else if (g_str_equal (key, "secret")) {
+      if (!parse_data_credential_secret (&cursor, &out_result->secret))
+        goto invalid;
+    } else if (g_str_equal (key, "credential_id")) {
+      if (seen_credential || seen_id
+          || !parse_string (&cursor, &credential->credential_id)
+          || !data_credential_id_is_valid (credential->credential_id))
+        goto invalid;
+      seen_id = TRUE;
+    } else if (g_str_equal (key, "state")) {
+      if (seen_credential || seen_state
+          || !parse_string (&cursor, &credential->state)
+          || !data_credential_state_is_known (credential->state))
+        goto invalid;
+      seen_state = TRUE;
+    } else {
+      goto invalid;
+    }
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  if (!document_done (&cursor) || !seen_ok || !ok || echoed == NULL
+      || !seen_replayed || credential->credential_id == NULL
+      || credential->state == NULL)
+    goto invalid;
+  if (out_result->replayed) {
+    /* A replay names the credential; it has no secret to show. */
+    if (!seen_id || !seen_state || out_result->secret.text != NULL)
+      goto invalid;
+    credential->tenant_id = g_steal_pointer (&echoed);
+  } else if (!seen_credential || out_result->secret.text == NULL
+      || g_strcmp0 (credential->rotated_from, rotated_from) != 0) {
+    goto invalid;
+  }
+  g_free (key);
+  g_free (echoed);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  g_free (echoed);
+  wyl_client_data_credential_secret_result_clear (out_result);
+  return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_client_data_credential_revoke_decode (const gchar *document,
+    gsize document_len, const gchar *tenant, const gchar *credential_id,
+    gboolean *out_changed)
+{
+  static const gchar *const keys[] = {
+    "ok", "tenant", "credential_id", "state", "changed",
+  };
+  gboolean seen[G_N_ELEMENTS (keys)] = { FALSE };
+  JsonCursor cursor;
+  gchar *key = NULL;
+  gchar *value = NULL;
+  gboolean ok = FALSE, changed = FALSE;
+  if (out_changed == NULL)
+    return WYRELOG_E_INVALID;
+  *out_changed = FALSE;
+  if (tenant == NULL || credential_id == NULL
+      || !document_init (document, document_len, &cursor)
+      || !take (&cursor, '{'))
+    return WYRELOG_E_INVALID;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    g_clear_pointer (&value, g_free);
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    guint field = G_N_ELEMENTS (keys);
+    for (guint i = 0; i < G_N_ELEMENTS (keys); i++)
+      if (g_str_equal (key, keys[i]))
+        field = i;
+    if (field == G_N_ELEMENTS (keys) || seen[field])
+      goto invalid;
+    seen[field] = TRUE;
+    if (field == 0) {
+      if (!parse_bool (&cursor, &ok) || !ok)
+        goto invalid;
+    } else if (field == 4) {
+      if (!parse_bool (&cursor, &changed))
+        goto invalid;
+    } else {
+      const gchar *expected = field == 1 ? tenant
+          : field == 2 ? credential_id : "revoked";
+      if (!parse_string (&cursor, &value) || g_strcmp0 (value, expected) != 0)
+        goto invalid;
+    }
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++)
+    if (!seen[i])
+      goto invalid;
+  if (!document_done (&cursor))
+    goto invalid;
+  g_free (key);
+  g_free (value);
+  *out_changed = changed;
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  g_free (value);
+  return WYRELOG_E_INVALID;
+}
