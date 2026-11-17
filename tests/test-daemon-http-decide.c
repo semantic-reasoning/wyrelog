@@ -25348,26 +25348,58 @@ check_tenant_ownership_contract (void)
   service_denial_env_clear (&env);
 }
 
-/* #1474: owner-issued data credentials over the tenant surface. */
+/* #1474: owner-issued data credentials over the tenant surface.  The
+ * response's Cache-Control header, or NULL, goes to *out_cache_control when
+ * that is not NULL. */
 static gchar *
-data_credential_request (ServiceDenialEnv *env, const gchar *token,
+data_credential_request_full (ServiceDenialEnv *env, const gchar *token,
     const gchar *method, const gchar *action, const gchar *tenant,
-    const gchar *body, guint expected_status)
+    const gchar *body, guint expected_status, gchar **out_cache_control)
 {
   g_autofree gchar *query = g_strdup_printf ("tenant=__wr_default&name=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=99", tenant);
   g_autofree gchar *path = action != NULL ?
       g_strdup_printf ("/tenants/data-credentials/%s", action) :
       g_strdup ("/tenants/data-credentials");
-  gchar *response = NULL;
-  guint status = 0;
-  g_assert_cmpint (send_raw_service_principal_bearer (env->session, method,
-      env->base_url, path, query, token, body, &status, &response), ==, 0);
+  g_autofree gchar *uri = build_policy_mutation_uri (env->base_url, path,
+          query);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  g_assert_nonnull (msg);
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", token);
+  soup_message_headers_replace (soup_message_get_request_headers (msg),
+      "Authorization", authorization);
+  if (body != NULL) {
+    g_autoptr (GBytes) request_bytes = g_bytes_new_static (body,
+            strlen (body));
+    soup_message_set_request_body_from_bytes (msg, "application/json",
+        request_bytes);
+  }
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (env->session, msg,
+          NULL, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (check_response_request_id_header (msg, 178), ==, 0);
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  gchar *response = g_strndup (data, size);
+  guint status = soup_message_get_status (msg);
   if (status != expected_status)
     g_printerr ("data credential %s %s: status=%u body=%s\n", method, path,
         status, response);
   g_assert_cmpuint (status, ==, expected_status);
+  if (out_cache_control != NULL)
+    *out_cache_control = g_strdup (soup_message_headers_get_one
+              (soup_message_get_response_headers (msg), "Cache-Control"));
   return response;
+}
+
+static gchar *
+data_credential_request (ServiceDenialEnv *env, const gchar *token,
+    const gchar *method, const gchar *action, const gchar *tenant,
+    const gchar *body, guint expected_status)
+{
+  return data_credential_request_full (env, token, method, action, tenant,
+             body, expected_status, NULL);
 }
 
 /* Issues straight through the store, as the storage unit does, so the list
@@ -25895,9 +25927,12 @@ check_tenant_data_credential_mutation_contract (void)
       WYRELOG_E_OK);
   g_autofree gchar *issue_body = data_credential_issue_body (request,
           "query,insert", "*", "3600");
-  g_autofree gchar *issued = data_credential_request (&env, alice, "POST",
-          "issue", "dc-1474", issue_body, 200);
+  g_autofree gchar *issued_cache = NULL;
+  g_autofree gchar *issued = data_credential_request_full (&env, alice,
+          "POST", "issue", "dc-1474", issue_body, 200, &issued_cache);
   g_assert_nonnull (strstr (issued, "\"replayed\":false,\"credential\":{"));
+  /* A response that carries a secret is never cached (#1477). */
+  g_assert_cmpstr (issued_cache, ==, "no-store");
   g_assert_nonnull (strstr (issued,
       "\"operations\":[\"query\",\"insert\"],\"graphs\":[],"
       "\"all_graphs\":true,\"generation\":1,\"state\":\"active\""));
@@ -26055,8 +26090,12 @@ check_tenant_data_credential_mutation_contract (void)
   g_autofree gchar *rotation_request = g_malloc (WYL_REQUEST_ID_STRING_BUF);
   g_assert_cmpint (wyl_request_id_new (rotation_request,
       WYL_REQUEST_ID_STRING_BUF), ==, WYRELOG_E_OK);
-  g_autofree gchar *rotated = data_credential_rotate (&env, alice, first_id,
-          rotation_request, 200);
+  g_autofree gchar *rotation_body = g_strdup_printf ("{\"credential_id\":"
+          "\"%s\",\"request_id\":\"%s\"}", first_id, rotation_request);
+  g_autofree gchar *rotated_cache = NULL;
+  g_autofree gchar *rotated = data_credential_request_full (&env, alice,
+          "POST", "rotate", "dc-1474", rotation_body, 200, &rotated_cache);
+  g_assert_cmpstr (rotated_cache, ==, "no-store");
   g_autofree gchar *second_id = extract_json_string (rotated,
           "credential_id");
   g_assert_cmpstr (second_id, !=, first_id);
@@ -26205,12 +26244,75 @@ check_tenant_data_credential_mutation_contract (void)
   g_autofree gchar *log = NULL;
   g_assert_true (g_file_get_contents (log_path, &log, NULL, NULL));
   /* The issue path logs the credential id, so an empty capture cannot pass
-   * for a clean one. */
+   * for a clean one.  That line is INFO, compiled out below that level. */
+#if WYL_LOG_LEVEL_INFO <= WYL_LOG_MAX_LEVEL
   g_assert_nonnull (strstr (log, first_id));
+#endif
   for (guint i = 0; i < secrets->len; i++)
     g_assert_null (strstr (log, g_ptr_array_index (secrets, i)));
   g_assert_cmpint (g_remove (log_path), ==, 0);
   g_assert_cmpint (g_rmdir (log_dir), ==, 0);
+}
+
+/* #1477: while a tenant repair is pending, issue and rotate answer 503
+ * data_credential_unavailable and write nothing.  The failed seal also
+ * poisons the engine pair, so without the pending-repair check the same
+ * requests fail differently. */
+static void
+check_data_credential_recovery_pending (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  g_autofree gchar *alice = seed_data_credential_human (&env, "dc-alice",
+          TRUE);
+  register_test_human (store, "human-principal-admin");
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-1474",
+      "dc-alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "dc-repair",
+      "human-principal-admin", &created), ==, WYRELOG_E_OK);
+  const gchar *tenants[] = { "dc-1474", "dc-repair" };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenants); i++)
+    g_assert_cmpint (wyl_policy_store_set_session_state (store, tenants[i],
+        "active"), ==, WYRELOG_E_OK);
+  grant_armed_permission (store, "dc-alice", "wr.datalog.query", "dc-1474");
+  grant_armed_permission (store, "dc-alice", "wr.fact.read", "dc-1474");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *issued = data_credential_issue (&env, alice, "dc-1474",
+          "query", 200);
+  g_autofree gchar *issued_id = extract_json_string (issued,
+          "credential_id");
+  g_assert_nonnull (issued_id);
+
+  /* A seal whose publication cannot be verified leaves its repair
+   * pending. */
+  wyl_daemon_http_fail_next_tenant_seal_verification_for_test
+    (env.http.server);
+  tenant_ownership_request_named (&env, env.access_token, "dc-repair",
+      "seal", NULL, NULL, 500, "{\"error\":\"tenant_mutation_failed\"}");
+  g_assert_true (wyl_handle_engine_pair_is_poisoned (env.handle));
+  g_autoptr (GPtrArray) before = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_list (store, "dc-1474",
+      &before), ==, WYRELOG_E_OK);
+
+  g_autofree gchar *issue_refused = data_credential_issue (&env, alice,
+          "dc-1474", "query", 503);
+  g_assert_cmpstr (issue_refused, ==,
+      "{\"error\":\"data_credential_unavailable\"}");
+  g_autofree gchar *rotate_refused = data_credential_rotate (&env, alice,
+          issued_id, NULL, 503);
+  g_assert_cmpstr (rotate_refused, ==,
+      "{\"error\":\"data_credential_unavailable\"}");
+  g_autoptr (GPtrArray) after = NULL;
+  g_assert_cmpint (wyl_policy_store_data_credential_list (store, "dc-1474",
+      &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after->len, ==, before->len);
+  /* The repair was pending throughout. */
+  g_assert_true (wyl_daemon_http_detach_tenant_recovery_slot_for_test
+        (env.http.server));
+  service_denial_env_clear (&env);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -28801,6 +28903,7 @@ main (void)
   check_tenant_data_credential_mutation_contract ();
   check_data_credential_revoke_clock_ahead ();
   check_data_credential_rotate_clock_ahead ();
+  check_data_credential_recovery_pending ();
 #ifdef WYL_HAS_AUDIT
   check_data_credential_exchange_contract ();
   check_data_credential_never_routes ();
