@@ -914,6 +914,116 @@ wyrelog_error_t wyl_client_tenant_unseal (WylClient * client,
 wyrelog_error_t wyl_client_tenant_seal (WylClient * client,
     const gchar * name, const gchar * request_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk, gboolean * out_changed);
+
+/* One owner-issued data credential of a tenant.  operations and graphs are
+ * NULL-terminated; graphs is empty when all_graphs is TRUE.  last_used_at_us
+ * and revoked_at_us are 0 when unset; revoked_by, revoked_reason and
+ * rotated_from are NULL when unset.  The credential never carries its
+ * secret. */
+typedef struct
+{
+  gchar *credential_id;
+  gchar *tenant_id;
+  gchar *issuer;
+  gchar **operations;
+  gchar **graphs;
+  gboolean all_graphs;
+  guint64 generation;
+  gchar *state;
+  gint64 created_at_us;
+  gint64 expires_at_us;
+  gint64 last_used_at_us;
+  gint64 revoked_at_us;
+  gchar *revoked_by;
+  gchar *revoked_reason;
+  gchar *rotated_from;
+} WylClientDataCredential;
+
+typedef struct
+{
+  WylClientDataCredential *items;
+  gsize len;
+} WylClientDataCredentialList;
+
+/* operations is a comma-separated list of distinct names from query, infer,
+ * insert, delete and update.  A tenant-wide credential is never implied:
+ * all_graphs TRUE grants every graph of the tenant and needs graphs NULL or
+ * empty; all_graphs FALSE needs graphs, NULL-terminated, to name 1 to 64
+ * distinct graphs of 1 to 255 bytes without ',' and other than "*".
+ * expires_in_seconds is the lifetime, at least 1. */
+typedef struct
+{
+  const gchar *tenant;
+  const gchar *request_id;
+  const gchar *operations;
+  const gchar *const *graphs;
+  gboolean all_graphs;
+  gint64 expires_in_seconds;
+} WylClientDataCredentialIssueRequest;
+
+/* The answer to an issue or rotate.  secret is shown once and is empty when
+ * replayed is TRUE; a replay fills only credential_id, tenant_id and state of
+ * credential. */
+typedef struct
+{
+  gboolean replayed;
+  WylClientDataCredential credential;
+  WylClientSensitiveText secret;
+} WylClientDataCredentialSecretResult;
+
+void wyl_client_data_credential_clear (WylClientDataCredential * value);
+void wyl_client_data_credential_list_clear (WylClientDataCredentialList *
+    value);
+void wyl_client_data_credential_secret_result_clear
+  (WylClientDataCredentialSecretResult * value);
+/* Data credentials of a tenant, managed by its owner as the __wr_default
+ * session; a SYSTEM administrator may also list and revoke them.  tenant
+ * must be a valid tenant id, request_id canonical and credential_id a
+ * canonical data credential id; an invalid argument is WYRELOG_E_INVALID
+ * and sends nothing.  Issue and rotate also need a canonical literal
+ * loopback base URL.  Answers map 400 to WYRELOG_E_INVALID, 401 to
+ * WYRELOG_E_AUTH, 403 and 409 to WYRELOG_E_POLICY, 404 to
+ * WYRELOG_E_NOT_FOUND, 503 to WYRELOG_E_BUSY and any other failure to
+ * WYRELOG_E_IO, keeping the daemon's error code; an error answer larger
+ * than the client reads keeps its status but loses that code.  A success
+ * answer that does not match the request is WYRELOG_E_IO with nothing
+ * returned.  Out structures must be zero-initialised or cleared; they are
+ * owned by the caller and must be cleared after use. */
+wyrelog_error_t wyl_client_tenant_data_credential_list (WylClient * client,
+    const gchar * tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialList * out_list);
+/* A repeated request id is WYRELOG_E_CONFLICT with out_result->replayed
+ * TRUE: the credential exists, but its secret is not returned again.
+ *
+ * For issue and rotate, only three results are definite: WYRELOG_E_OK, a
+ * replay, and a request refused before anything was sent, which is
+ * WYRELOG_E_INVALID with wyl_client_get_last_http_status() 0 (a transport
+ * failure is WYRELOG_E_IO, never WYRELOG_E_INVALID).  The daemon can fail after
+ * the credential is committed and still answer with an error status, so every
+ * other result, WYRELOG_E_BUSY and WYRELOG_E_INVALID included, may leave a
+ * committed credential whose secret was never returned.  WYRELOG_E_IO after a
+ * complete 2xx response (wyl_client_last_response_is_complete() TRUE and a 2xx
+ * wyl_client_get_last_http_status()) means the daemon answered but the answer
+ * could not be used.  Repeating the call with the same request_id settles each
+ * case: a committed credential comes back as a replay, and an uncommitted
+ * request is decided again. */
+wyrelog_error_t wyl_client_tenant_data_credential_issue (WylClient * client,
+    const WylClientDataCredentialIssueRequest * request,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialSecretResult * out_result);
+/* Replaces credential_id with a new credential of the same scope; a replay
+ * is reported as for issue. */
+wyrelog_error_t wyl_client_tenant_data_credential_rotate (WylClient * client,
+    const gchar * tenant, const gchar * credential_id,
+    const gchar * request_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialSecretResult * out_result);
+/* out_changed is FALSE when the credential was already revoked. */
+wyrelog_error_t wyl_client_tenant_data_credential_revoke (WylClient * client,
+    const gchar * tenant, const gchar * credential_id,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    gboolean * out_changed);
 /* Writes a fresh canonical request id into buf, which must hold at least
  * WYL_CLIENT_REQUEST_ID_BUF bytes. */
 #define WYL_CLIENT_REQUEST_ID_BUF 28
@@ -1292,6 +1402,13 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
     wyl_client_service_credential_handoff_receipt_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientServiceTokenResult, wyl_client_service_token_result_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientDataCredential, wyl_client_data_credential_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientDataCredentialList, wyl_client_data_credential_list_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientDataCredentialSecretResult,
+    wyl_client_data_credential_secret_result_clear)
 G_DEFINE_AUTOPTR_CLEANUP_FUNC
   (WylClientServiceCredentialOperationReconcileRequest,
     wyl_client_service_credential_operation_reconcile_request_clear)

@@ -3743,6 +3743,350 @@ wyl_client_tenant_seal (WylClient *client, const gchar *name,
              guard_timestamp, guard_loc_class, guard_risk, out_changed);
 }
 
+/* Owner-issued data credentials (#1477): /tenants/data-credentials as the
+ * __wr_default session. */
+static gboolean
+client_data_credential_operations_are_valid (const gchar *operations)
+{
+  static const gchar *const names[] = {
+    "query", "infer", "insert", "delete", "update",
+  };
+  guint seen = 0;
+  if (operations == NULL)
+    return FALSE;
+  for (const gchar *p = operations;;) {
+    const gchar *end = strchr (p, ',');
+    gsize len = end != NULL ? (gsize) (end - p) : strlen (p);
+    guint bit = G_N_ELEMENTS (names);
+    for (guint i = 0; i < G_N_ELEMENTS (names); i++)
+      if (strlen (names[i]) == len && memcmp (names[i], p, len) == 0)
+        bit = i;
+    if (bit == G_N_ELEMENTS (names) || (seen & (1u << bit)) != 0)
+      return FALSE;
+    seen |= 1u << bit;
+    if (end == NULL)
+      return TRUE;
+    p = end + 1;
+  }
+}
+
+/* The graphs field of an issue body: "*" for every graph, otherwise the
+ * names joined by commas.  NULL when all_graphs disagrees with graphs or a
+ * name is one the daemon refuses. */
+static gchar *
+client_data_credential_graphs_join (const gchar *const *graphs,
+    gboolean all_graphs)
+{
+  gboolean empty = graphs == NULL || graphs[0] == NULL;
+  if (all_graphs != empty)
+    return NULL;
+  if (all_graphs)
+    return g_strdup ("*");
+  for (guint i = 0; graphs[i] != NULL; i++) {
+    gsize len = strlen (graphs[i]);
+    if (i >= WYL_DATA_CREDENTIAL_MAX_GRAPHS || len == 0 || len > 255
+        || strchr (graphs[i], ',') != NULL || g_str_equal (graphs[i], "*")
+        || !g_utf8_validate (graphs[i], (gssize) len, NULL))
+      return NULL;
+    for (guint j = 0; j < i; j++)
+      if (g_str_equal (graphs[i], graphs[j]))
+        return NULL;
+  }
+  return g_strjoinv (",", (gchar **) graphs);
+}
+
+static wyrelog_error_t
+client_data_credential_status_error (guint status)
+{
+  switch (status) {
+    case 400:
+      return WYRELOG_E_INVALID;
+    case 401:
+      return WYRELOG_E_AUTH;
+    case 403:
+    case 409:
+      return WYRELOG_E_POLICY;
+    case 404:
+      return WYRELOG_E_NOT_FOUND;
+    case 503:
+      return WYRELOG_E_BUSY;
+    default:
+      return WYRELOG_E_IO;
+  }
+}
+
+static void
+client_data_credential_body_free (gchar *data, gsize len)
+{
+  if (data == NULL)
+    return;
+  sodium_memzero (data, len);
+  g_free (data);
+}
+
+/* Reads the response into one zeroed buffer that is sized once and never
+ * moved, so the body, and a secret in it, is never copied by a growing
+ * buffer.  The buffer holds max_body bytes, or the Content-Length when the
+ * response declares one; a body above max_body is refused.  An error status
+ * whose body is above max_body still succeeds, with no body, so the caller
+ * keeps the status but not the daemon's error code.  On success *out_data
+ * holds *out_len bytes (or is NULL); the caller wipes and frees it with
+ * client_data_credential_body_free(). */
+static wyrelog_error_t
+client_data_credential_send (WylClient *client, SoupMessage *message,
+    gsize max_body, gchar **out_data, gsize *out_len)
+{
+  g_autoptr (GError) error = NULL;
+  WylClientTimeout timeout;
+  wyrelog_error_t rc = WYRELOG_E_IO;
+  client_timeout_begin (client, &timeout);
+  g_autoptr (GInputStream) stream = soup_session_send (client->session,
+          message, timeout.cancellable, &error);
+  if (stream != NULL) {
+    guint status = soup_message_get_status (message);
+    gboolean success = status >= 200 && status < 300;
+    client->last_http_status = status;
+    SoupMessageHeaders *headers = soup_message_get_response_headers (message);
+    /* libsoup reports 0, not -1, for a body without Content-Length. */
+    gboolean declared = soup_message_headers_get_encoding (headers)
+        == SOUP_ENCODING_CONTENT_LENGTH;
+    goffset content_length = declared
+        ? soup_message_headers_get_content_length (headers) : -1;
+    if (content_length >= 0 && (guint64) content_length > max_body) {
+      if (!success)
+        rc = WYRELOG_E_OK;
+    } else {
+      gsize capacity = content_length >= 0 ? (gsize) content_length : max_body;
+      gchar *data = g_malloc0 (capacity + 1);
+      gsize len = 0;
+      gboolean done = FALSE;
+      while (len <= capacity) {
+        gssize n_read = g_input_stream_read (stream, data + len,
+                capacity + 1 - len, timeout.cancellable, &error);
+        if (n_read < 0)
+          break;
+        if (n_read == 0) {
+          done = TRUE;
+          break;
+        }
+        len += (gsize) n_read;
+      }
+      if (done) {
+        rc = WYRELOG_E_OK;
+        client->last_response_complete = TRUE;
+        *out_data = data;
+        *out_len = len;
+      } else {
+        if (len > capacity && !success)
+          rc = WYRELOG_E_OK;
+        client_data_credential_body_free (data, capacity + 1);
+      }
+    }
+    (void) g_input_stream_close (stream, timeout.cancellable, NULL);
+  }
+  client_timeout_end (&timeout);
+  return rc;
+}
+
+/* GET /tenants/data-credentials, or POST /tenants/data-credentials/<action>,
+ * for tenant.  On success *out_data is the 2xx body; on an error status the
+ * daemon's error code is kept and the body is dropped. */
+static wyrelog_error_t
+client_data_credential_request (WylClient *client, const gchar *action,
+    const gchar *tenant, const gchar *json_body, gboolean secret,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gchar **out_data, gsize *out_len)
+{
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  gchar *data = NULL;
+  gsize len = 0;
+  *out_data = NULL;
+  *out_len = 0;
+  if (client == NULL || !WYL_IS_CLIENT (client))
+    return WYRELOG_E_INVALID;
+  wyl_client_clear_last_http_error (client);
+  if (!wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = client_fact_prepare (client, WYL_TENANT_DEFAULT,
+          guard_timestamp, guard_loc_class, guard_risk, &base_url,
+          &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (secret && !wyl_client_secret_url_is_canonical_literal_loopback
+        (base_url))
+    return WYRELOG_E_INVALID;
+  gboolean has_access = access_token != NULL && access_token[0] != '\0';
+  g_autofree gchar *guard_query = client_fact_guard_query (WYL_TENANT_DEFAULT,
+          guard_timestamp, guard_loc_class, guard_risk,
+          has_access ? NULL : session_token);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *uri = g_strdup_printf
+        ("%s/tenants/data-credentials%s%s?%s&name=%s", base_url,
+          action != NULL ? "/" : "", action != NULL ? action : "", guard_query,
+          escaped_tenant);
+  g_autoptr (SoupMessage) message = soup_message_new (action != NULL ? "POST"
+      : "GET", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  if (json_body != NULL) {
+    g_autoptr (GBytes) request = g_bytes_new (json_body, strlen (json_body));
+    soup_message_set_request_body_from_bytes (message, "application/json",
+        request);
+  }
+  rc = client_data_credential_send (client, message, secret ?
+          WYL_CLIENT_DATA_CREDENTIAL_SECRET_MAX_DOCUMENT :
+          WYL_CLIENT_DATA_CREDENTIAL_LIST_MAX_DOCUMENT, &data, &len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint status = client->last_http_status;
+  if (status < 200 || status >= 300) {
+    client_store_fact_error_code (client, data, len);
+    client_data_credential_body_free (data, len);
+    return client_data_credential_status_error (status);
+  }
+  *out_data = data;
+  *out_len = len;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_tenant_data_credential_list (WylClient *client,
+    const gchar *tenant, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialList *out_list)
+{
+  gchar *data = NULL;
+  gsize len = 0;
+  if (out_list == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_data_credential_list_clear (out_list);
+  wyrelog_error_t rc = client_data_credential_request (client, NULL, tenant,
+          NULL, FALSE, guard_timestamp, guard_loc_class, guard_risk, &data,
+          &len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (wyl_client_data_credential_list_decode (data, len, tenant, out_list)
+      != WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  client_data_credential_body_free (data, len);
+  return rc;
+}
+
+/* Sends an issue or rotate and decodes its answer.  The body is wiped on
+ * every path; a refused answer leaves nothing in out_result. */
+static wyrelog_error_t
+client_data_credential_secret_request (WylClient *client, const gchar *action,
+    const gchar *tenant, const gchar *json_body, const gchar *rotated_from,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialSecretResult *out_result)
+{
+  gchar *data = NULL;
+  gsize len = 0;
+  wyrelog_error_t rc = client_data_credential_request (client, action, tenant,
+          json_body, TRUE, guard_timestamp, guard_loc_class, guard_risk, &data,
+          &len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (wyl_client_data_credential_secret_result_decode (data, len, tenant,
+      rotated_from, out_result) != WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  else if (out_result->replayed)
+    rc = WYRELOG_E_CONFLICT;
+  client_data_credential_body_free (data, len);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_client_tenant_data_credential_issue (WylClient *client,
+    const WylClientDataCredentialIssueRequest *request,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialSecretResult *out_result)
+{
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_data_credential_secret_result_clear (out_result);
+  if (request == NULL || !wyl_request_id_is_canonical (request->request_id)
+      || !client_data_credential_operations_are_valid (request->operations)
+      || request->expires_in_seconds < 1
+      || request->expires_in_seconds > G_MAXINT64 / G_USEC_PER_SEC)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *graphs = client_data_credential_graphs_join
+        (request->graphs, request->all_graphs);
+  if (graphs == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (GString) json = g_string_new ("{\"request_id\":");
+  append_json_string (json, request->request_id);
+  g_string_append (json, ",\"operations\":");
+  append_json_string (json, request->operations);
+  g_string_append (json, ",\"graphs\":");
+  append_json_string (json, graphs);
+  g_string_append_printf (json, ",\"expires_in_seconds\":%" G_GINT64_FORMAT
+      "}", request->expires_in_seconds);
+  return client_data_credential_secret_request (client, "issue",
+             request->tenant, json->str, NULL, guard_timestamp, guard_loc_class,
+             guard_risk, out_result);
+}
+
+wyrelog_error_t
+wyl_client_tenant_data_credential_rotate (WylClient *client,
+    const gchar *tenant, const gchar *credential_id, const gchar *request_id,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientDataCredentialSecretResult *out_result)
+{
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_data_credential_secret_result_clear (out_result);
+  if (credential_id == NULL || !wyl_data_credential_id_is_canonical
+        (credential_id, strlen (credential_id))
+      || !wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GString) json = g_string_new ("{\"credential_id\":");
+  append_json_string (json, credential_id);
+  g_string_append (json, ",\"request_id\":");
+  append_json_string (json, request_id);
+  g_string_append_c (json, '}');
+  return client_data_credential_secret_request (client, "rotate", tenant,
+             json->str, credential_id, guard_timestamp, guard_loc_class,
+             guard_risk, out_result);
+}
+
+wyrelog_error_t
+wyl_client_tenant_data_credential_revoke (WylClient *client,
+    const gchar *tenant, const gchar *credential_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, gboolean *out_changed)
+{
+  gchar *data = NULL;
+  gsize len = 0;
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
+  if (out_changed == NULL)
+    return WYRELOG_E_INVALID;
+  *out_changed = FALSE;
+  if (credential_id == NULL || !wyl_data_credential_id_is_canonical
+        (credential_id, strlen (credential_id)))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GString) json = g_string_new ("{\"credential_id\":");
+  append_json_string (json, credential_id);
+  g_string_append_c (json, '}');
+  wyrelog_error_t rc = client_data_credential_request (client, "revoke",
+          tenant, json->str, FALSE, guard_timestamp, guard_loc_class,
+          guard_risk, &data, &len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (wyl_client_data_credential_revoke_decode (data, len, tenant,
+      credential_id, out_changed) != WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  client_data_credential_body_free (data, len);
+  return rc;
+}
+
 void
 wyl_client_fact_forget_result_clear (WylClientFactForgetResult *result)
 {

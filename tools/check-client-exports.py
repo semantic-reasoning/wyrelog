@@ -60,6 +60,13 @@ REQUIRED = {
     "wyl_client_tenant_create",
     "wyl_client_tenant_unseal",
     "wyl_client_tenant_seal",
+    "wyl_client_data_credential_clear",
+    "wyl_client_data_credential_list_clear",
+    "wyl_client_data_credential_secret_result_clear",
+    "wyl_client_tenant_data_credential_list",
+    "wyl_client_tenant_data_credential_issue",
+    "wyl_client_tenant_data_credential_rotate",
+    "wyl_client_tenant_data_credential_revoke",
     "wyl_client_request_id_new",
     "wyl_client_request_id_is_canonical",
 }

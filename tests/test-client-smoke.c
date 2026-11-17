@@ -20,6 +20,8 @@ typedef struct
   guint request_count;
   gboolean truncate_response_body;
   gboolean oversized_chunked_response;
+  gboolean chunked_response;
+  gboolean close_connection;
   gchar *last_method;
   gchar *last_path;
   gchar *last_body;
@@ -46,6 +48,7 @@ typedef struct
   gchar *last_relation;
   gchar *last_schema_version;
   gchar *last_content_type;
+  gchar *last_name;
 } TestHttpServer;
 
 static const gchar *two_event_body =
@@ -111,6 +114,9 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_relation);
   g_free (http->last_schema_version);
   g_free (http->last_content_type);
+  g_free (http->last_name);
+  http->last_name =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "name")) : NULL;
   http->last_namespace =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "namespace"))
       : NULL;
@@ -216,6 +222,14 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
+  if (http->close_connection) {
+    g_autoptr (GIOStream) connection =
+        soup_server_message_steal_connection (msg);
+    if (connection != NULL)
+      g_io_stream_close (connection, NULL, NULL);
+    return;
+  }
+
   if (http->oversized_chunked_response) {
     const gsize oversized_len = WYL_CLIENT_FACT_STATUS_MAX_DOCUMENT + 1u;
     g_autofree gchar *chunk_header = g_strdup_printf ("%zx\r\n",
@@ -247,10 +261,16 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   const gchar *body = http->body != NULL ? http->body : "[]";
+  if (http->chunked_response)
+    soup_message_headers_set_encoding (soup_server_message_get_response_headers
+          (msg), SOUP_ENCODING_CHUNKED);
   soup_server_message_set_status (msg, http->status != 0 ? http->status : 200,
       NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
       body, http->body_size > 0 ? http->body_size : strlen (body));
+  /* A chunked body ends only once it is marked complete. */
+  if (http->chunked_response)
+    soup_message_body_complete (soup_server_message_get_response_body (msg));
 }
 
 static gboolean
@@ -1192,6 +1212,587 @@ check_fact_restore_codec (void)
     }
   return TRUE;
 }
+
+/* #1477: owner-issued data credentials through the typed client. */
+#define DC_ID "wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
+#define DC_OLD_ID "wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOa"
+#define DC_REQUEST_ID "ABCDEFGHIJKLMNOPQRSTUVWXYZ1"
+#define DC_SECRET "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop_"
+#define DC_CREDENTIAL(tenant, rotated_from) \
+  "{\"credential_id\":\"" DC_ID "\",\"tenant\":\"" tenant "\"," \
+  "\"issuer\":\"alice\",\"operations\":[\"query\",\"insert\"]," \
+  "\"graphs\":[\"g1\",\"g2\"],\"all_graphs\":false,\"generation\":1," \
+  "\"state\":\"active\",\"created_at_us\":100,\"expires_at_us\":200," \
+  "\"last_used_at_us\":null,\"revoked_at_us\":null,\"revoked_by\":null," \
+  "\"revoked_reason\":null,\"rotated_from\":" rotated_from "}"
+#define DC_ISSUED(tenant, credential, secret) \
+  "{\"ok\":true,\"tenant\":\"" tenant "\",\"replayed\":false," \
+  "\"credential\":" credential ",\"secret\":\"" secret "\"}"
+
+static wyrelog_error_t
+dc_issue (WylClient *client, const gchar *tenant, const gchar *request_id,
+    const gchar *operations, const gchar *const *graphs, gboolean all_graphs,
+    gint64 seconds, WylClientDataCredentialSecretResult *out)
+{
+  const WylClientDataCredentialIssueRequest request = {
+    .tenant = tenant,
+    .request_id = request_id,
+    .operations = operations,
+    .graphs = graphs,
+    .all_graphs = all_graphs,
+    .expires_in_seconds = seconds,
+  };
+  return wyl_client_tenant_data_credential_issue (client, &request, 123,
+             "public", 49, out);
+}
+
+static void
+dc_assert_result_empty (const WylClientDataCredentialSecretResult *result)
+{
+  g_assert_false (result->replayed);
+  g_assert_null (result->credential.credential_id);
+  g_assert_null (result->credential.tenant_id);
+  g_assert_null (result->credential.state);
+  g_assert_null (result->credential.operations);
+  g_assert_null (result->credential.graphs);
+  g_assert_null (result->secret.text);
+  g_assert_cmpuint (result->secret.len, ==, 0);
+}
+
+static void
+check_tenant_data_credentials (TestHttpServer *http, WylClient *client,
+    const gchar *local_base_url)
+{
+  static const gchar *const two_graphs[] = { "g1", "g2", NULL };
+  static const gchar *const no_graphs[] = { NULL };
+  g_auto (WylClientDataCredentialList) list = { 0 };
+  g_auto (WylClientDataCredentialSecretResult) result = { 0 };
+  gboolean changed = FALSE;
+
+  /* List: every field decoded, null timestamps read as 0. */
+  http->status = 0;
+  http->body = "{\"tenant\":\"acme\",\"credentials\":["
+      "{\"credential_id\":\"" DC_ID "\",\"tenant\":\"acme\","
+      "\"issuer\":\"alice\",\"operations\":[\"query\",\"delete\"],"
+      "\"graphs\":[],\"all_graphs\":true,\"generation\":7,"
+      "\"state\":\"revoked\",\"created_at_us\":100,\"expires_at_us\":900,"
+      "\"last_used_at_us\":150,\"revoked_at_us\":160,\"revoked_by\":\"bob\","
+      "\"revoked_reason\":\"revoked\",\"rotated_from\":\"" DC_OLD_ID "\"},"
+      DC_CREDENTIAL ("acme", "null") "]}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (http->last_method, ==, "GET");
+  g_assert_cmpstr (http->last_path, ==, "/tenants/data-credentials");
+  g_assert_cmpstr (http->last_name, ==, "acme");
+  g_assert_cmpstr (http->last_tenant, ==, "__wr_default");
+  g_assert_cmpstr (http->last_guard_timestamp, ==, "123");
+  g_assert_cmpstr (http->last_guard_loc_class, ==, "public");
+  g_assert_cmpstr (http->last_guard_risk, ==, "49");
+  g_assert_null (http->last_body);
+  g_assert_cmpuint (list.len, ==, 2);
+  const WylClientDataCredential *full = &list.items[0];
+  g_assert_cmpstr (full->credential_id, ==, DC_ID);
+  g_assert_cmpstr (full->tenant_id, ==, "acme");
+  g_assert_cmpstr (full->issuer, ==, "alice");
+  g_assert_nonnull (full->operations);
+  g_assert_cmpuint (g_strv_length (full->operations), ==, 2);
+  g_assert_cmpstr (full->operations[0], ==, "query");
+  g_assert_cmpstr (full->operations[1], ==, "delete");
+  g_assert_nonnull (full->graphs);
+  g_assert_cmpuint (g_strv_length (full->graphs), ==, 0);
+  g_assert_true (full->all_graphs);
+  g_assert_cmpuint (full->generation, ==, 7);
+  g_assert_cmpstr (full->state, ==, "revoked");
+  g_assert_cmpint (full->created_at_us, ==, 100);
+  g_assert_cmpint (full->expires_at_us, ==, 900);
+  g_assert_cmpint (full->last_used_at_us, ==, 150);
+  g_assert_cmpint (full->revoked_at_us, ==, 160);
+  g_assert_cmpstr (full->revoked_by, ==, "bob");
+  g_assert_cmpstr (full->revoked_reason, ==, "revoked");
+  g_assert_cmpstr (full->rotated_from, ==, DC_OLD_ID);
+  const WylClientDataCredential *sparse = &list.items[1];
+  g_assert_cmpuint (g_strv_length (sparse->graphs), ==, 2);
+  g_assert_cmpstr (sparse->graphs[0], ==, "g1");
+  g_assert_cmpstr (sparse->graphs[1], ==, "g2");
+  g_assert_false (sparse->all_graphs);
+  g_assert_cmpuint (sparse->generation, ==, 1);
+  g_assert_cmpint (sparse->last_used_at_us, ==, 0);
+  g_assert_cmpint (sparse->revoked_at_us, ==, 0);
+  g_assert_null (sparse->revoked_by);
+  g_assert_null (sparse->revoked_reason);
+  g_assert_null (sparse->rotated_from);
+
+  http->body = "{\"tenant\":\"acme\",\"credentials\":[]}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (list.len, ==, 0);
+
+  static const gchar *const bad_lists[] = {
+    "{\"tenant\":\"other\",\"credentials\":[]}",
+    "{\"tenant\":\"acme\",\"credentials\":[" DC_CREDENTIAL ("other", "null")
+    "]}",
+    "{\"tenant\":\"acme\",\"credentials\":[],\"extra\":1}",
+    "{\"credentials\":[]}",
+    "{\"tenant\":\"acme\",\"credentials\":[{\"credential_id\":\"" DC_ID
+    "\"}]}",
+    "{\"tenant\":\"acme\",\"credentials\":[" DC_CREDENTIAL ("acme",
+        "\"not-an-id\"") "]}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_lists); i++) {
+    http->body = bad_lists[i];
+    g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+        123, "public", 49, &list), ==, WYRELOG_E_IO);
+    g_assert_null (list.items);
+    g_assert_cmpuint (list.len, ==, 0);
+  }
+
+  /* Issue: exact route and strict body; the secret reaches the caller. */
+  http->body = DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"), DC_SECRET);
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query,insert",
+      two_graphs, FALSE, 3600, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (http->last_method, ==, "POST");
+  g_assert_cmpstr (http->last_path, ==, "/tenants/data-credentials/issue");
+  g_assert_cmpstr (http->last_name, ==, "acme");
+  g_assert_cmpstr (http->last_tenant, ==, "__wr_default");
+  g_assert_cmpstr (http->last_content_type, ==, "application/json");
+  g_assert_cmpstr (http->last_body, ==, "{\"request_id\":\"" DC_REQUEST_ID
+      "\",\"operations\":\"query,insert\",\"graphs\":\"g1,g2\","
+      "\"expires_in_seconds\":3600}");
+  g_assert_false (result.replayed);
+  g_assert_cmpuint (result.secret.len, ==, 43);
+  g_assert_nonnull (result.secret.text);
+  g_assert_cmpint (memcmp (result.secret.text, DC_SECRET, 43), ==, 0);
+  g_assert_cmpstr (result.credential.credential_id, ==, DC_ID);
+  g_assert_cmpstr (result.credential.tenant_id, ==, "acme");
+  g_assert_cmpstr (result.credential.state, ==, "active");
+  g_assert_cmpstr (result.credential.operations[1], ==, "insert");
+  g_assert_cmpstr (result.credential.graphs[1], ==, "g2");
+  g_autofree gchar *issued_code = wyl_client_dup_last_error_code (client);
+  g_assert_null (issued_code);
+
+  /* No graphs, or an empty list, is every graph: sent as "*". */
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (http->last_body, ==, "{\"request_id\":\"" DC_REQUEST_ID
+      "\",\"operations\":\"query\",\"graphs\":\"*\","
+      "\"expires_in_seconds\":60}");
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query",
+      no_graphs, TRUE, 60, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (http->last_body, ==, "{\"request_id\":\"" DC_REQUEST_ID
+      "\",\"operations\":\"query\",\"graphs\":\"*\","
+      "\"expires_in_seconds\":60}");
+
+  /* Local refusals send nothing. */
+  guint requests = http->request_count;
+  g_autofree gchar *long_graph = g_strnfill (256, 'g');
+  gchar *many_graphs[66] = { NULL };
+  for (guint i = 0; i < 65; i++)
+    many_graphs[i] = g_strdup_printf ("g%u", i);
+  const gchar *const graph_long[] = { long_graph, NULL };
+  const gchar *const graph_empty[] = { "", NULL };
+  const gchar *const graph_comma[] = { "a,b", NULL };
+  const gchar *const graph_star[] = { "*", NULL };
+  const gchar *const graph_dup[] = { "g1", "g1", NULL };
+  const gchar *const *bad_graphs[] = {
+    graph_long, graph_empty, graph_comma, graph_star, graph_dup,
+    (const gchar * const *) many_graphs,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_graphs); i++)
+    g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query",
+        bad_graphs[i], FALSE, 60, &result), ==, WYRELOG_E_INVALID);
+  for (guint i = 0; i < 65; i++)
+    g_free (many_graphs[i]);
+  static const gchar *const bad_operations[] = {
+    "", "read", "query,query", "query,", ",query", "Query", "query, insert",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_operations); i++)
+    g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID,
+        bad_operations[i], NULL, TRUE, 60, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, NULL, NULL, TRUE,
+      60, &result), ==, WYRELOG_E_INVALID);
+  /* Every graph must be asked for explicitly, never implied. */
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL,
+      FALSE, 60, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query",
+      no_graphs, FALSE, 60, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query",
+      two_graphs, TRUE, 60, &result), ==, WYRELOG_E_INVALID);
+  static const gint64 bad_seconds[] = {
+    0, -1, G_MAXINT64 / G_USEC_PER_SEC + 1, G_MAXINT64,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_seconds); i++)
+    g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL,
+        TRUE, bad_seconds[i], &result), ==, WYRELOG_E_INVALID);
+  static const gchar *const bad_tenants[] = { NULL, "", "a/b", "a b" };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_tenants); i++) {
+    g_assert_cmpint (dc_issue (client, bad_tenants[i], DC_REQUEST_ID, "query",
+        NULL, TRUE, 60, &result), ==, WYRELOG_E_INVALID);
+    g_assert_cmpint (wyl_client_tenant_data_credential_list (client,
+        bad_tenants[i], 123, "public", 49, &list), ==, WYRELOG_E_INVALID);
+    g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client,
+        bad_tenants[i], DC_OLD_ID, DC_REQUEST_ID, 123, "public", 49,
+        &result), ==, WYRELOG_E_INVALID);
+    g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client,
+        bad_tenants[i], DC_ID, 123, "public", 49, &changed), ==,
+        WYRELOG_E_INVALID);
+  }
+  static const gchar *const bad_request_ids[] = {
+    NULL, "", "not-an-id", DC_REQUEST_ID "2",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_request_ids); i++) {
+    g_assert_cmpint (dc_issue (client, "acme", bad_request_ids[i], "query",
+        NULL, TRUE, 60, &result), ==, WYRELOG_E_INVALID);
+    g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client, "acme",
+        DC_OLD_ID, bad_request_ids[i], 123, "public", 49, &result), ==,
+        WYRELOG_E_INVALID);
+  }
+  static const gchar *const bad_credential_ids[] = {
+    NULL, "", "wdc_short", "wsc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+    DC_ID "x",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_credential_ids); i++) {
+    g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client, "acme",
+        bad_credential_ids[i], DC_REQUEST_ID, 123, "public", 49,
+        &result), ==, WYRELOG_E_INVALID);
+    g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+        bad_credential_ids[i], 123, "public", 49, &changed), ==,
+        WYRELOG_E_INVALID);
+  }
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL,
+      TRUE, 60, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_client_tenant_data_credential_issue (client, NULL, 123,
+      "public", 49, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+      DC_ID, 123, "public", 49, NULL), ==, WYRELOG_E_INVALID);
+  dc_assert_result_empty (&result);
+  g_assert_cmpuint (http->request_count, ==, requests);
+
+  /* The secret paths need a canonical literal loopback base URL. */
+  g_autoptr (GUri) local_uri = g_uri_parse (local_base_url, G_URI_FLAGS_NONE,
+          NULL);
+  g_assert_nonnull (local_uri);
+  g_autofree gchar *named_base_url = g_strdup_printf ("http://localhost:%d",
+          g_uri_get_port (local_uri));
+  g_autoptr (WylClient) named = NULL;
+  g_assert_cmpint (wyl_client_new (named_base_url, &named), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_set_bearer_credentials (named, "named-access",
+      "__wr_default"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (dc_issue (named, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_client_tenant_data_credential_rotate (named, "acme",
+      DC_OLD_ID, DC_REQUEST_ID, 123, "public", 49, &result), ==,
+      WYRELOG_E_INVALID);
+  dc_assert_result_empty (&result);
+  g_assert_cmpuint (http->request_count, ==, requests);
+
+  /* A replay names the credential but cannot return its secret again. */
+  http->body = "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":true,"
+      "\"credential_id\":\"" DC_ID "\",\"state\":\"active\"}";
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL,
+      TRUE, 60, &result), ==, WYRELOG_E_CONFLICT);
+  g_assert_true (result.replayed);
+  g_assert_cmpstr (result.credential.credential_id, ==, DC_ID);
+  g_assert_cmpstr (result.credential.state, ==, "active");
+  g_assert_null (result.secret.text);
+  g_assert_cmpuint (result.secret.len, ==, 0);
+  g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client, "acme",
+      DC_OLD_ID, DC_REQUEST_ID, 123, "public", 49, &result), ==,
+      WYRELOG_E_CONFLICT);
+  g_assert_true (result.replayed);
+  g_assert_cmpstr (result.credential.credential_id, ==, DC_ID);
+  g_assert_null (result.secret.text);
+
+  /* A success answer the client cannot use is IO, with nothing kept. */
+  static const gchar *const bad_issued[] = {
+    DC_ISSUED ("other", DC_CREDENTIAL ("other", "null"), DC_SECRET),
+    DC_ISSUED ("acme", DC_CREDENTIAL ("other", "null"), DC_SECRET),
+    DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"),
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop"),
+    DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"),
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop_A"),
+    DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"),
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno\\u0041"),
+    DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"),
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop+"),
+    "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":false,"
+    "\"secret\":\"" DC_SECRET "\"}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":false,\"credential\":"
+    DC_CREDENTIAL ("acme", "null") ",\"secret\":\"" DC_SECRET
+    "\",\"extra\":1}",
+    "{\"ok\":false,\"tenant\":\"acme\",\"replayed\":false,\"credential\":"
+    DC_CREDENTIAL ("acme", "null") ",\"secret\":\"" DC_SECRET "\"}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"credential\":"
+    DC_CREDENTIAL ("acme", "null") ",\"secret\":\"" DC_SECRET "\"}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":false,"
+    "\"replayed\":false,\"credential\":" DC_CREDENTIAL ("acme", "null")
+    ",\"secret\":\"" DC_SECRET "\"}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":true,"
+    "\"credential_id\":\"" DC_ID "\",\"state\":\"active\","
+    "\"secret\":\"" DC_SECRET "\"}",
+    "{\"ok\":true,\"tenant\":\"other\",\"replayed\":true,"
+    "\"credential_id\":\"" DC_ID "\",\"state\":\"active\"}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_issued); i++) {
+    http->body = bad_issued[i];
+    g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL,
+        TRUE, 60, &result), ==, WYRELOG_E_IO);
+    dc_assert_result_empty (&result);
+  }
+
+  /* Rotate: the strict body, and the answer must name the old credential. */
+  http->body = DC_ISSUED ("acme",
+          DC_CREDENTIAL ("acme", "\"" DC_OLD_ID "\""), DC_SECRET);
+  g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client, "acme",
+      DC_OLD_ID, DC_REQUEST_ID, 123, "public", 49, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (http->last_method, ==, "POST");
+  g_assert_cmpstr (http->last_path, ==, "/tenants/data-credentials/rotate");
+  g_assert_cmpstr (http->last_name, ==, "acme");
+  g_assert_cmpstr (http->last_body, ==, "{\"credential_id\":\"" DC_OLD_ID
+      "\",\"request_id\":\"" DC_REQUEST_ID "\"}");
+  g_assert_false (result.replayed);
+  g_assert_cmpstr (result.credential.credential_id, ==, DC_ID);
+  g_assert_cmpstr (result.credential.rotated_from, ==, DC_OLD_ID);
+  g_assert_cmpuint (result.secret.len, ==, 43);
+  g_assert_cmpint (memcmp (result.secret.text, DC_SECRET, 43), ==, 0);
+  static const gchar *const bad_rotated[] = {
+    DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"), DC_SECRET),
+    DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "\"" DC_ID "\""), DC_SECRET),
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_rotated); i++) {
+    http->body = bad_rotated[i];
+    g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client, "acme",
+        DC_OLD_ID, DC_REQUEST_ID, 123, "public", 49, &result), ==,
+        WYRELOG_E_IO);
+    dc_assert_result_empty (&result);
+  }
+
+  /* Revoke reports whether this call changed the credential. */
+  http->body = "{\"ok\":true,\"tenant\":\"acme\",\"credential_id\":\"" DC_ID
+      "\",\"state\":\"revoked\",\"changed\":true}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+      DC_ID, 123, "public", 49, &changed), ==, WYRELOG_E_OK);
+  g_assert_true (changed);
+  g_assert_cmpstr (http->last_method, ==, "POST");
+  g_assert_cmpstr (http->last_path, ==, "/tenants/data-credentials/revoke");
+  g_assert_cmpstr (http->last_name, ==, "acme");
+  g_assert_cmpstr (http->last_body, ==, "{\"credential_id\":\"" DC_ID "\"}");
+  http->body = "{\"ok\":true,\"tenant\":\"acme\",\"credential_id\":\"" DC_ID
+      "\",\"state\":\"revoked\",\"changed\":false}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+      DC_ID, 123, "public", 49, &changed), ==, WYRELOG_E_OK);
+  g_assert_false (changed);
+  static const gchar *const bad_revoked[] = {
+    "{\"ok\":true,\"tenant\":\"acme\",\"credential_id\":\"" DC_ID
+    "\",\"state\":\"active\",\"changed\":true}",
+    "{\"ok\":true,\"tenant\":\"other\",\"credential_id\":\"" DC_ID
+    "\",\"state\":\"revoked\",\"changed\":true}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"credential_id\":\"" DC_OLD_ID
+    "\",\"state\":\"revoked\",\"changed\":true}",
+    "{\"ok\":false,\"tenant\":\"acme\",\"credential_id\":\"" DC_ID
+    "\",\"state\":\"revoked\",\"changed\":true}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"credential_id\":\"" DC_ID
+    "\",\"state\":\"revoked\"}",
+    "{\"ok\":true,\"tenant\":\"acme\",\"credential_id\":\"" DC_ID
+    "\",\"state\":\"revoked\",\"changed\":true,\"extra\":1}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_revoked); i++) {
+    http->body = bad_revoked[i];
+    changed = TRUE;
+    g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+        DC_ID, 123, "public", 49, &changed), ==, WYRELOG_E_IO);
+    g_assert_false (changed);
+  }
+
+  /* Error statuses map to typed errors and keep the daemon's code. */
+  static const struct
+  {
+    guint status;
+    wyrelog_error_t expected;
+  } statuses[] = {
+    { 400, WYRELOG_E_INVALID }, { 401, WYRELOG_E_AUTH },
+    { 403, WYRELOG_E_POLICY }, { 409, WYRELOG_E_POLICY },
+    { 404, WYRELOG_E_NOT_FOUND }, { 503, WYRELOG_E_BUSY },
+    { 500, WYRELOG_E_IO }, { 429, WYRELOG_E_IO },
+  };
+  http->body = "{\"error\":\"data_credential_denied\"}";
+  for (gsize i = 0; i < G_N_ELEMENTS (statuses); i++) {
+    http->status = statuses[i].status;
+    g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL,
+        TRUE, 60, &result), ==, statuses[i].expected);
+    dc_assert_result_empty (&result);
+    g_assert_true (client_last_response_is (client, statuses[i].status,
+        "data_credential_denied"));
+    g_assert_cmpint (wyl_client_tenant_data_credential_rotate (client, "acme",
+        DC_OLD_ID, DC_REQUEST_ID, 123, "public", 49, &result), ==,
+        statuses[i].expected);
+    g_assert_true (client_last_response_is (client, statuses[i].status,
+        "data_credential_denied"));
+    g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+        123, "public", 49, &list), ==, statuses[i].expected);
+    g_assert_true (client_last_response_is (client, statuses[i].status,
+        "data_credential_denied"));
+    g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+        DC_ID, 123, "public", 49, &changed), ==, statuses[i].expected);
+    g_assert_true (client_last_response_is (client, statuses[i].status,
+        "data_credential_denied"));
+  }
+
+  /* Review of #1477: a body without Content-Length, chunked here, is read up
+   * to the cap rather than refused. */
+  http->status = 0;
+  http->chunked_response = TRUE;
+  http->body = "{\"tenant\":\"acme\",\"credentials\":["
+      DC_CREDENTIAL ("acme", "null") "]}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (list.len, ==, 1);
+  http->body = DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"), DC_SECRET);
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (result.secret.len, ==, 43);
+  g_assert_cmpint (memcmp (result.secret.text, DC_SECRET, 43), ==, 0);
+  http->chunked_response = FALSE;
+
+  /* Key order is free; a document may end with a string member. */
+  http->body = "{\"credentials\":[" DC_CREDENTIAL ("acme", "null") "],"
+      "\"tenant\":\"acme\"}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (list.len, ==, 1);
+  http->body = "{\"changed\":true,\"ok\":true,\"credential_id\":\"" DC_ID
+      "\",\"tenant\":\"acme\",\"state\":\"revoked\"}";
+  g_assert_cmpint (wyl_client_tenant_data_credential_revoke (client, "acme",
+      DC_ID, 123, "public", 49, &changed), ==, WYRELOG_E_OK);
+  g_assert_true (changed);
+
+  /* The decoder holds graph names to the daemon's 255-byte limit. */
+  g_autofree gchar *graph_255 = g_strnfill (255, 'g');
+  g_autofree gchar *graph_256 = g_strnfill (256, 'g');
+  const gchar *const credential_head = "{\"tenant\":\"acme\",\"credentials\":"
+      "[{\"credential_id\":\"" DC_ID "\",\"tenant\":\"acme\","
+      "\"issuer\":\"alice\",\"operations\":[\"query\"],\"graphs\":[\"";
+  const gchar *const credential_tail = "\"],\"all_graphs\":false,"
+      "\"generation\":1,\"state\":\"active\",\"created_at_us\":100,"
+      "\"expires_at_us\":200,\"last_used_at_us\":null,"
+      "\"revoked_at_us\":null,\"revoked_by\":null,\"revoked_reason\":null,"
+      "\"rotated_from\":null}]}";
+  g_autofree gchar *list_255 = g_strconcat (credential_head, graph_255,
+          credential_tail, NULL);
+  g_autofree gchar *list_256 = g_strconcat (credential_head, graph_256,
+          credential_tail, NULL);
+  http->body = list_255;
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (list.items[0].graphs[0], ==, graph_255);
+  http->body = list_256;
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_IO);
+  g_assert_null (list.items);
+
+  /* The request side accepts the limits themselves: 64 graphs, 255 bytes. */
+  gchar *graphs_64[65] = { NULL };
+  for (guint i = 0; i < 64; i++)
+    graphs_64[i] = g_strdup_printf ("g%u", i);
+  http->body = DC_ISSUED ("acme", DC_CREDENTIAL ("acme", "null"), DC_SECRET);
+  requests = http->request_count;
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query",
+      (const gchar * const *) graphs_64, FALSE, 60, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (http->request_count, ==, requests + 1);
+  g_assert_nonnull (strstr (http->last_body, ",g63\""));
+  for (guint i = 0; i < 64; i++)
+    g_free (graphs_64[i]);
+  const gchar *const graph_max[] = { graph_255, NULL };
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query",
+      graph_max, FALSE, 60, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (http->request_count, ==, requests + 2);
+
+  /* A body above the cap is IO with nothing kept, whether announced by
+   * Content-Length or only discovered while reading. */
+  const gsize secret_over = WYL_CLIENT_DATA_CREDENTIAL_SECRET_MAX_DOCUMENT + 1;
+  g_autofree gchar *secret_oversized = g_strnfill (secret_over, 'x');
+  http->body = secret_oversized;
+  http->body_size = secret_over;
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_IO);
+  dc_assert_result_empty (&result);
+  http->chunked_response = TRUE;
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_IO);
+  dc_assert_result_empty (&result);
+  http->chunked_response = FALSE;
+  const gsize list_over = WYL_CLIENT_DATA_CREDENTIAL_LIST_MAX_DOCUMENT + 1;
+  g_autofree gchar *list_oversized = g_strnfill (list_over, 'x');
+  http->body = list_oversized;
+  http->body_size = list_over;
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_IO);
+  g_assert_null (list.items);
+  http->body_size = 0;
+  http->oversized_chunked_response = TRUE;
+  g_assert_cmpint (wyl_client_tenant_data_credential_list (client, "acme",
+      123, "public", 49, &list), ==, WYRELOG_E_IO);
+  g_assert_null (list.items);
+  http->oversized_chunked_response = FALSE;
+  /* An error answer above the cap keeps its status but not its code, even
+   * when the code leads the body. */
+  static const gchar oversized_error_prefix[] =
+      "{\"error\":\"data_credential_denied\",";
+  g_autofree gchar *error_oversized = g_strnfill (secret_over, 'x');
+  memcpy (error_oversized, oversized_error_prefix,
+      sizeof oversized_error_prefix - 1);
+  http->status = 403;
+  http->body = error_oversized;
+  http->body_size = secret_over;
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_POLICY);
+  g_assert_true (client_last_response_is (client, 403, NULL));
+  http->status = 0;
+  http->body_size = 0;
+
+  /* A complete 2xx that cannot be used is distinguishable from a transport
+   * failure, whose outcome is unknown. */
+  http->body = "{\"ok\":true}";
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_IO);
+  g_assert_true (wyl_client_last_response_is_complete (client));
+  g_assert_cmpuint (wyl_client_get_last_http_status (client), ==, 200);
+  http->close_connection = TRUE;
+  g_assert_cmpint (dc_issue (client, "acme", DC_REQUEST_ID, "query", NULL, TRUE,
+      60, &result), ==, WYRELOG_E_IO);
+  dc_assert_result_empty (&result);
+  g_assert_false (wyl_client_last_response_is_complete (client));
+  g_assert_true (client_last_response_is (client, 0, NULL));
+  http->close_connection = FALSE;
+  SoupServer *closed = soup_server_new (NULL, NULL);
+  g_assert_true (soup_server_listen_local (closed, 0, 0, NULL));
+  GSList *closed_uris = soup_server_get_uris (closed);
+  g_assert_nonnull (closed_uris);
+  g_autofree gchar *closed_base_url = g_uri_to_string (closed_uris->data);
+  g_slist_free_full (closed_uris, (GDestroyNotify) g_uri_unref);
+  soup_server_disconnect (closed);
+  g_object_unref (closed);
+  g_autoptr (WylClient) unreachable = NULL;
+  g_assert_cmpint (wyl_client_new (closed_base_url, &unreachable), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_set_bearer_credentials (unreachable,
+      "unreachable-access", "__wr_default"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (dc_issue (unreachable, "acme", DC_REQUEST_ID, "query",
+      NULL, TRUE, 60, &result), ==, WYRELOG_E_IO);
+  dc_assert_result_empty (&result);
+  g_assert_false (wyl_client_last_response_is_complete (unreachable));
+  g_assert_true (client_last_response_is (unreachable, 0, NULL));
+  http->status = 0;
+}
+
+#undef DC_ISSUED
+#undef DC_CREDENTIAL
+#undef DC_SECRET
+#undef DC_REQUEST_ID
+#undef DC_OLD_ID
+#undef DC_ID
 
 int
 main (void)
@@ -2253,6 +2854,7 @@ main (void)
   g_assert_cmpstr (http.last_path, ==, "/tenants/transfer-owner");
   g_assert_cmpint (wyl_client_tenant_transfer_owner (management_client, "acme", "other", request_id, 123, "public", 49, &tenant_changed), ==, WYRELOG_E_IO);
   http.status = 0;
+  check_tenant_data_credentials (&http, management_client, local_base_url);
 
   /* #1096: the schema-count quota client must keep its typed contract
    * distinct from graph-count and write-rate quotas. */
@@ -4224,6 +4826,7 @@ main (void)
   g_clear_pointer (&http.last_relation, g_free);
   g_clear_pointer (&http.last_schema_version, g_free);
   g_clear_pointer (&http.last_content_type, g_free);
+  g_clear_pointer (&http.last_name, g_free);
   g_clear_pointer (&http.loop, g_main_loop_unref);
 
   return wyl_test_normalize_exit_status (0);
