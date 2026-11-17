@@ -6745,6 +6745,687 @@ test_tenant_refusals (void)
   }
 }
 
+/* #1477: wyctl tenant data-credential, against the fake daemon. */
+#define DC_ID "wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
+#define DC_OLD_ID "wdc_0ujtsYcgvSTl8PAuAdqWYSMnLOa"
+#define DC_REQUEST_ID "ABCDEFGHIJKLMNOPQRSTUVWXYZ1"
+#define DC_SECRET "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop_"
+#define DC_CREDENTIAL(rotated_from) \
+  "{\"credential_id\":\"" DC_ID "\",\"tenant\":\"acme\"," \
+  "\"issuer\":\"alice\",\"operations\":[\"query\",\"insert\"]," \
+  "\"graphs\":[\"g1\",\"g 2\"],\"all_graphs\":false,\"generation\":1," \
+  "\"state\":\"active\",\"created_at_us\":100,\"expires_at_us\":200," \
+  "\"last_used_at_us\":null,\"revoked_at_us\":null,\"revoked_by\":null," \
+  "\"revoked_reason\":null,\"rotated_from\":" rotated_from "}"
+#define DC_ISSUED(credential) \
+  "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":false," \
+  "\"credential\":" credential ",\"secret\":\"" DC_SECRET "\"}"
+#define DC_REPLAYED \
+  "{\"ok\":true,\"tenant\":\"acme\",\"replayed\":true," \
+  "\"credential_id\":\"" DC_ID "\",\"state\":\"active\"}"
+#define DC_DOCUMENT \
+  "{\"credential_id\":\"" DC_ID "\",\"credential_secret\":\"" DC_SECRET \
+  "\"}\n"
+#define DC_HINT(id) \
+  "wyctl: the credential may have been created; re-run the same command " \
+  "with `--request-id " id "` to find out (a created credential comes " \
+  "back as a replay)\n"
+
+/* Runs `wyctl tenant data-credential ACTION --tenant acme` with the token,
+ * the guards and the NULL-terminated EXTRA arguments. */
+static void
+run_data_credential_case (guint status, const gchar *body,
+    const gchar *action, const gchar *const *extra, FactForgetRun *run)
+{
+  g_autoptr (GPtrArray) args = g_ptr_array_new ();
+  const gchar *const fixed[] = {
+    "tenant", "data-credential", action, "--tenant", "acme",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (fixed); i++)
+    g_ptr_array_add (args, (gpointer) fixed[i]);
+  for (const gchar *const *arg = extra; arg != NULL && *arg != NULL; arg++)
+    g_ptr_array_add (args, (gpointer) *arg);
+  g_ptr_array_add (args, NULL);
+  /* The secret file's mode must not depend on the caller's umask. */
+  mode_t saved = umask (022);
+  run_fake_daemon_case (status, body, NULL,
+      (const gchar * const *) args->pdata, FALSE, run);
+  umask (saved);
+}
+
+static const gchar *
+data_credential_request_body (const gchar *request)
+{
+  const gchar *body = request != NULL ? strstr (request, "\r\n\r\n") : NULL;
+  return body != NULL ? body + 4 : NULL;
+}
+
+static void
+assert_secret_absent (const FactForgetRun *run)
+{
+  g_assert_null (g_strstr_len (run->out, -1, DC_SECRET));
+  g_assert_null (g_strstr_len (run->err, -1, DC_SECRET));
+  g_assert_null (g_strstr_len (run->out, -1, "ABCDEFGHIJKLMNOPQRSTUVWXYZabc"));
+  g_assert_null (g_strstr_len (run->err, -1, "ABCDEFGHIJKLMNOPQRSTUVWXYZabc"));
+}
+
+static void
+assert_data_credential_document (const gchar *path)
+{
+  struct stat st;
+  g_assert_cmpint (g_lstat (path, &st), ==, 0);
+  g_assert_true (S_ISREG (st.st_mode));
+  g_assert_cmpint (st.st_mode & 07777, ==, 0600);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &len, NULL));
+  g_assert_cmpuint (len, ==, strlen (DC_DOCUMENT));
+  g_assert_cmpstr (contents, ==, DC_DOCUMENT);
+}
+
+static void
+test_tenant_data_credential_issue (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-dc-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "dc.json", NULL);
+  const gchar *const two_graphs[] = {
+    "--ops", "query,insert", "--graph", "a", "--graph", "b",
+    "--expires-in", "1h", "--output", path, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("null")), "issue",
+      two_graphs, &run);
+  assert_fact_forget_exit (&run, 0);
+  assert_data_credential_document (path);
+  assert_secret_absent (&run);
+  g_assert_true (g_str_has_prefix (run.request,
+      "POST /tenants/data-credentials/issue?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "&name=acme "));
+  g_autofree gchar *minted = seal_request_id (run.request);
+  g_assert_nonnull (minted);
+  g_assert_cmpuint (strlen (minted), ==, 27);
+  g_autofree gchar *sent = g_strdup_printf ("{\"request_id\":\"%s\","
+          "\"operations\":\"query,insert\",\"graphs\":\"a,b\","
+          "\"expires_in_seconds\":3600}", minted);
+  g_assert_cmpstr (data_credential_request_body (run.request), ==, sent);
+  g_autofree gchar *line = g_strdup_printf ("tenant=acme credential_id="
+          DC_ID " state=active operations=query,insert graphs=g1,g%%202 "
+          "expires_at_us=200 request_id=%s\n", minted);
+  g_assert_cmpstr (run.out, ==, line);
+  g_autofree gchar *written = g_strdup_printf ("wyctl: secret written to %s "
+          "(mode 0600); it is not shown again\n", path);
+  g_assert_cmpstr (run.err, ==, written);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+
+  /* Every graph is asked for explicitly, and the request id is reused. */
+  const gchar *const all_graphs[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "2d", "--output", path,
+    "--request-id", DC_REQUEST_ID, NULL,
+  };
+  g_auto (FactForgetRun) all = { 0 };
+  run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("null")), "issue",
+      all_graphs, &all);
+  assert_fact_forget_exit (&all, 0);
+  assert_data_credential_document (path);
+  assert_secret_absent (&all);
+  g_assert_cmpstr (data_credential_request_body (all.request), ==,
+      "{\"request_id\":\"" DC_REQUEST_ID "\",\"operations\":\"query\","
+      "\"graphs\":\"*\",\"expires_in_seconds\":172800}");
+  g_assert_true (g_str_has_suffix (all.out, " request_id=" DC_REQUEST_ID
+      "\n"));
+  g_assert_cmpint (g_unlink (path), ==, 0);
+
+  static const struct
+  {
+    const gchar *arg;
+    const gchar *seconds;
+  } durations[] = {
+    {"45s", "45"}, {"10m", "600"}, {"90d", "7776000"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (durations); i++) {
+    const gchar *const args[] = {
+      "--ops", "query", "--all-graphs", "--expires-in", durations[i].arg,
+      "--output", path, NULL,
+    };
+    g_auto (FactForgetRun) timed = { 0 };
+    run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("null")),
+        "issue", args, &timed);
+    assert_fact_forget_exit (&timed, 0);
+    g_autofree gchar *suffix = g_strdup_printf ("\"expires_in_seconds\":%s}",
+            durations[i].seconds);
+    g_assert_true (g_str_has_suffix (data_credential_request_body
+          (timed.request), suffix));
+    g_assert_cmpint (g_unlink (path), ==, 0);
+  }
+  remove_dir_recursive (dir);
+}
+
+/* Every local refusal exits 2, sends nothing and writes nothing. */
+static void
+test_tenant_data_credential_issue_refusals (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-dc-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "dc.json", NULL);
+  g_autofree gchar *kept = g_build_filename (dir, "kept.json", NULL);
+  g_assert_true (g_file_set_contents (kept, "keep", -1, NULL));
+  g_assert_cmpint (g_chmod (kept, 0644), ==, 0);
+  const gchar *const no_expiry[] = {
+    "--ops", "query", "--all-graphs", "--output", path, NULL,
+  };
+  const gchar *const existing[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output", kept,
+    NULL,
+  };
+  const gchar *const no_scope[] = {
+    "--ops", "query", "--expires-in", "1h", "--output", path, NULL,
+  };
+  const gchar *const both_scopes[] = {
+    "--ops", "query", "--graph", "a", "--all-graphs", "--expires-in", "1h",
+    "--output", path, NULL,
+  };
+  const gchar *const no_ops[] = {
+    "--all-graphs", "--expires-in", "1h", "--output", path, NULL,
+  };
+  const gchar *const no_output[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", NULL,
+  };
+  const gchar *const bad_id[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output", path,
+    "--request-id", "abc", NULL,
+  };
+  const gchar *const extra[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output", path,
+    "stray", NULL,
+  };
+  static const gchar *const bad_durations[] = {
+    "0d", "5x", "90", "--expires-in=-1h", "d", "1.5h", "01h", "1H", " 1h",
+    "106751992d", "9223372036855s", "99999999999999999999999s",
+  };
+  static const gchar *const issue_refused =
+      "wyctl: tenant data-credential issue refused before sending: check "
+      "--tenant, --ops and --graph, and that the daemon URL is a literal "
+      "loopback address\n";
+  const gchar *const bad_ops[] = {
+    "--ops", "bogus", "--all-graphs", "--expires-in", "1h", "--output", path,
+    NULL,
+  };
+  const gchar *const bad_graph[] = {
+    "--ops", "query", "--graph", "a,b", "--expires-in", "1h", "--output", path,
+    NULL,
+  };
+  const gchar *const dup_graph[] = {
+    "--ops", "query", "--graph", "a", "--graph", "a", "--expires-in", "1h",
+    "--output", path, NULL,
+  };
+  g_autofree gchar *exists_err = g_strdup_printf ("wyctl: --output already "
+          "exists: %s\n", kept);
+  const struct
+  {
+    const gchar *const *args;
+    const gchar *err;
+  } cases[] = {
+    {no_expiry, "wyctl: missing --expires-in; a data credential always "
+     "expires\n"},
+    {existing, exists_err},
+    {no_scope, "wyctl: tenant data-credential issue needs --graph G "
+     "(repeatable) or --all-graphs\n"},
+    {both_scopes, "wyctl: pass --graph or --all-graphs, not both\n"},
+    {no_ops, "wyctl: missing --ops\n"},
+    {no_output, "wyctl: missing --output\n"},
+    {bad_id, "wyctl: invalid --request-id\n"},
+    {extra, "wyctl: unexpected tenant data-credential issue argument: "
+     "stray\n"},
+    {bad_ops, issue_refused},
+    {bad_graph, issue_refused},
+    {dup_graph, issue_refused},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("null")),
+        "issue", cases[i].args, &run);
+    g_assert_null (run.request);
+    assert_fact_forget_exit (&run, 2);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, cases[i].err);
+    g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_durations); i++) {
+    const gchar *const separate[] = {
+      "--ops", "query", "--all-graphs", "--output", path, "--expires-in",
+      bad_durations[i], NULL,
+    };
+    const gchar *const joined[] = {
+      "--ops", "query", "--all-graphs", "--output", path, bad_durations[i],
+      NULL,
+    };
+    g_auto (FactForgetRun) run = { 0 };
+    run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("null")),
+        "issue", g_str_has_prefix (bad_durations[i], "--") ? joined :
+        separate, &run);
+    g_assert_null (run.request);
+    assert_fact_forget_exit (&run, 2);
+    g_assert_cmpstr (run.err, ==, "wyctl: invalid --expires-in: use a whole "
+        "number of s, m, h or d, such as 90d\n");
+    g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  }
+
+  /* The existing file is left exactly as it was. */
+  struct stat st;
+  g_assert_cmpint (g_lstat (kept, &st), ==, 0);
+  g_assert_cmpint (st.st_mode & 07777, ==, 0644);
+  g_autofree gchar *contents = NULL;
+  g_assert_true (g_file_get_contents (kept, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "keep");
+  remove_dir_recursive (dir);
+}
+
+/* The stderr of a failed issue that sent REQUEST_ID, with the re-run hint
+ * when HINT. */
+static gchar *
+data_credential_failure (const gchar *code, const gchar *request_id,
+    gboolean hint)
+{
+  g_autofree gchar *advice = hint ? g_strdup_printf ("wyctl: the credential "
+          "may have been created; re-run the same command with "
+          "`--request-id %s` to find out (a created credential comes back as "
+          "a replay)\n", request_id) : g_strdup ("");
+  return g_strdup_printf ("wyctl: tenant data-credential issue failed: %s\n"
+             "wyctl: tenant data-credential issue request_id=%s\n%s", code,
+             request_id, advice);
+}
+
+static void
+test_tenant_data_credential_issue_outcomes (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-dc-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "dc.json", NULL);
+  const gchar *const minted_args[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output", path,
+    NULL,
+  };
+  const gchar *const repeated_args[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output", path,
+    "--request-id", DC_REQUEST_ID, NULL,
+  };
+
+  /* A replay: the credential exists, its secret is gone for good. */
+  g_auto (FactForgetRun) replay = { 0 };
+  run_data_credential_case (200, DC_REPLAYED, "issue", repeated_args,
+      &replay);
+  assert_fact_forget_exit (&replay, 4);
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  g_assert_cmpstr (replay.out, ==, "");
+  g_assert_cmpstr (replay.err, ==, "wyctl: tenant data-credential issue "
+      "request_id=" DC_REQUEST_ID " was already applied: credential " DC_ID
+      " exists and its secret cannot be shown again\n"
+      "wyctl: if that secret is lost, revoke the credential with `wyctl "
+      "tenant data-credential revoke --tenant acme --id " DC_ID "`\n");
+
+  /* A complete success answer that cannot be used may follow a commit. */
+  g_auto (FactForgetRun) unusable = { 0 };
+  run_data_credential_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"replayed\":false,\"credential\":" DC_CREDENTIAL ("null") "}",
+      "issue", minted_args, &unusable);
+  assert_fact_forget_exit (&unusable, 5);
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  g_assert_cmpstr (unusable.out, ==, "");
+  g_autofree gchar *unusable_id = seal_request_id (unusable.request);
+  g_assert_nonnull (unusable_id);
+  g_autofree gchar *unusable_expected = data_credential_failure
+        ("invalid daemon response", unusable_id, TRUE);
+  g_assert_cmpstr (unusable.err, ==, unusable_expected);
+
+  /* Each answer's exit status, and whether it may have committed.  A
+   * request id minted for this run cannot have committed before, so the
+   * answers http.c gives before its write drop the hint; one the operator
+   * repeats may name a credential an earlier run created. */
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    gint exit_status;
+    gboolean pre_commit;
+  } answers[] = {
+    {400, "invalid_data_credential_request", 3, FALSE},
+    {400, "data_credential_expiry_exceeds_maximum", 3, FALSE},
+    {400, "data_credential_unknown_graph", 3, FALSE},
+    {400, "data_credential_expiry_invalid", 3, TRUE},
+    {400, "data_credential_expiry_required", 3, TRUE},
+    {400, "invalid_tenant_request", 3, TRUE},
+    {400, "invalid_tenant_auth", 3, TRUE},
+    {401, "tenant_auth_required", 6, TRUE},
+    {401, "tenant_invalid", 6, TRUE},
+    {403, "data_credential_denied", 4, FALSE},
+    {403, "data_credential_operation_denied", 4, TRUE},
+    {403, "tenant_mfa_required", 4, TRUE},
+    {403, "tenant_builtin_immutable", 4, TRUE},
+    {403, "tenant_denied", 4, TRUE},
+    {404, "tenant_not_found", 5, FALSE},
+    {409, "data_credential_cap_exceeded", 4, FALSE},
+    {409, "data_credential_request_conflict", 4, FALSE},
+    {409, "tenant_sealed", 4, TRUE},
+    {500, "data_credential_failed", 5, FALSE},
+    {500, "policy_write_cleanup_failed", 5, FALSE},
+    {503, "data_credential_unavailable", 5, FALSE},
+    {502, "bad_gateway", 5, FALSE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (answers); i++) {
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            answers[i].code);
+    g_auto (FactForgetRun) minted = { 0 };
+    run_data_credential_case (answers[i].status, body, "issue", minted_args,
+        &minted);
+    assert_fact_forget_exit (&minted, answers[i].exit_status);
+    g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+    g_assert_cmpstr (minted.out, ==, "");
+    g_autofree gchar *id = seal_request_id (minted.request);
+    g_assert_nonnull (id);
+    g_autofree gchar *expected = data_credential_failure (answers[i].code,
+            id, !answers[i].pre_commit);
+    g_assert_cmpstr (minted.err, ==, expected);
+
+    g_auto (FactForgetRun) repeated = { 0 };
+    run_data_credential_case (answers[i].status, body, "issue",
+        repeated_args, &repeated);
+    assert_fact_forget_exit (&repeated, answers[i].exit_status);
+    g_autofree gchar *repeated_expected = data_credential_failure
+          (answers[i].code, DC_REQUEST_ID, TRUE);
+    g_assert_cmpstr (repeated.err, ==, repeated_expected);
+  }
+
+  /* Nothing answers: the request may have been applied. */
+  static const gchar *const unreachable[] = {
+    "tenant", "data-credential", "issue", "--tenant", "acme", "--ops",
+    "query", "--all-graphs", "--expires-in", "1h", "--output", "@OUT@",
+    "--request-id", DC_REQUEST_ID, "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  g_autoptr (GPtrArray) lost_args = g_ptr_array_new ();
+  for (const gchar *const *arg = unreachable; *arg != NULL; arg++)
+    g_ptr_array_add (lost_args, g_strcmp0 (*arg, "@OUT@") == 0
+        ? (gpointer) path : (gpointer) *arg);
+  g_ptr_array_add (lost_args, NULL);
+  g_auto (FactForgetRun) lost = { 0 };
+  run_fake_daemon_case (200, "{}", "http://127.0.0.1:1",
+      (const gchar * const *) lost_args->pdata, FALSE, &lost);
+  assert_fact_forget_exit (&lost, 5);
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  g_assert_null (lost.request);
+  g_autofree gchar *lost_expected = data_credential_failure
+        ("tenant_data_credential_issue_failed", DC_REQUEST_ID, TRUE);
+  g_assert_cmpstr (lost.err, ==, lost_expected);
+
+  /* The daemon succeeded but the secret could not be written. */
+  if (geteuid () != 0) {
+    g_autofree gchar *locked = g_build_filename (dir, "locked", NULL);
+    g_assert_cmpint (g_mkdir (locked, 0500), ==, 0);
+    g_autofree gchar *blocked = g_build_filename (locked, "dc.json", NULL);
+    const gchar *const blocked_args[] = {
+      "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output",
+      blocked, NULL,
+    };
+    g_auto (FactForgetRun) failed = { 0 };
+    run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("null")),
+        "issue", blocked_args, &failed);
+    assert_fact_forget_exit (&failed, 1);
+    assert_secret_absent (&failed);
+    g_assert_false (g_file_test (blocked, G_FILE_TEST_EXISTS));
+    g_assert_cmpstr (failed.out, ==, "");
+    g_autofree gchar *expected = g_strdup_printf ("wyctl: credential " DC_ID
+            " was issued, but its secret could not be written to %s: "
+            "permission denied; the secret is gone\n"
+            "wyctl: revoke it with `wyctl tenant data-credential revoke "
+            "--tenant acme --id " DC_ID "`, then issue a new one\n", blocked);
+    g_assert_cmpstr (failed.err, ==, expected);
+    g_assert_cmpint (g_chmod (locked, 0700), ==, 0);
+  }
+  remove_dir_recursive (dir);
+}
+
+static void
+test_tenant_data_credential_rotate (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-dc-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "dc.json", NULL);
+  const gchar *const args[] = {
+    "--id", DC_OLD_ID, "--output", path, "--request-id", DC_REQUEST_ID, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("\"" DC_OLD_ID
+      "\"")), "rotate", args, &run);
+  assert_fact_forget_exit (&run, 0);
+  assert_data_credential_document (path);
+  assert_secret_absent (&run);
+  g_assert_true (g_str_has_prefix (run.request,
+      "POST /tenants/data-credentials/rotate?"));
+  g_assert_cmpstr (data_credential_request_body (run.request), ==,
+      "{\"credential_id\":\"" DC_OLD_ID "\",\"request_id\":\"" DC_REQUEST_ID
+      "\"}");
+  g_assert_cmpstr (run.out, ==, "tenant=acme credential_id=" DC_ID
+      " rotated_from=" DC_OLD_ID " generation=1 state=active "
+      "expires_at_us=200 request_id=" DC_REQUEST_ID "\n");
+  g_autofree gchar *written = g_strdup_printf ("wyctl: secret written to %s "
+          "(mode 0600); it is not shown again\n", path);
+  g_assert_cmpstr (run.err, ==, written);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+
+  g_auto (FactForgetRun) replay = { 0 };
+  run_data_credential_case (200, DC_REPLAYED, "rotate", args, &replay);
+  assert_fact_forget_exit (&replay, 4);
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  g_assert_cmpstr (replay.err, ==, "wyctl: tenant data-credential rotate "
+      "request_id=" DC_REQUEST_ID " was already applied: credential " DC_ID
+      " exists and its secret cannot be shown again\n"
+      "wyctl: if that secret is lost, revoke the credential with `wyctl "
+      "tenant data-credential revoke --tenant acme --id " DC_ID "`\n");
+
+  g_auto (FactForgetRun) inactive = { 0 };
+  run_data_credential_case (409, "{\"error\":\"data_credential_not_active\"}",
+      "rotate", args, &inactive);
+  assert_fact_forget_exit (&inactive, 4);
+  g_assert_cmpstr (inactive.err, ==, "wyctl: tenant data-credential rotate "
+      "failed: data_credential_not_active\n"
+      "wyctl: tenant data-credential rotate request_id=" DC_REQUEST_ID "\n"
+      DC_HINT (DC_REQUEST_ID));
+
+  const gchar *const no_id[] = { "--output", path, NULL };
+  const gchar *const bad_id[] = { "--id", "wdc_short", "--output", path, NULL };
+  const gchar *const no_output[] = { "--id", DC_OLD_ID, NULL };
+  const struct
+  {
+    const gchar *const *args;
+    const gchar *err;
+  } refusals[] = {
+    {no_id, "wyctl: missing --id\n"},
+    {bad_id, "wyctl: tenant data-credential rotate refused before sending: "
+     "check --tenant and --id, and that the daemon URL is a literal "
+     "loopback address\n"},
+    {no_output, "wyctl: missing --output\n"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (refusals); i++) {
+    g_auto (FactForgetRun) refused = { 0 };
+    run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("\"" DC_OLD_ID
+        "\"")), "rotate", refusals[i].args, &refused);
+    assert_fact_forget_exit (&refused, 2);
+    g_assert_null (refused.request);
+    g_assert_cmpstr (refused.err, ==, refusals[i].err);
+    g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  }
+
+  if (geteuid () != 0) {
+    g_autofree gchar *locked = g_build_filename (dir, "locked", NULL);
+    g_assert_cmpint (g_mkdir (locked, 0500), ==, 0);
+    g_autofree gchar *blocked = g_build_filename (locked, "dc.json", NULL);
+    const gchar *const blocked_args[] = {
+      "--id", DC_OLD_ID, "--output", blocked, NULL,
+    };
+    g_auto (FactForgetRun) failed = { 0 };
+    run_data_credential_case (200, DC_ISSUED (DC_CREDENTIAL ("\"" DC_OLD_ID
+        "\"")), "rotate", blocked_args, &failed);
+    assert_fact_forget_exit (&failed, 1);
+    assert_secret_absent (&failed);
+    g_assert_cmpstr (failed.out, ==, "");
+    g_autofree gchar *expected = g_strdup_printf ("wyctl: credential " DC_ID
+            " replaced " DC_OLD_ID ", which is now revoked, but its secret "
+            "could not be written to %s: permission denied; the secret is "
+            "gone\n"
+            "wyctl: rotate it again with `wyctl tenant data-credential rotate "
+            "--tenant acme --id " DC_ID " --output <fresh path>`\n", blocked);
+    g_assert_cmpstr (failed.err, ==, expected);
+    g_assert_cmpint (g_chmod (locked, 0700), ==, 0);
+  }
+  remove_dir_recursive (dir);
+}
+
+static void
+test_tenant_data_credential_revoke (void)
+{
+  const gchar *const args[] = { "--id", DC_ID, NULL };
+  g_auto (FactForgetRun) run = { 0 };
+  run_data_credential_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"credential_id\":\"" DC_ID "\",\"state\":\"revoked\","
+      "\"changed\":true}", "revoke", args, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_true (g_str_has_prefix (run.request,
+      "POST /tenants/data-credentials/revoke?"));
+  g_assert_cmpstr (data_credential_request_body (run.request), ==,
+      "{\"credential_id\":\"" DC_ID "\"}");
+  g_assert_cmpstr (run.out, ==, "tenant=acme credential_id=" DC_ID
+      " state=revoked changed=true\n");
+  g_assert_cmpstr (run.err, ==, "");
+
+  g_auto (FactForgetRun) again = { 0 };
+  run_data_credential_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"credential_id\":\"" DC_ID "\",\"state\":\"revoked\","
+      "\"changed\":false}", "revoke", args, &again);
+  assert_fact_forget_exit (&again, 0);
+  g_assert_cmpstr (again.out, ==, "tenant=acme credential_id=" DC_ID
+      " state=revoked changed=false\n");
+
+  g_auto (FactForgetRun) lost = { 0 };
+  run_data_credential_case (500, "{\"error\":\"data_credential_failed\"}",
+      "revoke", args, &lost);
+  assert_fact_forget_exit (&lost, 5);
+  g_assert_cmpstr (lost.out, ==, "");
+  g_assert_cmpstr (lost.err, ==, "wyctl: tenant data-credential revoke "
+      "failed: data_credential_failed\n"
+      "wyctl: the revoke outcome is unknown; repeating the same revoke is "
+      "safe\n");
+
+  g_auto (FactForgetRun) missing = { 0 };
+  run_data_credential_case (404, "{\"error\":\"data_credential_not_found\"}",
+      "revoke", args, &missing);
+  assert_fact_forget_exit (&missing, 5);
+  g_assert_cmpstr (missing.err, ==, "wyctl: tenant data-credential revoke "
+      "failed: data_credential_not_found\n");
+
+  const gchar *const bad_id[] = {
+    "--id", "wsc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", NULL,
+  };
+  g_auto (FactForgetRun) refused = { 0 };
+  run_data_credential_case (200, "{}", "revoke", bad_id, &refused);
+  assert_fact_forget_exit (&refused, 2);
+  g_assert_null (refused.request);
+  g_assert_cmpstr (refused.err, ==, "wyctl: tenant data-credential revoke "
+      "refused before sending: check --tenant and --id\n");
+}
+
+static void
+test_tenant_data_credential_list (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_data_credential_case (200, "{\"tenant\":\"acme\",\"credentials\":["
+      "{\"credential_id\":\"" DC_ID "\",\"tenant\":\"acme\","
+      "\"issuer\":\"al:ice\",\"operations\":[\"query\",\"delete\"],"
+      "\"graphs\":[],\"all_graphs\":true,\"generation\":7,"
+      "\"state\":\"revoked\",\"created_at_us\":100,\"expires_at_us\":900,"
+      "\"last_used_at_us\":150,\"revoked_at_us\":160,\"revoked_by\":\"bob\","
+      "\"revoked_reason\":\"owner/transferred\",\"rotated_from\":\""
+      DC_OLD_ID "\"}," DC_CREDENTIAL ("null") "]}", "list", NULL, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_true (g_str_has_prefix (run.request,
+      "GET /tenants/data-credentials?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "&name=acme "));
+  g_assert_cmpstr (run.out, ==, "credential_id=" DC_ID " state=revoked "
+      "operations=query,delete graphs=* issuer=al%3Aice generation=7 "
+      "created_at_us=100 expires_at_us=900 last_used_at_us=150 "
+      "revoked_at_us=160 revoked_by=bob revoked_reason=owner%2Ftransferred "
+      "rotated_from=" DC_OLD_ID "\n"
+      "credential_id=" DC_ID " state=active operations=query,insert "
+      "graphs=g1,g%202 issuer=alice generation=1 created_at_us=100 "
+      "expires_at_us=200 last_used_at_us=- revoked_at_us=- revoked_by=- "
+      "revoked_reason=- rotated_from=-\n");
+  g_assert_cmpstr (run.err, ==, "");
+
+  g_auto (FactForgetRun) denied = { 0 };
+  run_data_credential_case (403, "{\"error\":\"data_credential_denied\"}",
+      "list", NULL, &denied);
+  assert_fact_forget_exit (&denied, 4);
+  g_assert_cmpstr (denied.err, ==, "wyctl: tenant data-credential list "
+      "failed: data_credential_denied\n");
+
+  /* --tenant is never taken from the configured default. */
+  static const gchar *const configured[] = {
+    "tenant", "data-credential", "list", "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) untargeted = { 0 };
+  run_fake_daemon_case (200, "{}", NULL, configured, TRUE, &untargeted);
+  assert_fact_forget_exit (&untargeted, 2);
+  g_assert_null (untargeted.request);
+  g_assert_cmpstr (untargeted.err, ==, "wyctl: missing --tenant\n");
+}
+
+/* Each subcommand's help lists only its own options and the exit codes. */
+static void
+test_tenant_data_credential_help (void)
+{
+  static const struct
+  {
+    const gchar *action;
+    const gchar *present;
+    const gchar *absent;
+  } cases[] = {
+    {"issue", "--all-graphs", "--id"},
+    {"rotate", "--output", "--ops"},
+    {"revoke", "--id", "--output"},
+    {"list", "--tenant", "--id"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    gchar *argv[] = {
+      WYL_TEST_WYCTL_PATH, "tenant", "data-credential",
+      (gchar *) cases[i].action, "--help", NULL,
+    };
+    g_autofree gchar *out = NULL;
+    g_autofree gchar *err = NULL;
+    gint status = 0;
+    run_child (argv, &out, &err, &status);
+    g_assert_true (WIFEXITED (status));
+    g_assert_cmpint (WEXITSTATUS (status), ==, 0);
+    g_assert_nonnull (g_strstr_len (out, -1, cases[i].present));
+    g_assert_null (g_strstr_len (out, -1, cases[i].absent));
+    g_assert_nonnull (g_strstr_len (out, -1, "Exit codes:"));
+    g_assert_nonnull (g_strstr_len (out, -1, "--guard-risk"));
+  }
+
+  gchar *unknown[] = {
+    WYL_TEST_WYCTL_PATH, "tenant", "data-credential", "show", NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint status = 0;
+  run_child (unknown, &out, &err, &status);
+  g_assert_true (WIFEXITED (status));
+  g_assert_cmpint (WEXITSTATUS (status), ==, 2);
+  g_assert_cmpstr (err, ==, "wyctl: unknown tenant data-credential command: "
+      "show\n");
+}
+
 static void
 test_profile_status (void)
 {
@@ -6997,6 +7678,20 @@ main (int argc, char **argv)
       test_tenant_list_and_create);
   g_test_add_func ("/wyctl/tenant-seal", test_tenant_seal);
   g_test_add_func ("/wyctl/tenant-refusals", test_tenant_refusals);
+  g_test_add_func ("/wyctl/tenant-data-credential-issue",
+      test_tenant_data_credential_issue);
+  g_test_add_func ("/wyctl/tenant-data-credential-issue-refusals",
+      test_tenant_data_credential_issue_refusals);
+  g_test_add_func ("/wyctl/tenant-data-credential-issue-outcomes",
+      test_tenant_data_credential_issue_outcomes);
+  g_test_add_func ("/wyctl/tenant-data-credential-rotate",
+      test_tenant_data_credential_rotate);
+  g_test_add_func ("/wyctl/tenant-data-credential-revoke",
+      test_tenant_data_credential_revoke);
+  g_test_add_func ("/wyctl/tenant-data-credential-list",
+      test_tenant_data_credential_list);
+  g_test_add_func ("/wyctl/tenant-data-credential-help",
+      test_tenant_data_credential_help);
   g_test_add_func ("/wyctl/profile-status", test_profile_status);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);

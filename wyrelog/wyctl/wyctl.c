@@ -269,6 +269,22 @@ typedef struct
 typedef struct
 {
   gchar *tenant;
+  gchar *ops;
+  gchar **graphs;
+  gboolean all_graphs;
+  gchar *expires_in_arg;
+  gchar *credential_id;
+  gchar *output;
+  gchar *request_id;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlTenantDataCredentialOptions;
+
+typedef struct
+{
+  gchar *tenant;
   gchar *graph;
   gchar *access_token_file;
   gchar *guard_timestamp_arg;
@@ -651,6 +667,26 @@ wyctl_tenant_assign_owner_options_clear (WyctlTenantAssignOwnerOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlTenantAssignOwnerOptions,
     wyctl_tenant_assign_owner_options_clear);
+
+static void
+wyctl_tenant_data_credential_options_clear
+  (WyctlTenantDataCredentialOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->ops, g_free);
+  g_clear_pointer (&opts->graphs, g_strfreev);
+  g_clear_pointer (&opts->expires_in_arg, g_free);
+  g_clear_pointer (&opts->credential_id, g_free);
+  g_clear_pointer (&opts->output, g_free);
+  g_clear_pointer (&opts->request_id, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlTenantDataCredentialOptions,
+    wyctl_tenant_data_credential_options_clear);
 
 static void
 wyctl_fact_verify_options_clear (WyctlFactVerifyOptions *opts)
@@ -8330,6 +8366,592 @@ run_user (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/* Owner-issued data credentials (#1477).  The secret of an issue or rotate
+ * goes only to a new 0600 file, never to stdout, stderr or argv. */
+#define WYCTL_DATA_CREDENTIAL_MAX_SECONDS (G_MAXINT64 / G_USEC_PER_SEC)
+
+/* --expires-in: a whole, positive number of seconds, minutes, hours or days,
+ * such as "90d", matching ^[1-9][0-9]*[smhd]$ and no longer than the client
+ * accepts.  The daemon enforces its own maximum. */
+static gboolean
+parse_data_credential_lifetime (const gchar *raw, gint64 *out_seconds)
+{
+  static const struct
+  {
+    gchar unit;
+    gint64 seconds;
+  } units[] = {
+    {'s', 1}, {'m', 60}, {'h', 60 * 60}, {'d', 24 * 60 * 60},
+  };
+  gsize len = raw != NULL ? strlen (raw) : 0;
+  if (len < 2 || raw[0] < '1' || raw[0] > '9')
+    return FALSE;
+  gint64 unit = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (units); i++)
+    if (raw[len - 1] == units[i].unit)
+      unit = units[i].seconds;
+  if (unit == 0)
+    return FALSE;
+  gint64 count = 0;
+  for (gsize i = 0; i + 1 < len; i++) {
+    if (raw[i] < '0' || raw[i] > '9')
+      return FALSE;
+    gint64 digit = raw[i] - '0';
+    if (count > (WYCTL_DATA_CREDENTIAL_MAX_SECONDS - digit) / 10)
+      return FALSE;
+    count = count * 10 + digit;
+  }
+  if (count > WYCTL_DATA_CREDENTIAL_MAX_SECONDS / unit)
+    return FALSE;
+  *out_seconds = count * unit;
+  return TRUE;
+}
+
+/* NAMES %-escaped and joined by commas, "*" for ALL and "-" for none. */
+static gchar *
+data_credential_join_escaped (gchar *const *names, gboolean all)
+{
+  if (all)
+    return g_strdup ("*");
+  if (names == NULL || names[0] == NULL)
+    return g_strdup ("-");
+  g_autoptr (GString) joined = g_string_new (NULL);
+  for (gsize i = 0; names[i] != NULL; i++) {
+    g_autofree gchar *escaped = g_uri_escape_string (names[i], NULL, TRUE);
+    if (i > 0)
+      g_string_append_c (joined, ',');
+    g_string_append (joined, escaped);
+  }
+  return g_string_free (g_steal_pointer (&joined), FALSE);
+}
+
+static gchar *
+data_credential_escape_or_dash (const gchar *value)
+{
+  return value != NULL ? g_uri_escape_string (value, NULL, TRUE)
+         : g_strdup ("-");
+}
+
+static gchar *
+data_credential_time_or_dash (gint64 value_us)
+{
+  return value_us > 0 ? g_strdup_printf ("%" G_GINT64_FORMAT, value_us)
+         : g_strdup ("-");
+}
+
+static void
+print_data_credential_row (const WylClientDataCredential *credential)
+{
+  g_autofree gchar *id = data_credential_escape_or_dash
+        (credential->credential_id);
+  g_autofree gchar *state = data_credential_escape_or_dash (credential->state);
+  g_autofree gchar *operations = data_credential_join_escaped
+        (credential->operations, FALSE);
+  g_autofree gchar *graphs = data_credential_join_escaped (credential->graphs,
+          credential->all_graphs);
+  g_autofree gchar *issuer = data_credential_escape_or_dash
+        (credential->issuer);
+  g_autofree gchar *last_used = data_credential_time_or_dash
+        (credential->last_used_at_us);
+  g_autofree gchar *revoked_at = data_credential_time_or_dash
+        (credential->revoked_at_us);
+  g_autofree gchar *revoked_by = data_credential_escape_or_dash
+        (credential->revoked_by);
+  g_autofree gchar *revoked_reason = data_credential_escape_or_dash
+        (credential->revoked_reason);
+  g_autofree gchar *rotated_from = data_credential_escape_or_dash
+        (credential->rotated_from);
+  g_print ("credential_id=%s state=%s operations=%s graphs=%s issuer=%s "
+      "generation=%" G_GUINT64_FORMAT " created_at_us=%" G_GINT64_FORMAT
+      " expires_at_us=%" G_GINT64_FORMAT " last_used_at_us=%s "
+      "revoked_at_us=%s revoked_by=%s revoked_reason=%s rotated_from=%s\n",
+      id, state, operations, graphs, issuer, credential->generation,
+      credential->created_at_us, credential->expires_at_us, last_used,
+      revoked_at, revoked_by, revoked_reason, rotated_from);
+}
+
+/* Writes the exchange document {"credential_id":"…","credential_secret":"…"}
+ * and a newline to PATH, a new file of mode 0600 (see
+ * wyctl_token_file_write_protected).  The document is assembled by copying
+ * into one fixed allocation, never a growing string or a formatter, and is
+ * wiped on every path.  The client accepted the id as canonical and the
+ * secret as 43 base64url characters, so neither needs JSON escaping. */
+static WyctlTokenFileStatus
+data_credential_write_secret (const gchar *path,
+    const WylClientDataCredentialSecretResult *result)
+{
+  static const gchar head[] = "{\"credential_id\":\"";
+  static const gchar middle[] = "\",\"credential_secret\":\"";
+  static const gchar tail[] = "\"}\n";
+  const gchar *id = result->credential.credential_id;
+  if (id == NULL || result->secret.text == NULL || result->secret.len == 0)
+    return WYCTL_TOKEN_FILE_INVALID_BYTES;
+  gsize id_len = strlen (id);
+  gsize len = sizeof head - 1 + id_len + sizeof middle - 1
+      + result->secret.len + sizeof tail - 1;
+  gchar *document = g_malloc (len);
+  gsize at = 0;
+  memcpy (document + at, head, sizeof head - 1);
+  at += sizeof head - 1;
+  memcpy (document + at, id, id_len);
+  at += id_len;
+  memcpy (document + at, middle, sizeof middle - 1);
+  at += sizeof middle - 1;
+  memcpy (document + at, result->secret.text, result->secret.len);
+  at += result->secret.len;
+  memcpy (document + at, tail, sizeof tail - 1);
+  WyctlTokenFileStatus status = wyctl_token_file_write_protected (path,
+          document, len);
+  sodium_memzero (document, len);
+  g_free (document);
+  return status;
+}
+
+static const gchar *
+data_credential_write_reason (WyctlTokenFileStatus status)
+{
+  switch (status) {
+    case WYCTL_TOKEN_FILE_ALREADY_EXISTS:
+      return "it already exists";
+    case WYCTL_TOKEN_FILE_UNSAFE_PARENT:
+    case WYCTL_TOKEN_FILE_SYMLINK:
+      return "unsafe parent directory or symlink";
+    case WYCTL_TOKEN_FILE_PERMISSION_DENIED:
+    case WYCTL_TOKEN_FILE_PERMISSIONS_TOO_BROAD:
+      return "permission denied";
+    case WYCTL_TOKEN_FILE_INVALID_BYTES:
+      return "the answer carried no secret";
+    default:
+      return "I/O error";
+  }
+}
+
+/* Whether a failed issue or rotate answer proves that the request created
+ * nothing.  tenant_data_credential_mutation_handler (wyrelog/daemon/http.c)
+ * parses the body, authenticates the actor, takes the policy write, and
+ * checks the seal and the issuer's operations, all before it runs the
+ * publication that commits a credential.  These answers come only from
+ * those steps:
+ *   - every 401: only the guard step (authorize_guarded_session_action_
+ *     extended and set_auth_failure_error) answers 401; no later step of
+ *     the handler does;
+ *   - 400 data_credential_expiry_required and data_credential_expiry_invalid:
+ *     only data_credential_parse_body;
+ *   - 400 invalid_tenant_request and 403 tenant_builtin_immutable:
+ *     data_credential_actor_authenticate, before the guard step;
+ *   - 400 invalid_tenant_auth, 403 tenant_denied and 403 tenant_mfa_required:
+ *     the guard step and tenant_actor_authenticate;
+ *   - 403 data_credential_operation_denied and 409 tenant_sealed: the
+ *     handler's own refusal, set before the publication, which then never
+ *     runs (a sealed tenant can also be refused by the guard step).
+ * Every other answer, data_credential_denied, invalid_data_credential_request
+ * and data_credential_unavailable among them, can also come from the store or
+ * follow a commit, as can an answer whose code the client did not keep. */
+static gboolean
+data_credential_answer_is_pre_commit (WylClient *client)
+{
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+  } definite[] = {
+    {400, "data_credential_expiry_required"},
+    {400, "data_credential_expiry_invalid"},
+    {400, "invalid_tenant_request"},
+    {400, "invalid_tenant_auth"},
+    {403, "tenant_builtin_immutable"},
+    {403, "tenant_denied"},
+    {403, "tenant_mfa_required"},
+    {403, "data_credential_operation_denied"},
+    {409, "tenant_sealed"},
+  };
+  guint status = wyl_client_get_last_http_status (client);
+  if (status == 401)
+    return TRUE;
+  g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+  for (gsize i = 0; code != NULL && i < G_N_ELEMENTS (definite); i++)
+    if (status == definite[i].status && g_str_equal (code, definite[i].code))
+      return TRUE;
+  return FALSE;
+}
+
+/* Report a failed data-credential request and return its exit status: the
+ * fact_remote_exit convention, except that a refusal made before sending is
+ * 2 and a complete success answer that could not be used is 5, since an
+ * issue or rotate may have committed behind it. */
+static int
+data_credential_exit (WylClient *client, const gchar *action,
+    wyrelog_error_t rc, const gchar *refused)
+{
+  guint status = wyl_client_get_last_http_status (client);
+  if (rc == WYRELOG_E_INVALID && status == 0) {
+    g_printerr ("wyctl: tenant data-credential %s refused before sending: "
+        "%s\n", action, refused);
+    return 2;
+  }
+  g_autofree gchar *command = g_strdup_printf ("tenant data-credential %s",
+          action);
+  if (rc == WYRELOG_E_IO && status >= 200 && status < 300
+      && wyl_client_last_response_is_complete (client)) {
+    g_printerr ("wyctl: %s failed: invalid daemon response\n", command);
+    return 5;
+  }
+  g_autofree gchar *fallback = g_strdup_printf
+        ("tenant_data_credential_%s_failed", action);
+  return fact_remote_exit (client, command, rc, fallback);
+}
+
+/* Settle an issue or rotate.  On success the secret is written, then wiped
+ * with the result by the caller's cleanup. */
+static int
+data_credential_finish_secret (WylClient *client, const gchar *action,
+    wyrelog_error_t rc, WylClientDataCredentialSecretResult *result,
+    const gchar *tenant, const gchar *old_id, const gchar *request_id,
+    gboolean minted, const gchar *output)
+{
+  g_autofree gchar *command = g_strdup_printf ("tenant data-credential %s",
+          action);
+  gboolean rotating = old_id != NULL;
+  if (rc == WYRELOG_E_CONFLICT && result->replayed) {
+    g_printerr ("wyctl: %s request_id=%s was already applied: credential %s "
+        "exists and its secret cannot be shown again\n", command, request_id,
+        result->credential.credential_id);
+    g_printerr ("wyctl: if that secret is lost, revoke the credential with "
+        "`wyctl tenant data-credential revoke --tenant %s --id %s`\n", tenant,
+        result->credential.credential_id);
+    return 4;
+  }
+  if (rc != WYRELOG_E_OK) {
+    int exit_rc = data_credential_exit (client, action, rc, rotating
+            ? "check --tenant and --id, and that the daemon URL is a literal "
+            "loopback address"
+            : "check --tenant, --ops and --graph, and that the daemon URL is "
+            "a literal loopback address");
+    if (exit_rc == 2)
+      return exit_rc;
+    wyctl_print_service_request_id (client, rc, command, request_id);
+    /* A minted id is new, so a pre-commit answer settles it; a repeated id
+     * may name a credential an earlier attempt created. */
+    if (!minted || !data_credential_answer_is_pre_commit (client))
+      g_printerr ("wyctl: the credential may have been created; re-run the "
+          "same command with `--request-id %s` to find out (a created "
+          "credential comes back as a replay)\n", request_id);
+    return exit_rc;
+  }
+
+  const WylClientDataCredential *credential = &result->credential;
+  WyctlTokenFileStatus status = data_credential_write_secret (output, result);
+  if (status != WYCTL_TOKEN_FILE_OK
+      && status != WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN) {
+    if (rotating) {
+      g_printerr ("wyctl: credential %s replaced %s, which is now revoked, "
+          "but its secret could not be written to %s: %s; the secret is "
+          "gone\n", credential->credential_id, old_id, output,
+          data_credential_write_reason (status));
+      g_printerr ("wyctl: rotate it again with `wyctl tenant data-credential "
+          "rotate --tenant %s --id %s --output <fresh path>`\n", tenant,
+          credential->credential_id);
+    } else {
+      g_printerr ("wyctl: credential %s was issued, but its secret could not "
+          "be written to %s: %s; the secret is gone\n",
+          credential->credential_id, output,
+          data_credential_write_reason (status));
+      g_printerr ("wyctl: revoke it with `wyctl tenant data-credential revoke "
+          "--tenant %s --id %s`, then issue a new one\n", tenant,
+          credential->credential_id);
+    }
+    return 1;
+  }
+
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *id = data_credential_escape_or_dash
+        (credential->credential_id);
+  g_autofree gchar *state = data_credential_escape_or_dash (credential->state);
+  if (rotating) {
+    g_autofree gchar *rotated_from = data_credential_escape_or_dash
+          (credential->rotated_from);
+    g_print ("tenant=%s credential_id=%s rotated_from=%s generation=%"
+        G_GUINT64_FORMAT " state=%s expires_at_us=%" G_GINT64_FORMAT
+        " request_id=%s\n", escaped_tenant, id, rotated_from,
+        credential->generation, state, credential->expires_at_us,
+        request_id);
+  } else {
+    g_autofree gchar *operations = data_credential_join_escaped
+          (credential->operations, FALSE);
+    g_autofree gchar *graphs = data_credential_join_escaped
+          (credential->graphs, credential->all_graphs);
+    g_print ("tenant=%s credential_id=%s state=%s operations=%s graphs=%s "
+        "expires_at_us=%" G_GINT64_FORMAT " request_id=%s\n", escaped_tenant,
+        id, state, operations, graphs, credential->expires_at_us, request_id);
+  }
+  /* The file exists, but the directory entry may not survive a crash. */
+  if (status == WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN) {
+    g_printerr ("wyctl: secret written to %s (mode 0600), but flushing its "
+        "directory failed, so the file may not survive a crash; inspect it "
+        "before acting on it\n", output);
+    return 1;
+  }
+  g_printerr ("wyctl: secret written to %s (mode 0600); it is not shown "
+      "again\n", output);
+  return 0;
+}
+
+static const gchar *const data_credential_exit_codes =
+    "Data credentials are managed by the tenant's owner through the\n"
+    "__wr_default session with MFA; a SYSTEM administrator may also list\n"
+    "and revoke them.\n"
+    "\n"
+    "Exit codes:\n"
+    "  0: the request succeeded.\n"
+    "  1: issue or rotate succeeded at the daemon, but the secret file could\n"
+    "     not be written, or its directory could not be flushed.\n"
+    "  2: local arguments, the output file, credentials or proxy settings\n"
+    "     are invalid; nothing was sent.\n"
+    "  3: the daemon rejected the request as invalid.\n"
+    "  4: the daemon denied the request by policy, it conflicts with the\n"
+    "     tenant's state, or it repeated an applied request id (a replay).\n"
+    "  5: not found, busy, transport, internal or unreadable-response\n"
+    "     failure.\n"
+    "  6: authentication failed or is required.";
+
+static int
+run_tenant_data_credential_command (const WyctlOptions *global_opts,
+    gint argc, gchar **argv, const gchar *action)
+{
+  g_auto (WyctlTenantDataCredentialOptions) opts = { 0 };
+  gboolean issuing = g_strcmp0 (action, "issue") == 0;
+  gboolean rotating = g_strcmp0 (action, "rotate") == 0;
+  gboolean revoking = g_strcmp0 (action, "revoke") == 0;
+  gboolean secret = issuing || rotating;
+  GOptionEntry issue_entries[] = {
+    {"ops", 0, 0, G_OPTION_ARG_STRING, &opts.ops,
+     "Operations to grant, comma-separated: query, infer, insert, delete, "
+     "update", "OPS"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opts.graphs,
+     "Graph to grant (repeat for up to 64)", "GRAPH"},
+    {"all-graphs", 0, 0, G_OPTION_ARG_NONE, &opts.all_graphs,
+     "Grant every graph of the tenant, present and future", NULL},
+    {"expires-in", 0, 0, G_OPTION_ARG_STRING, &opts.expires_in_arg,
+     "Lifetime: a whole number of s, m, h or d, such as 90d", "DURATION"},
+    {NULL}
+  };
+  GOptionEntry id_entries[] = {
+    {"id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
+     "Data credential id", "ID"},
+    {NULL}
+  };
+  GOptionEntry secret_entries[] = {
+    {"output", 0, 0, G_OPTION_ARG_STRING, &opts.output,
+     "New file for the secret, created with mode 0600", "PATH"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+     "Request id of an earlier attempt to repeat", "ID"},
+    {NULL}
+  };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  const gchar *about = issuing
+      ? "Issues a data credential and writes its secret, once, to a new\n"
+      "file of mode 0600 named by --output.  --expires-in is required.\n"
+      "Name each graph with --graph, or grant every graph with --all-graphs;\n"
+      "one of the two is required.  When the outcome is unknown, repeat the\n"
+      "command with the printed --request-id: a credential it created comes\n"
+      "back as a replay, whose secret cannot be shown again.\n\n"
+      : rotating
+      ? "Replaces a credential with a new one of the same scope and expiry,\n"
+      "revokes the old one, and writes the new secret to a new file of\n"
+      "mode 0600 named by --output.  Repeat an unknown outcome with the\n"
+      "printed --request-id.\n\n"
+      : revoking
+      ? "Revokes a credential at once.  Repeating a revoke is safe.\n\n"
+      : "Lists the tenant's data credentials; secrets are never shown.\n\n";
+  g_autofree gchar *summary = g_strdup_printf ("- tenant data-credential %s",
+          action);
+  g_autofree gchar *description = g_strconcat (about,
+          data_credential_exit_codes, NULL);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new (summary);
+  if (issuing)
+    g_option_context_add_main_entries (context, issue_entries, NULL);
+  if (rotating || revoking)
+    g_option_context_add_main_entries (context, id_entries, NULL);
+  if (secret)
+    g_option_context_add_main_entries (context, secret_entries, NULL);
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context, description);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected tenant data-credential %s argument: %s\n",
+        action, argv[1]);
+    return 2;
+  }
+  /* The target tenant is always named: never the configured default. */
+  if (opts.tenant == NULL || opts.tenant[0] == '\0') {
+    g_printerr ("wyctl: missing --tenant\n");
+    return 2;
+  }
+  gint64 expires_in_seconds = 0;
+  if (issuing) {
+    gboolean named = opts.graphs != NULL && opts.graphs[0] != NULL;
+    if (opts.ops == NULL || opts.ops[0] == '\0') {
+      g_printerr ("wyctl: missing --ops\n");
+      return 2;
+    }
+    if (named && opts.all_graphs) {
+      g_printerr ("wyctl: pass --graph or --all-graphs, not both\n");
+      return 2;
+    }
+    if (!named && !opts.all_graphs) {
+      g_printerr ("wyctl: tenant data-credential issue needs --graph G "
+          "(repeatable) or --all-graphs\n");
+      return 2;
+    }
+    if (opts.expires_in_arg == NULL) {
+      g_printerr ("wyctl: missing --expires-in; a data credential always "
+          "expires\n");
+      return 2;
+    }
+    if (!parse_data_credential_lifetime (opts.expires_in_arg,
+        &expires_in_seconds)) {
+      g_printerr ("wyctl: invalid --expires-in: use a whole number of s, m, "
+          "h or d, such as 90d\n");
+      return 2;
+    }
+  }
+  if ((rotating || revoking)
+      && (opts.credential_id == NULL || opts.credential_id[0] == '\0')) {
+    g_printerr ("wyctl: missing --id\n");
+    return 2;
+  }
+  if (secret && (opts.output == NULL || opts.output[0] == '\0')) {
+    g_printerr ("wyctl: missing --output\n");
+    return 2;
+  }
+  gchar minted[WYL_REQUEST_ID_STRING_BUF] = "";
+  const gchar *request_id = NULL;
+  if (secret && opts.request_id != NULL) {
+    if (!wyl_request_id_is_canonical (opts.request_id)) {
+      g_printerr ("wyctl: invalid --request-id\n");
+      return 2;
+    }
+    request_id = opts.request_id;
+  } else if (secret) {
+    if (wyl_request_id_new (minted, sizeof minted) != WYRELOG_E_OK) {
+      g_printerr ("wyctl: unable to mint a request id\n");
+      return 2;
+    }
+    request_id = minted;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  /* Refuse an existing or unsafe destination before anything is sent; the
+   * protected writer still creates it exclusively afterwards. */
+  g_autofree gchar *output = secret
+      ? g_canonicalize_filename (opts.output, NULL) : NULL;
+  if (secret && check_login_token_output ("output", output) != 0)
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_tenant_client (global_opts, opts.access_token_file,
+          &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  if (secret) {
+    g_auto (WylClientDataCredentialSecretResult) result = { 0 };
+    wyrelog_error_t rc;
+    if (issuing) {
+      const WylClientDataCredentialIssueRequest request = {
+        .tenant = opts.tenant,
+        .request_id = request_id,
+        .operations = opts.ops,
+        .graphs = (const gchar * const *) opts.graphs,
+        .all_graphs = opts.all_graphs,
+        .expires_in_seconds = expires_in_seconds,
+      };
+      rc = wyl_client_tenant_data_credential_issue (client, &request,
+              guard_timestamp, opts.guard_loc_class, guard_risk, &result);
+    } else {
+      rc = wyl_client_tenant_data_credential_rotate (client, opts.tenant,
+              opts.credential_id, request_id, guard_timestamp,
+              opts.guard_loc_class, guard_risk, &result);
+    }
+    return data_credential_finish_secret (client, action, rc, &result,
+               opts.tenant, rotating ? opts.credential_id : NULL, request_id,
+               request_id == minted, output);
+  }
+
+  g_autofree gchar *tenant = g_uri_escape_string (opts.tenant, NULL, TRUE);
+  if (revoking) {
+    gboolean changed = FALSE;
+    wyrelog_error_t rc = wyl_client_tenant_data_credential_revoke (client,
+            opts.tenant, opts.credential_id, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &changed);
+    if (rc != WYRELOG_E_OK) {
+      int exit_rc = data_credential_exit (client, action, rc,
+              "check --tenant and --id");
+      if (exit_rc != 2 && wyctl_remote_outcome_unknown (client, rc))
+        g_printerr ("wyctl: the revoke outcome is unknown; repeating the "
+            "same revoke is safe\n");
+      return exit_rc;
+    }
+    g_autofree gchar *id = g_uri_escape_string (opts.credential_id, NULL,
+            TRUE);
+    g_print ("tenant=%s credential_id=%s state=revoked changed=%s\n", tenant,
+        id, changed ? "true" : "false");
+    return 0;
+  }
+
+  g_auto (WylClientDataCredentialList) list = { 0 };
+  wyrelog_error_t rc = wyl_client_tenant_data_credential_list (client,
+          opts.tenant, guard_timestamp, opts.guard_loc_class, guard_risk,
+          &list);
+  if (rc != WYRELOG_E_OK)
+    return data_credential_exit (client, action, rc, "check --tenant");
+  for (gsize i = 0; i < list.len; i++)
+    print_data_credential_row (&list.items[i]);
+  return 0;
+}
+
+static int
+run_tenant_data_credential (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing tenant data-credential command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "issue") == 0)
+    return run_tenant_data_credential_command (global_opts, argc - 1,
+               argv + 1, "issue");
+  if (g_strcmp0 (argv[1], "list") == 0)
+    return run_tenant_data_credential_command (global_opts, argc - 1,
+               argv + 1, "list");
+  if (g_strcmp0 (argv[1], "rotate") == 0)
+    return run_tenant_data_credential_command (global_opts, argc - 1,
+               argv + 1, "rotate");
+  if (g_strcmp0 (argv[1], "revoke") == 0)
+    return run_tenant_data_credential_command (global_opts, argc - 1,
+               argv + 1, "revoke");
+  g_printerr ("wyctl: unknown tenant data-credential command: %s\n",
+      argv[1]);
+  return 2;
+}
+
 static int
 run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -8353,6 +8975,8 @@ run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_tenant_command (global_opts, argc - 1, argv + 1, "unseal");
   if (g_strcmp0 (argv[1], "assign-owner") == 0)
     return run_tenant_assign_owner (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "data-credential") == 0)
+    return run_tenant_data_credential (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown tenant command: %s\n", argv[1]);
   return 2;
 }

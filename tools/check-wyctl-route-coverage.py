@@ -88,6 +88,13 @@ COVERAGE = {
     "/tenants/seal": ("tenant", "seal"),
     "/tenants/unseal": ("tenant", "unseal"),
     "/tenants/delete": ("tenant", "delete"),
+    "/tenants/data-credentials": ("tenant", "data-credential", "list"),
+    "/tenants/data-credentials/issue": ("tenant", "data-credential",
+                                        "issue"),
+    "/tenants/data-credentials/rotate": ("tenant", "data-credential",
+                                         "rotate"),
+    "/tenants/data-credentials/revoke": ("tenant", "data-credential",
+                                         "revoke"),
     "/graphs/create": ("graph", "create"),
     "/graphs": ("graph", "list"),
     "/graphs/seal": ("graph", "seal"),
@@ -117,16 +124,7 @@ HTTP_ONLY = {
 
 UNSUPPORTED: dict[str, str] = {}
 
-# #1477 adds the wyctl commands for the #1474 data-credential routes.
-PENDING: dict[str, tuple[str, ...]] = {
-    "/tenants/data-credentials": ("tenant", "data-credential", "list"),
-    "/tenants/data-credentials/issue": ("tenant", "data-credential",
-                                        "issue"),
-    "/tenants/data-credentials/rotate": ("tenant", "data-credential",
-                                         "rotate"),
-    "/tenants/data-credentials/revoke": ("tenant", "data-credential",
-                                         "revoke"),
-}
+PENDING: dict[str, tuple[str, ...]] = {}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {
@@ -149,6 +147,7 @@ DISPATCHERS = {
     ("service-credential",): "run_service_credential",
     ("service-permission-closure",): "run_service_permission_closure",
     ("tenant",): "run_tenant",
+    ("tenant", "data-credential"): "run_tenant_data_credential",
     ("profile",): "run_profile",
 }
 

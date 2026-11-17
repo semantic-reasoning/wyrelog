@@ -32,6 +32,10 @@ COMMAND_PATHS = {
     ("tenant", "seal"): 2,
     ("tenant", "unseal"): 2,
     ("tenant", "assign-owner"): 2,
+    ("tenant", "data-credential", "issue"): 3,
+    ("tenant", "data-credential", "list"): 3,
+    ("tenant", "data-credential", "rotate"): 3,
+    ("tenant", "data-credential", "revoke"): 3,
     ("graph", "create"): 2,
     ("graph", "list"): 2,
     ("graph", "seal"): 2,
@@ -104,6 +108,10 @@ REQUIRED_GUARDS = {
     ("tenant", "delete"),
     ("tenant", "seal"),
     ("tenant", "unseal"),
+    ("tenant", "data-credential", "issue"),
+    ("tenant", "data-credential", "list"),
+    ("tenant", "data-credential", "rotate"),
+    ("tenant", "data-credential", "revoke"),
 }
 GUARD_OPTIONS = {
     "--guard-timestamp", "--guard-loc-class", "--guard-risk",
@@ -265,9 +273,9 @@ def check(wyctl: Path, runbook: Path, source_root: Path) -> list[str]:
     invocations = runbook_invocations(runbook)
     if not invocations:
         return [f"{runbook}: found no wyctl commands in command blocks"]
-    if len(invocations) != 89:
+    if len(invocations) != 93:
         errors.append(
-            f"{runbook}: expected 89 reviewed wyctl invocations, found "
+            f"{runbook}: expected 93 reviewed wyctl invocations, found "
             f"{len(invocations)}")
     if sum(arguments == ["status"] for _, arguments in invocations) != 2:
         errors.append(

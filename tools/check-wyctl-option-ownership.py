@@ -64,6 +64,10 @@ EXPECTED_FIELDS = {
         ("name", "delete_tenant", "request_id", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg", "to"),
     "WyctlTenantAssignOwnerOptions": ("store_path", "keyprovider_path"),
+    "WyctlTenantDataCredentialOptions":
+        ("tenant", "ops", "expires_in_arg", "credential_id", "output",
+         "request_id", "access_token_file", "guard_timestamp_arg",
+         "guard_loc_class", "guard_risk_arg"),
     "WyctlGraphSealOptions":
         ("tenant", "graph", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
@@ -109,6 +113,7 @@ EXPECTED_PARSE_SITES = {
     "run_user_command": "WyctlUserOptions",
     "run_tenant_command": "WyctlTenantOptions",
     "run_tenant_assign_owner": "WyctlTenantAssignOwnerOptions",
+    "run_tenant_data_credential_command": "WyctlTenantDataCredentialOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
     "run_fact_schema_status": "WyctlFactSchemaOptions",
     "run_fact_rule_pack_register": "WyctlFactRulePackOptions",
@@ -148,9 +153,10 @@ EXPECTED_PARSE_SITES = {
 # gchar ** that the holder releases with g_strfreev.
 EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
+    "WyctlTenantDataCredentialOptions": ("graphs",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 280
+EXPECTED_STRING_DESTINATIONS = 290
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,
