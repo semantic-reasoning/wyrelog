@@ -15585,6 +15585,10 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     set_schema_ok_json (msg, tenant, graph, namespace_id, relation, NULL);
     return;
   }
+  /* Registration is durable. Release the daemon-wide policy WRITE before
+   * replaying graph data; retain replay admission through publication. */
+  if (!wyl_daemon_policy_write_prepare_success_response (msg))
+    return;
   WylFactGraphRuntimeStatus status = { 0 };
   rc = wyl_handle_refresh_fact_graph_admitted (ctx->handle, replay_admission,
           &replay_info, &status);

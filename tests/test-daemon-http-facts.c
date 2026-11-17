@@ -5387,8 +5387,208 @@ use_empty_snapshot (gpointer data)
   return NULL;
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  SoupServer *server;
+  const gchar *base_url;
+  const gchar *token;
+  const gchar *schema;
+  gboolean replay_entered;
+  gboolean release_replay;
+  gboolean replay_timed_out;
+  gboolean writer_entered;
+  gboolean writer_done;
+  wyrelog_error_t writer_rc;
+  gboolean snapshot_valid;
+  WylDaemonPolicyWriteFinalizeSnapshot snapshot;
+} SchemaReplayWriteRace;
+
+static void
+hold_schema_replay (WylFactReplayJobContext *context, gpointer data)
+{
+  (void) context;
+  SchemaReplayWriteRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->snapshot_valid =
+      wyl_daemon_http_policy_write_finalize_snapshot_for_test (race->server,
+          &race->snapshot);
+  race->replay_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  gint64 deadline = g_get_monotonic_time () + 15 * G_TIME_SPAN_SECOND;
+  while (!race->release_replay) {
+    if (!g_cond_wait_until (&race->changed, &race->mutex, deadline)) {
+      race->replay_timed_out = TRUE;
+      break;
+    }
+  }
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+register_schema_during_replay (gpointer data)
+{
+  SchemaReplayWriteRace *race = data;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  identity_http_post (session, race->base_url, race->token,
+      "/facts/schema/register",
+      "tenant=__wr_default&graph=live-sibling&namespace=shop&relation=extra&"
+      "schema_version=1&" FACT_GUARD, race->schema, 200,
+      "\"mutation_class\":\"committed_ready\"");
+  return NULL;
+}
+
+static void
+schema_replay_writer_entered (gpointer data)
+{
+  SchemaReplayWriteRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->writer_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+write_policy_during_schema_replay (gpointer data)
+{
+  SchemaReplayWriteRace *race = data;
+  wyrelog_error_t rc = wyl_daemon_http_policy_write_for_test (race->server,
+          schema_replay_writer_entered, race);
+  g_mutex_lock (&race->mutex);
+  race->writer_rc = rc;
+  race->writer_done = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+  return NULL;
+}
+
+static void
+check_schema_replay_releases_write (WylHandle *handle, SoupServer *server,
+    const gchar *base_url, const gchar *token, const gchar *schema)
+{
+  WylDaemonPolicyWriteFinalizeSnapshot before = { 0 };
+  g_assert_true (wyl_daemon_http_policy_write_finalize_snapshot_for_test
+        (server, &before));
+  SchemaReplayWriteRace race = {
+    .server = server, .base_url = base_url, .token = token, .schema = schema,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_fact_replay_set_validation_connected_test_hook (hold_schema_replay,
+      &race);
+  GThread *request = g_thread_new ("schema-refresh",
+          register_schema_during_replay, &race);
+  g_mutex_lock (&race.mutex);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (!race.replay_entered
+      && g_cond_wait_until (&race.changed, &race.mutex, deadline))
+    ;
+  gboolean entered = race.replay_entered;
+  g_mutex_unlock (&race.mutex);
+
+  WylFactReplayAdmission *admission = NULL;
+  wyrelog_error_t admission_rc = WYRELOG_E_INTERNAL;
+  GThread *writer = NULL;
+  if (entered) {
+    admission_rc = wyl_handle_fact_replay_admission_acquire (handle,
+            WYL_TENANT_DEFAULT, "live-sibling", NULL, &admission);
+    writer = g_thread_new ("schema-policy-writer",
+            write_policy_during_schema_replay, &race);
+  }
+  g_mutex_lock (&race.mutex);
+  deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (entered && !race.writer_done
+      && g_cond_wait_until (&race.changed, &race.mutex, deadline))
+    ;
+  gboolean progressed = race.writer_entered && race.writer_done
+      && !race.replay_timed_out;
+  race.release_replay = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  /* Release and join before asserting, including on the old lock ordering. */
+  g_thread_join (request);
+  if (writer != NULL)
+    g_thread_join (writer);
+  wyl_fact_replay_set_validation_connected_test_hook (NULL, NULL);
+  wyl_handle_fact_replay_admission_free (admission);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+
+  g_assert_true (entered);
+  g_assert_true (progressed);
+  g_assert_cmpint (race.writer_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (admission_rc, ==, WYRELOG_E_BUSY);
+  g_assert_null (admission);
+  g_assert_true (race.snapshot_valid);
+  g_assert_cmpuint (race.snapshot.generation, >, before.generation);
+  g_assert_cmpstr (race.snapshot.owner_name, ==, "schema_register");
+  g_assert_cmpint (race.snapshot.cleanup_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (race.snapshot.primary_status, ==, 200);
+  g_assert_cmpuint (race.snapshot.pre_finalize_status, ==, 0);
+  g_assert_cmpuint (race.snapshot.pre_finalize_header_count, ==, 0);
+  g_assert_cmpuint (race.snapshot.pre_finalize_body_length, ==, 0);
+  g_assert_false (race.snapshot.post_finalize_lease_live);
+  g_assert_false (race.snapshot.post_finalize_store_live);
+  g_assert_false (race.snapshot.post_finalize_transaction_active);
+  g_assert_cmpuint (race.snapshot.post_finalize_thread_pins, ==, 0);
+  g_assert_cmpuint (race.snapshot.post_finalize_rank_mask, ==, 0);
+  g_assert_cmpint (wyl_handle_fact_replay_admission_acquire (handle,
+      WYL_TENANT_DEFAULT, "live-sibling", NULL, &admission), ==, WYRELOG_E_OK);
+  wyl_handle_fact_replay_admission_free (admission);
+}
+
+static void
+count_schema_replay (WylFactReplayJobContext *context, gpointer data)
+{
+  (void) context;
+  guint *calls = data;
+  (*calls)++;
+}
+
+static void
+check_schema_cleanup_failure_skips_replay (WylHandle *handle,
+    SoupServer *server, SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *schema)
+{
+  /* A cleanup fault latches authority unavailable: this is the last request
+   * in the fixture. Maintenance must not consume the one-shot WRITE fault. */
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (server);
+  guint replay_calls = 0;
+  wyl_fact_replay_set_validation_connected_test_hook (count_schema_replay,
+      &replay_calls);
+  wyl_daemon_http_fail_next_policy_write_finalize_for_test (server,
+      WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+  identity_http_post (session, base_url, token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-sibling&namespace=shop&"
+      "relation=cleanup&schema_version=1&" FACT_GUARD, schema,
+      500, "policy_write_cleanup_failed");
+  wyl_fact_replay_set_validation_connected_test_hook (NULL, NULL);
+  g_assert_cmpuint (replay_calls, ==, 0);
+  gboolean exists = FALSE;
+  g_assert_cmpint (wyl_policy_store_fact_relation_schema_exists
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT,
+      "live-sibling", "shop", "cleanup", 1, &exists), ==, WYRELOG_E_OK);
+  g_assert_true (exists);
+  WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
+  g_assert_true (wyl_daemon_http_policy_write_finalize_snapshot_for_test
+        (server, &snapshot));
+  g_assert_cmpstr (snapshot.owner_name, ==, "schema_register");
+  g_assert_cmpint (snapshot.cleanup_rc, ==, WYRELOG_E_INTERNAL);
+  g_assert_false (snapshot.post_finalize_lease_live);
+  g_assert_false (snapshot.post_finalize_store_live);
+  g_assert_false (snapshot.post_finalize_transaction_active);
+  g_assert_cmpuint (snapshot.post_finalize_thread_pins, ==, 0);
+  g_assert_cmpuint (snapshot.post_finalize_rank_mask, ==, 0);
+  WylFactReplayAdmission *admission = NULL;
+  g_assert_cmpint (wyl_handle_fact_replay_admission_acquire (handle,
+      WYL_TENANT_DEFAULT, "live-sibling", NULL, &admission), ==, WYRELOG_E_OK);
+  wyl_handle_fact_replay_admission_free (admission);
+}
+
 static gint
-check_live_empty_schema (WylHandle *handle, const gchar *base_url)
+check_live_empty_schema (WylHandle *handle, SoupServer *server,
+    const gchar *base_url)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   register_test_human (store, "facts-reader");
@@ -5567,9 +5767,8 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
   identity_http_post (session, base_url, reader_token,
       "/datalog/__wr_default/live-sibling/query", guard, query,
       200, "{\"O\":\"sibling\",\"A\":17}");
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
-      "tenant=__wr_default&graph=live-sibling&namespace=shop&relation=extra&"
-      "schema_version=1&" FACT_GUARD, schema, 200, "\"ok\":true");
+  check_schema_replay_releases_write (handle, server, base_url, admin_token,
+      schema);
   identity_http_post (session, base_url, reader_token,
       "/datalog/__wr_default/live-sibling/query", guard, query,
       200, "{\"O\":\"sibling\",\"A\":17}");
@@ -5577,6 +5776,14 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
       "/datalog/__wr_default/live-sibling/query", guard,
       "{\"query\":\"extra(O,A)\",\"output\":\"json\"}",
       200, "\"row_count\":0");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+      "tenant=__wr_default&graph=live-empty&namespace=shop&relation=barrier&"
+      "schema_version=1&" FACT_GUARD, schema, 200,
+      "\"mutation_class\":\"committed_barrier\"");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &key), ==, WYRELOG_E_OK);
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_transition_fact_graph_materialization
         (store, WYL_TENANT_DEFAULT, "live-empty",
@@ -5601,6 +5808,8 @@ check_live_empty_schema (WylHandle *handle, const gchar *base_url)
   g_cond_clear (&call.cond);
   g_mutex_clear (&call.mutex);
   wyl_fact_graph_key_clear (&key);
+  check_schema_cleanup_failure_skips_replay (handle, server, session,
+      base_url, admin_token, schema);
   return 0;
 }
 
@@ -5651,7 +5860,8 @@ run_fact_http_fixture (gboolean empty_schema_only)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
-  gint rc = empty_schema_only ? check_live_empty_schema (handle, base_url)
+  gint rc = empty_schema_only
+      ? check_live_empty_schema (handle, http.server, base_url)
       : check_fact_http_contract (handle, http.server, fact_root, base_url);
   if (rc != 0)
     g_printerr ("fact HTTP contract failed rc=%d\n", rc);
