@@ -8349,6 +8349,182 @@ physical_quota_rows_snapshot (sqlite3 *db)
              "(SELECT * FROM fact_physical_quota_reservations ORDER BY request_id);");
 }
 
+typedef struct
+{
+  const gchar *table;
+  const gchar *constraint;
+  gboolean primary_key;
+  guint key_columns;
+  guint foreign_columns;
+} PhysicalQuotaMissingKey;
+
+static const PhysicalQuotaMissingKey physical_quota_missing_keys[] = {
+  { "fact_tenant_physical_quota_limits", " PRIMARY KEY", TRUE, 1, 1 },
+  { "fact_tenant_physical_quota_limits",
+    ",  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)", FALSE, 1, 1 },
+  { "fact_tenant_physical_quota_usage", " PRIMARY KEY", TRUE, 1, 1 },
+  { "fact_tenant_physical_quota_usage",
+    ",  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)", FALSE, 1, 1 },
+  { "fact_physical_quota_reservations",
+    "PRIMARY KEY (tenant_id, graph_id, request_id),", TRUE, 3, 2 },
+  { "fact_physical_quota_reservations",
+    ",  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs     (tenant_id, graph_id)",
+    FALSE, 3, 2 },
+  { "fact_physical_quota_graph_charges",
+    "  PRIMARY KEY (tenant_id, graph_id),", TRUE, 2, 2 },
+  { "fact_physical_quota_graph_charges",
+    ",  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs (tenant_id, graph_id)",
+    FALSE, 2, 2 },
+};
+
+static gchar *
+physical_quota_schema_snapshot (sqlite3 *db)
+{
+  return scalar_text (db, "SELECT group_concat(name||':'||coalesce(sql,''),'|') "
+             "FROM (SELECT name,sql FROM sqlite_master ORDER BY type,name)");
+}
+
+static gchar *
+physical_quota_data_snapshot (sqlite3 *db)
+{
+  return scalar_text (db,
+             "SELECT group_concat(row,'|') FROM ("
+             "SELECT 'limits:'||quote(tenant_id)||quote(hard_limit)||quote(updated_at) AS row "
+             "FROM fact_tenant_physical_quota_limits UNION ALL "
+             "SELECT 'usage:'||quote(tenant_id)||quote(committed_bytes)||quote(pending_bytes)"
+             "||quote(reconciling_bytes) FROM fact_tenant_physical_quota_usage UNION ALL "
+             "SELECT 'reservation:'||quote(request_id)||quote(tenant_id)||quote(graph_id)"
+             "||quote(inventory_generation)||quote(inventory_digest)||quote(requested_bytes)"
+             "||quote(applied_bytes)||quote(state)||quote(created_at)||quote(updated_at) "
+             "FROM fact_physical_quota_reservations UNION ALL "
+             "SELECT 'charge:'||quote(tenant_id)||quote(graph_id)||quote(charged_bytes)"
+             "||quote(updated_at) FROM fact_physical_quota_graph_charges ORDER BY row)");
+}
+
+static void
+assert_physical_quota_key_counts (sqlite3 *db, const PhysicalQuotaMissingKey *test)
+{
+  g_autofree gchar *primary = g_strdup_printf (
+    "SELECT count(*) FROM pragma_table_info('%s') WHERE pk>0", test->table);
+  g_autofree gchar *foreign = g_strdup_printf (
+    "SELECT count(*) FROM pragma_foreign_key_list('%s')", test->table);
+  g_assert_cmpint (scalar_int64 (db, primary), ==,
+      test->primary_key ? 0 : test->key_columns);
+  g_assert_cmpint (scalar_int64 (db, foreign), ==,
+      test->primary_key ? test->foreign_columns : 0);
+}
+
+static void
+test_fact_physical_quota_missing_key (gconstpointer data)
+{
+  const PhysicalQuotaMissingKey *test = data;
+  for (guint predecessor = 0; predecessor < 2; predecessor++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    wyl_policy_store_open_options_t opts = { .path = path };
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    exec_ok (db, "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,"
+        "storage_path,schema_version,owner_scope,sealed,created_at,updated_at) "
+        "VALUES ('__wr_default','g','file:///g','/g',1,'__wr_default',0,1,1);"
+        "INSERT INTO fact_tenant_physical_quota_limits VALUES ('__wr_default',1000,1);"
+        "INSERT INTO fact_tenant_physical_quota_usage VALUES ('__wr_default',5,7,0);"
+        "INSERT INTO fact_physical_quota_reservations VALUES "
+        "('key-row','__wr_default','g','generation',"
+        "'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',"
+        "7,0,'pending',1,1);"
+        "INSERT INTO fact_physical_quota_graph_charges VALUES ('__wr_default','g',5,1)");
+    /* A canonical, populated set is the positive control. */
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    g_autofree gchar *sql_query = g_strdup_printf (
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='%s'",
+      test->table);
+    g_autofree gchar *canonical = scalar_text (db, sql_query);
+    g_auto (GStrv) parts = g_strsplit (canonical, test->constraint, 2);
+    g_assert_cmpuint (g_strv_length (parts), ==, 2);
+    g_assert_null (strstr (parts[1], test->constraint));
+    g_autofree gchar *malformed = g_strconcat (parts[0], parts[1], NULL);
+    g_autofree gchar *copy_and_drop = g_strdup_printf (
+      "CREATE TEMP TABLE quota_key_copy AS SELECT * FROM %s; DROP TABLE %s;",
+      test->table, test->table);
+    exec_ok (db, copy_and_drop);
+    exec_ok (db, malformed);
+    g_autofree gchar *restore_rows = g_strdup_printf (
+      "INSERT INTO %s SELECT * FROM quota_key_copy; DROP TABLE quota_key_copy;",
+      test->table);
+    exec_ok (db, restore_rows);
+    if (g_strcmp0 (test->table, "fact_physical_quota_reservations") == 0)
+      exec_ok (db, "CREATE INDEX idx_fact_physical_quota_reservations_state "
+          "ON fact_physical_quota_reservations (tenant_id, state)");
+    assert_physical_quota_key_counts (db, test);
+    if (predecessor)
+      install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
+          fixture_pre_windows_immutable_trigger_sql);
+    g_autofree gchar *before_schema = physical_quota_schema_snapshot (db);
+    g_autofree gchar *before_rows = physical_quota_data_snapshot (db);
+    g_test_message ("table=%s missing=%s predecessor=%u", test->table,
+        test->primary_key ? "PK" : "FK", predecessor);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_POLICY);
+    /* A predecessor rejection may fence its handle. Inspect durable rollback
+     * independently, including the provisioning schema it attempted to rebuild. */
+    sqlite3 *verification = NULL;
+    g_assert_cmpint (sqlite3_open_v2 (path, &verification, SQLITE_OPEN_READONLY,
+        NULL), ==, SQLITE_OK);
+    g_autofree gchar *after_schema = physical_quota_schema_snapshot (verification);
+    g_autofree gchar *after_rows = physical_quota_data_snapshot (verification);
+    g_assert_cmpstr (before_schema, ==, after_schema);
+    g_assert_cmpstr (before_rows, ==, after_rows);
+    assert_physical_quota_key_counts (verification, test);
+    g_assert_cmpint (scalar_int64 (verification, "SELECT count(*) FROM sqlite_master "
+        "WHERE name='fact_physical_quota_reservations_legacy_1486'"), ==, 0);
+    g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM sqlite_temp_master "
+        "WHERE name='fact_physical_quota_reservations_legacy_1486'"), ==, 0);
+    g_assert_cmpint (sqlite3_close (verification), ==, SQLITE_OK);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    cleanup_store_path (root, path);
+  }
+}
+
+static void
+test_fact_physical_quota_absent_predecessor (void)
+{
+  for (guint predecessor = 0; predecessor < 2; predecessor++) {
+    g_autofree gchar *root = NULL;
+    g_autofree gchar *path = make_store_path (&root);
+    wyl_policy_store_open_options_t opts = { .path = path };
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    exec_ok (db, "DROP TABLE fact_tenant_physical_quota_limits;"
+        "DROP TABLE fact_tenant_physical_quota_usage;"
+        "DROP TABLE fact_physical_quota_reservations;"
+        "DROP TABLE fact_physical_quota_graph_charges;");
+    if (predecessor)
+      install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
+          fixture_pre_windows_immutable_trigger_sql);
+    for (guint reopen = 0; reopen < 2; reopen++) {
+      g_clear_pointer (&store, wyl_policy_store_close);
+      g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+      db = wyl_policy_store_get_db (store);
+      g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ("
+          "'fact_tenant_physical_quota_limits','fact_tenant_physical_quota_usage',"
+          "'fact_physical_quota_reservations','fact_physical_quota_graph_charges')"),
+          ==, 4);
+      g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    }
+    g_clear_pointer (&store, wyl_policy_store_close);
+    cleanup_store_path (root, path);
+  }
+}
+
 static void
 test_fact_physical_quota_scope_migration (void)
 {
@@ -9498,6 +9674,15 @@ main (int argc, char **argv)
   g_test_add_func
     ("/policy/graph-authority/fact-logical-quota-cancelled-reopen",
       test_fact_logical_quota_cancelled_reopen);
+  for (gsize i = 0; i < G_N_ELEMENTS (physical_quota_missing_keys); i++) {
+    const PhysicalQuotaMissingKey *test = &physical_quota_missing_keys[i];
+    g_autofree gchar *test_path = g_strdup_printf (
+      "/policy/graph-authority/physical-keys/%s/missing-%s", test->table,
+      test->primary_key ? "pk" : "fk");
+    g_test_add_data_func (test_path, test, test_fact_physical_quota_missing_key);
+  }
+  g_test_add_func ("/policy/graph-authority/fact-physical-quota-absent-predecessor",
+      test_fact_physical_quota_absent_predecessor);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-scope-migration",
       test_fact_physical_quota_scope_migration);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-scope-rejects-unknown",
