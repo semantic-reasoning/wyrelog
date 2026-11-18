@@ -103,10 +103,10 @@ build_uri (const gchar *base_url, const gchar *path, const gchar *query)
 }
 
 static gint
-send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar *base_url,
+send_raw_with_headers (SoupSession *session, const gchar *method, const gchar *base_url,
     const gchar *path, const gchar *query, const gchar *access_token,
     const gchar *request_body, guint *out_status, gchar **out_body,
-    gchar **out_request_id, gchar **out_retry_after)
+    gchar **out_request_id, gchar **out_retry_after, gchar **out_mutation)
 {
   /* The output pointers own the previous response.  Clear them before a
    * request so callers may safely reuse one response slot across requests;
@@ -117,6 +117,8 @@ send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar
     g_clear_pointer (out_request_id, g_free);
   if (out_retry_after != NULL)
     g_clear_pointer (out_retry_after, g_free);
+  if (out_mutation != NULL)
+    g_clear_pointer (out_mutation, g_free);
   g_autofree gchar *uri = build_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
@@ -148,11 +150,25 @@ send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar
   if (out_retry_after != NULL)
     *out_retry_after = g_strdup (soup_message_headers_get_one (
               soup_message_get_response_headers (msg), "Retry-After"));
+  if (out_mutation != NULL)
+    *out_mutation = g_strdup (soup_message_headers_get_one (
+              soup_message_get_response_headers (msg), "X-Wyrelog-Mutation"));
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_with_request_id (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    const gchar *access_token, const gchar *request_body, guint *out_status,
+    gchar **out_body, gchar **out_request_id, gchar **out_retry_after)
+{
+  return send_raw_with_headers (session, method, base_url, path, query,
+             access_token, request_body, out_status, out_body, out_request_id,
+             out_retry_after, NULL);
 }
 
 static gint
@@ -5355,6 +5371,90 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   return 0;
 }
 
+/* These responses are flat, compact JSON objects. Match a whole scalar,
+ * including its delimiter, so generation 1 cannot match generation 10.
+ * Quoted-key absence also rejects an unexpected field with a null value. */
+static void
+assert_schema_field (const gchar *body, const gchar *key,
+    const gchar *expected)
+{
+  g_autofree gchar *quoted_key = g_strdup_printf ("\"%s\"", key);
+  const gchar *field = strstr (body, quoted_key);
+  if (expected == NULL) {
+    g_assert_null (field);
+    return;
+  }
+  g_assert_nonnull (field);
+  g_assert_null (strstr (field + strlen (quoted_key), quoted_key));
+  field += strlen (quoted_key);
+  g_assert_cmpint (*field, ==, ':');
+  field++;
+  if (!g_str_has_prefix (field, expected))
+    g_printerr ("schema field %s: expected %s, body=%s\n", key, expected, body);
+  g_assert_true (g_str_has_prefix (field, expected));
+  const gchar delimiter = field[strlen (expected)];
+  g_assert_true (delimiter == ',' || delimiter == '}');
+}
+
+typedef struct
+{
+  const gchar *mutation_class;
+  gboolean queryable;
+  gboolean reconcile;
+  const gchar *degraded_class;
+  guint64 engine_generation;
+} SchemaMutationExpectation;
+
+static void
+identity_schema_post (WylHandle *handle, SoupSession *session,
+    const gchar *base_url, const gchar *token, const gchar *graph,
+    const gchar *query, const gchar *schema,
+    const SchemaMutationExpectation *expected)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *mutation = NULL;
+  g_assert_cmpint (send_raw_with_headers (session, "POST", base_url,
+      "/facts/schema/register", query, token, schema, &status, &body,
+      NULL, NULL, &mutation), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  assert_schema_field (body, "ok", "true");
+  if (expected == NULL) {
+    const gchar *const keys[] = {
+      "committed", "mutation_class", "queryable", "reconcile",
+      "degraded_class", "engine_generation",
+    };
+    g_assert_null (mutation);
+    for (gsize i = 0; i < G_N_ELEMENTS (keys); i++)
+      assert_schema_field (body, keys[i], NULL);
+    return;
+  }
+  g_assert_cmpstr (mutation, ==, expected->mutation_class);
+  g_autofree gchar *class_json = g_strdup_printf ("\"%s\"",
+          expected->mutation_class);
+  assert_schema_field (body, "mutation_class", class_json);
+  assert_schema_field (body, "committed", "true");
+  assert_schema_field (body, "queryable", expected->queryable ? "true" : "false");
+  assert_schema_field (body, "reconcile", expected->reconcile ? "true" : "false");
+  g_autofree gchar *degraded_json = expected->degraded_class != NULL
+      ? g_strdup_printf ("\"%s\"", expected->degraded_class) : NULL;
+  assert_schema_field (body, "degraded_class", degraded_json);
+  g_autofree gchar *generation = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          expected->engine_generation);
+  assert_schema_field (body, "engine_generation", generation);
+  if (expected->degraded_class == NULL) {
+    /* Ready starts a live engine; barrier keeps its existing generation.
+     * Compare with runtime state, independently of the serialized body. */
+    WylFactGraphRuntimeStatus runtime = { 0 };
+    g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+        WYL_TENANT_DEFAULT, graph, &runtime), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (expected->engine_generation, >, 0);
+    g_assert_cmpuint (runtime.engine_generation, ==, expected->engine_generation);
+    g_assert_true (runtime.queryable);
+    wyl_fact_graph_runtime_status_clear (&runtime);
+  }
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -5619,6 +5719,11 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
   const gchar *query_path = "/datalog/__wr_default/live-empty/query";
   const gchar *query = "{\"query\":\"orders(O,A)\",\"output\":\"json\","
       "\"limit\":10}";
+  /* Both ready registrations are the first visible schema in a fresh graph. */
+  const SchemaMutationExpectation ready = {
+    .mutation_class = "committed_ready", .queryable = TRUE,
+    .reconcile = FALSE, .engine_generation = 1,
+  };
   identity_http_post (session, base_url, admin_token, "/graphs/create",
       "tenant=__wr_default&graph=live-hidden-first&" FACT_GUARD, NULL,
       200, "\"created\":true");
@@ -5631,10 +5736,11 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
       WYL_TENANT_DEFAULT, "live-hidden-first", NULL, &held),
       ==, WYRELOG_E_OK);
   g_assert_nonnull (held);
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+  identity_schema_post (handle, session, base_url, admin_token,
+      "live-hidden-first",
       "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
       "relation=hidden&schema_version=1&relation_visible=false&" FACT_GUARD,
-      schema, 200, "\"ok\":true");
+      schema, NULL);
   identity_http_post (session, base_url, admin_token, "/facts/schema/register",
       "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
       "relation=orders&schema_version=1&max_rows=10&" FACT_GUARD,
@@ -5654,10 +5760,10 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
       "/datalog/__wr_default/live-hidden-first/query", guard,
       "{\"query\":\"hidden(O,A)\",\"output\":\"json\"}", 403,
       "datalog_relation_denied");
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+  identity_schema_post (handle, session, base_url, admin_token,
+      "live-hidden-first",
       "tenant=__wr_default&graph=live-hidden-first&namespace=shop&"
-      "relation=orders&schema_version=1&max_rows=10&" FACT_GUARD,
-      schema, 200, "\"mutation_class\":\"committed_ready\"");
+      "relation=orders&schema_version=1&max_rows=10&" FACT_GUARD, schema, &ready);
   identity_http_post (session, base_url, reader_token,
       "/datalog/__wr_default/live-hidden-first/query", guard, query,
       200, "\"row_count\":0");
@@ -5680,17 +5786,16 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
       200, "\"created\":true");
   identity_http_post (session, base_url, reader_token, "/facts/schema/register",
       schema_query, schema, 403, "schema_denied");
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
-      schema_query, schema, 200, "\"mutation_class\":\"committed_ready\"");
+  identity_schema_post (handle, session, base_url, admin_token, "live-empty",
+      schema_query, schema, &ready);
   identity_http_post (session, base_url, reader_token, query_path, guard, query,
       200, "\"row_count\":0");
   identity_http_post (session, base_url, reader_token, query_path, guard,
       "{\"query\":\"unknown(X)\",\"output\":\"json\"}", 403,
       "datalog_relation_denied");
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+  identity_schema_post (handle, session, base_url, admin_token, "live-empty",
       "tenant=__wr_default&graph=live-empty&namespace=shop&relation=hidden&"
-      "schema_version=1&relation_visible=false&" FACT_GUARD, schema,
-      200, "\"ok\":true");
+      "schema_version=1&relation_visible=false&" FACT_GUARD, schema, NULL);
   identity_http_post (session, base_url, reader_token, query_path, guard,
       "{\"query\":\"hidden(O,A)\",\"output\":\"json\"}", 403,
       "datalog_relation_denied");
@@ -5729,8 +5834,14 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
   /* The schema commits before the refresh, so a refused refresh is reported
    * on the success response: a 5xx would invite a retry that can only meet
    * schema_already_registered. */
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
-      late_schema, schema, 200, "\"mutation_class\":\"committed_degraded\"");
+  /* Quiescence refuses refresh before filling status, so no engine is
+   * reported even though the prior runtime engine remains retained. */
+  const SchemaMutationExpectation degraded = {
+    .mutation_class = "committed_degraded", .queryable = FALSE,
+    .reconcile = TRUE, .degraded_class = "none", .engine_generation = 0,
+  };
+  identity_schema_post (handle, session, base_url, admin_token, "live-empty",
+      late_schema, schema, &degraded);
   identity_http_post (session, base_url, admin_token, "/facts/schema/register",
       late_schema, schema, 409, "schema_already_registered");
   gboolean exists = FALSE;
@@ -5778,10 +5889,19 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
       200, "\"row_count\":0");
   g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
       &key), ==, WYRELOG_E_OK);
-  identity_http_post (session, base_url, admin_token, "/facts/schema/register",
+  WylFactGraphRuntimeStatus barrier_before = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+      WYL_TENANT_DEFAULT, "live-empty", &barrier_before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (barrier_before.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (barrier_before.queryable);
+  const SchemaMutationExpectation barrier = {
+    .mutation_class = "committed_barrier", .queryable = TRUE,
+    .reconcile = TRUE, .engine_generation = barrier_before.engine_generation,
+  };
+  identity_schema_post (handle, session, base_url, admin_token, "live-empty",
       "tenant=__wr_default&graph=live-empty&namespace=shop&relation=barrier&"
-      "schema_version=1&" FACT_GUARD, schema, 200,
-      "\"mutation_class\":\"committed_barrier\"");
+      "schema_version=1&" FACT_GUARD, schema, &barrier);
+  wyl_fact_graph_runtime_status_clear (&barrier_before);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
       &key), ==, WYRELOG_E_OK);
   WylPolicyAuthorityMutationResult result;
