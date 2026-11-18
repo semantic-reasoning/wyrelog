@@ -12554,6 +12554,48 @@ migrate_fact_logical_quota_scope (sqlite3 *db)
   return rc;
 }
 
+#define FACT_PHYSICAL_QUOTA_LIMITS_TABLE_SQL() \
+  "CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_limits (" \
+  "  tenant_id TEXT PRIMARY KEY," \
+  "  hard_limit INTEGER NOT NULL CHECK (" \
+  "    typeof(hard_limit) = 'integer' AND hard_limit >= 0)," \
+  "  updated_at INTEGER NOT NULL," \
+  "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)" \
+  ");"
+
+static const gchar fact_tenant_physical_quota_limits_sql[] =
+    FACT_PHYSICAL_QUOTA_LIMITS_TABLE_SQL ();
+
+#define FACT_PHYSICAL_QUOTA_USAGE_TABLE_SQL() \
+  "CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_usage (" \
+  "  tenant_id TEXT PRIMARY KEY," \
+  "  committed_bytes INTEGER NOT NULL CHECK (" \
+  "    typeof(committed_bytes) = 'integer' AND committed_bytes >= 0)," \
+  "  pending_bytes INTEGER NOT NULL CHECK (" \
+  "    typeof(pending_bytes) = 'integer' AND pending_bytes >= 0)," \
+  "  reconciling_bytes INTEGER NOT NULL CHECK (" \
+  "    typeof(reconciling_bytes) = 'integer' AND reconciling_bytes >= 0)," \
+  "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)" \
+  ");"
+
+static const gchar fact_tenant_physical_quota_usage_sql[] =
+    FACT_PHYSICAL_QUOTA_USAGE_TABLE_SQL ();
+
+#define FACT_PHYSICAL_QUOTA_GRAPH_CHARGES_TABLE_SQL() \
+  "CREATE TABLE IF NOT EXISTS fact_physical_quota_graph_charges (" \
+  "  tenant_id TEXT NOT NULL," \
+  "  graph_id TEXT NOT NULL," \
+  "  charged_bytes INTEGER NOT NULL CHECK (" \
+  "    typeof(charged_bytes) = 'integer' AND charged_bytes >= 0)," \
+  "  updated_at INTEGER NOT NULL," \
+  "  PRIMARY KEY (tenant_id, graph_id)," \
+  "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs " \
+  "(tenant_id, graph_id)" \
+  ");"
+
+static const gchar fact_physical_quota_graph_charges_sql[] =
+    FACT_PHYSICAL_QUOTA_GRAPH_CHARGES_TABLE_SQL ();
+
 #define FACT_PHYSICAL_QUOTA_TABLE_SQL(request_column, scope_key) \
   "CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations (" \
   request_column \
@@ -15136,26 +15178,31 @@ validate_graph_authority_schema (sqlite3 *db)
       if (!exists || !matches)
         return WYRELOG_E_POLICY;
     }
-    static const gchar *const physical_objects[] = {
-      "fact_tenant_physical_quota_limits",
-      "fact_tenant_physical_quota_usage",
-      "fact_physical_quota_reservations",
-      "idx_fact_physical_quota_reservations_state",
-      "fact_physical_quota_graph_charges",
+    /* Match the complete canonical definitions: columns and CHECK probes
+     * alone cannot establish the conflict keys or parent relationships. */
+    static const struct
+    {
+      const gchar *type;
+      const gchar *name;
+      const gchar *sql;
+    } physical_objects[] = {
+      {"table", "fact_tenant_physical_quota_limits",
+       fact_tenant_physical_quota_limits_sql},
+      {"table", "fact_tenant_physical_quota_usage",
+       fact_tenant_physical_quota_usage_sql},
+      {"table", "fact_physical_quota_reservations",
+       fact_physical_quota_scoped_sql},
+      {"index", "idx_fact_physical_quota_reservations_state",
+       fact_physical_quota_state_index_sql},
+      {"table", "fact_physical_quota_graph_charges",
+       fact_physical_quota_graph_charges_sql},
     };
     for (gsize i = 0; i < G_N_ELEMENTS (physical_objects); i++) {
-      sqlite3_stmt *stmt = NULL;
-      if (sqlite3_prepare_v2 (db,
-          "SELECT 1 FROM sqlite_master WHERE name=? LIMIT 1;", -1,
-          &stmt, NULL) != SQLITE_OK)
-        return WYRELOG_E_IO;
-      wyrelog_error_t rc = bind_text (stmt, 1, physical_objects[i]);
-      int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
-      sqlite3_finalize (stmt);
+      wyrelog_error_t rc = graph_authority_object_matches (db,
+              physical_objects[i].type, physical_objects[i].name,
+              physical_objects[i].sql);
       if (rc != WYRELOG_E_OK)
         return rc;
-      if (step != SQLITE_ROW)
-        return step == SQLITE_DONE ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     }
     static const gchar *const invalid_rows[] = {
       "SELECT 1 FROM fact_tenant_physical_quota_limits WHERE "
@@ -16519,23 +16566,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
           "PRIMARY KEY (tenant_id, graph_id, request_id),")
       "CREATE INDEX IF NOT EXISTS idx_fact_logical_quota_operations_state "
       "  ON fact_logical_quota_operations (tenant_id, state);"
-      "CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_limits ("
-      "  tenant_id TEXT PRIMARY KEY,"
-      "  hard_limit INTEGER NOT NULL CHECK ("
-      "    typeof(hard_limit) = 'integer' AND hard_limit >= 0),"
-      "  updated_at INTEGER NOT NULL,"
-      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
-      ");"
-      "CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_usage ("
-      "  tenant_id TEXT PRIMARY KEY,"
-      "  committed_bytes INTEGER NOT NULL CHECK ("
-      "    typeof(committed_bytes) = 'integer' AND committed_bytes >= 0),"
-      "  pending_bytes INTEGER NOT NULL CHECK ("
-      "    typeof(pending_bytes) = 'integer' AND pending_bytes >= 0),"
-      "  reconciling_bytes INTEGER NOT NULL CHECK ("
-      "    typeof(reconciling_bytes) = 'integer' AND reconciling_bytes >= 0),"
-      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
-      ");"
+      FACT_PHYSICAL_QUOTA_LIMITS_TABLE_SQL ()
+      FACT_PHYSICAL_QUOTA_USAGE_TABLE_SQL ()
       FACT_PHYSICAL_QUOTA_TABLE_SQL ("request_id TEXT NOT NULL,",
           "PRIMARY KEY (tenant_id, graph_id, request_id),")
       "CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state "
@@ -16545,16 +16577,7 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
        * from outliving its graph; it does not release committed_bytes.
        * Nothing deletes a single graph today, so tenant delete is the only
        * release; a future graph delete must subtract charged_bytes itself. */
-      "CREATE TABLE IF NOT EXISTS fact_physical_quota_graph_charges ("
-      "  tenant_id TEXT NOT NULL,"
-      "  graph_id TEXT NOT NULL,"
-      "  charged_bytes INTEGER NOT NULL CHECK ("
-      "    typeof(charged_bytes) = 'integer' AND charged_bytes >= 0),"
-      "  updated_at INTEGER NOT NULL,"
-      "  PRIMARY KEY (tenant_id, graph_id),"
-      "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs "
-      "(tenant_id, graph_id)"
-      ");"
+      FACT_PHYSICAL_QUOTA_GRAPH_CHARGES_TABLE_SQL ()
       "CREATE TABLE IF NOT EXISTS fact_open_owners ("
       "  owner_incarnation TEXT PRIMARY KEY,"
       "  state TEXT NOT NULL CHECK (state IN ('active', 'retired')),"
