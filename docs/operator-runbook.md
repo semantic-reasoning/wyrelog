@@ -782,7 +782,11 @@ wyctl --daemon-url "$BASE_URL" auth logout \
 The two output files must be different protected paths. Refresh serializes
 with logout through a persistent sidecar lock. It replaces the refresh file
 first; if access-token replacement fails afterward, the prior access token
-remains usable and another refresh can recover the pair. A durability-uncertain
+remains usable and another refresh can recover the pair. When refresh is
+recreating a missing access file and cannot remove an incomplete one it left
+behind, it prints `an incomplete file remains at <path>; delete it, then
+refresh again`: the next refresh would otherwise read that file as a present
+access token. A durability-uncertain
 refresh-file replacement requires a new login rather than an automatic retry.
 On Windows, `MOVEFILE_WRITE_THROUGH` is used for replacement; the filesystem
 may provide weaker parent-directory metadata durability than POSIX `fsync`.
@@ -1218,7 +1222,11 @@ accepts the exchange only when the exact session/jti/credential-generation/
 principal/tenant registry entry is `ACTIVE`; a `PENDING`, `REVOKED`, absent, or
 mismatched entry fails closed. The bearer resolver used here
 (`resolve_bearer_session()`) is the same one that resolves human bearers — there
-is no alternate service-only resolver.
+is no alternate service-only resolver. If writing `--token-output` fails and
+the incomplete file cannot be removed, wyctl exits 1 after
+`unable to publish access token: <path>` with
+`an incomplete file remains at <path>; delete it`; that file may hold part or
+all of the token, so delete it before retrying.
 
 ### Live authorization and revocation
 
@@ -1604,7 +1612,10 @@ either path already exists, it exits 2 and names that path; use distinct,
 unused filenames for another tenant. An output can still appear after this
 check. In that case protected publication refuses to replace it, attempts
 server logout, and reports which file collided. If publication reports
-uncertain durability, inspect both token files before another login.
+uncertain durability, inspect both token files before another login. If a
+token file could not be written and its incomplete copy could not be removed,
+wyctl names that file (`an incomplete file remains: <path>; delete it`); it
+may hold part or all of a token, so delete it before another login.
 
 A granted permission is dormant until it is armed. Before the loop above,
 `wyctl --daemon-url "$BASE_URL" policy explain --user alice --permission
@@ -3110,8 +3121,12 @@ When the daemon succeeded but wyctl could not write the file, wyctl exits 1
 and names the credential. After an issue, revoke it and issue again: the
 secret is gone. After a rotate, the old credential is already revoked, so
 rotate the new one again with `--id <new>` and a fresh `--output` path. If the
-file was written but its directory could not be flushed, wyctl exits 1 and
-says so; inspect the file before relying on it.
+write failed and wyctl could not remove the incomplete file either, it says
+`an incomplete copy could not be removed; delete it, do not use it` instead
+of `the secret is gone`: delete that owner-only file, which may hold part or
+all of the secret, then revoke or rotate as above. If the file was written
+but its directory could not be flushed, wyctl exits 1 and says so; inspect
+the file before relying on it.
 
 #### Exit statuses
 

@@ -38,6 +38,9 @@ typedef enum
   WYCTL_TOKEN_FILE_ALREADY_EXISTS,
   WYCTL_TOKEN_FILE_UNSAFE_PARENT,
   WYCTL_TOKEN_FILE_PERMISSION_DENIED,
+  /* A protected create failed and its cleanup could not remove the new,
+   * owner-only file, which may hold part or all of the token. */
+  WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS,
 } WyctlTokenFileStatus;
 
 /* Open the token file safely and copy its bytes into *out_token.
@@ -98,10 +101,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WyctlTokenFileLock,
  * it, and then disarms itself; points armed together fire independently.
  * WRITE, FILE_SYNC, DIR_SYNC and CLEANUP_UNLINK skip the real call and
  * fail with EIO. FILE_CLOSE and DIR_CLOSE make the real close, so no
- * descriptor leaks, and then report EIO. DIR_SYNC and CLEANUP_UNLINK
- * each cover two call sites (the success path and the cleanup flush, and
- * the write-failure and sync-or-close-failure cleanups), and no single
- * write reaches both sites of either. A fault point can only make a write
+ * descriptor leaks, and then report EIO. DIR_SYNC covers two call sites,
+ * the success path and the cleanup flush, and no single write reaches
+ * both; CLEANUP_UNLINK has one, in the cleanup every failed write, file
+ * sync or file close goes through. A fault point can only make a write
  * fail; it never bypasses a check. */
 typedef enum
 {
