@@ -7336,6 +7336,42 @@ data_credential_fault_gone_err (gboolean rotating, const gchar *path)
              "--tenant acme --id " DC_ID "`, then issue a new one\n", path);
 }
 
+/* The stderr of an issue or rotate whose secret write failed and whose
+ * cleanup could not remove the incomplete file, after the ARMED line. */
+static gchar *
+data_credential_fault_incomplete_err (gboolean rotating, const gchar *path)
+{
+  if (rotating)
+    return g_strdup_printf (DC_FAULT_ARMED "wyctl: credential " DC_ID
+               " replaced " DC_OLD_ID ", which is now revoked, but writing its "
+               "secret to %s failed and an incomplete copy could not be "
+               "removed; delete it, do not use it\n"
+               "wyctl: rotate it again with `wyctl tenant data-credential "
+               "rotate --tenant acme --id " DC_ID " --output <fresh "
+               "path>`\n", path);
+  return g_strdup_printf (DC_FAULT_ARMED "wyctl: credential " DC_ID
+             " was issued, but writing its secret to %s failed and an "
+             "incomplete copy could not be removed; delete it, do not use "
+             "it\n"
+             "wyctl: revoke it with `wyctl tenant data-credential revoke "
+             "--tenant acme --id " DC_ID "`, then issue a new one\n", path);
+}
+
+/* An owner-only file left at PATH: empty, or the complete document. */
+static void
+assert_data_credential_leftover (const gchar *path, gboolean complete)
+{
+  if (complete) {
+    assert_data_credential_document (path);
+    return;
+  }
+  struct stat st;
+  g_assert_cmpint (g_lstat (path, &st), ==, 0);
+  g_assert_true (S_ISREG (st.st_mode));
+  g_assert_cmpint (st.st_mode & 07777, ==, 0600);
+  g_assert_cmpint (st.st_size, ==, 0);
+}
+
 /* #1546: each token-file write fault point, armed from the command line,
  * against issue and rotate. The daemon answer is a success, so every outcome
  * here is the local secret write's. */
@@ -7345,6 +7381,8 @@ test_tenant_data_credential_write_faults (void)
   typedef enum
   {
     DC_FAULT_GONE,
+    DC_FAULT_EMPTY_REMAINS,
+    DC_FAULT_COMPLETE_REMAINS,
     DC_FAULT_UNCERTAIN,
     DC_FAULT_WRITTEN,
   } DcFaultOutcome;
@@ -7356,6 +7394,8 @@ test_tenant_data_credential_write_faults (void)
     {"write", DC_FAULT_GONE},
     {"file-sync", DC_FAULT_GONE},
     {"file-close", DC_FAULT_GONE},
+    {"write,cleanup-unlink", DC_FAULT_EMPTY_REMAINS},
+    {"file-sync,cleanup-unlink", DC_FAULT_COMPLETE_REMAINS},
     {"dir-sync", DC_FAULT_UNCERTAIN},
     {"dir-close", DC_FAULT_WRITTEN},
   };
@@ -7398,6 +7438,15 @@ test_tenant_data_credential_write_faults (void)
           g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
           expected_err = data_credential_fault_gone_err (rotating != 0, path);
           break;
+        case DC_FAULT_EMPTY_REMAINS:
+        case DC_FAULT_COMPLETE_REMAINS:
+          assert_fact_forget_exit (&run, 1);
+          g_assert_cmpstr (run.out, ==, "");
+          assert_data_credential_leftover (path,
+              faults[i].outcome == DC_FAULT_COMPLETE_REMAINS);
+          expected_err = data_credential_fault_incomplete_err (rotating != 0,
+                  path);
+          break;
         case DC_FAULT_UNCERTAIN:
           assert_fact_forget_exit (&run, 1);
           g_assert_cmpstr (run.out, ==, success_line);
@@ -7426,11 +7475,12 @@ test_tenant_data_credential_write_faults (void)
 }
 
 /* A repeated --fault-inject-token-file adds to what is armed, as the comma
- * form does. One write cannot reach both write and dir-sync (a failed write
- * is cleaned up without a directory flush), so the two orders together are
- * the proof: write first shows a later flag does not replace an earlier one,
- * and write second shows the later flag is armed at all. Either way the
- * write fault decides the outcome, and the ARMED line is printed once. */
+ * form does. A failed write's cleanup does flush the directory, but ignores
+ * the result, so a dir-sync fault there changes nothing visible; the two
+ * orders together are the proof: write first shows a later flag does not
+ * replace an earlier one, and write second shows the later flag is armed at
+ * all. Either way the write fault decides the outcome, and the ARMED line is
+ * printed once. */
 static void
 test_tenant_data_credential_repeated_fault_flags (void)
 {
@@ -7458,6 +7508,170 @@ test_tenant_data_credential_repeated_fault_flags (void)
     g_autofree gchar *expected = data_credential_fault_gone_err (FALSE, path);
     g_assert_cmpstr (run.err, ==, expected);
   }
+  remove_dir_recursive (dir);
+}
+
+#define AUTH_FAULT_LOGIN_BODY \
+  "{\"session_token\":\"session\",\"access_token\":\"new-access\"," \
+  "\"refresh_token\":\"new-refresh\",\"username\":\"alice\"," \
+  "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\"," \
+  "\"session_state\":\"active\"}"
+
+/* Runs wyctl ARGS against a one-request fake daemon answering 200 with BODY,
+ * with file-sync and cleanup-unlink armed, so the first protected write
+ * fails and leaves its incomplete file behind. */
+static void
+run_auth_incomplete_case (const gchar *body, const gchar *const *args,
+    FactForgetRun *run)
+{
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener, .cancel = cancel, .response_body = body,
+  };
+  GThread *thread = g_thread_new ("auth-incomplete",
+          policy_check_server_thread, &server);
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, (gpointer) WYL_TEST_WYCTL_PATH);
+  g_ptr_array_add (argv, (gpointer) "--daemon-url");
+  g_ptr_array_add (argv, daemon_url);
+  g_ptr_array_add (argv, (gpointer) "--timeout-ms");
+  g_ptr_array_add (argv, (gpointer) "1000");
+  g_ptr_array_add (argv,
+      (gpointer) "--fault-inject-token-file=file-sync,cleanup-unlink");
+  for (const gchar *const *arg = args; *arg != NULL; arg++)
+    g_ptr_array_add (argv, (gpointer) *arg);
+  g_ptr_array_add (argv, NULL);
+  run_child ((gchar **) argv->pdata, &run->out, &run->err,
+      &run->exit_status);
+  stop_test_server (thread, cancel);
+  run->request = server.request;
+}
+
+static void
+assert_token_leftover (const gchar *path, const gchar *expected)
+{
+  struct stat st;
+  g_assert_cmpint (g_lstat (path, &st), ==, 0);
+  g_assert_true (S_ISREG (st.st_mode));
+  g_assert_cmpint (st.st_mode & 07777, ==, 0600);
+  g_autofree gchar *contents = NULL;
+  g_assert_true (g_file_get_contents (path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, expected);
+}
+
+static void
+assert_tokens_absent (const FactForgetRun *run)
+{
+  static const gchar *const secrets[] = {
+    "new-access", "new-refresh", "access-1", "refresh-1",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (secrets); i++) {
+    g_assert_null (g_strstr_len (run->out, -1, secrets[i]));
+    g_assert_null (g_strstr_len (run->err, -1, secrets[i]));
+  }
+}
+
+/* #1546: login publishes the refresh file first, so the faults land there;
+ * the refresh leftover is named and the access file is never written. */
+static void
+test_login_publication_incomplete_remains (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-login-incomplete-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  const gchar *const args[] = {
+    "auth", "login", "--subject", "alice", "--skip-mfa", "--tenant",
+    "__wr_default", "--token-output", access_path, "--refresh-token-output",
+    refresh_path, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, args, &run);
+  assert_tokens_absent (&run);
+  assert_fact_forget_exit (&run, 1);
+  g_assert_cmpstr (run.out, ==, "");
+  g_autofree gchar *expected = g_strdup_printf (DC_FAULT_ARMED "wyctl: "
+          "token-file publication failed: I/O error and an incomplete file "
+          "remains: %s; delete it; server logout was attempted\n",
+          refresh_path);
+  g_assert_cmpstr (run.err, ==, expected);
+  g_assert_nonnull (run.request);
+  g_assert_nonnull (g_strstr_len (run.request, -1, "POST /auth/login?"));
+  assert_token_leftover (refresh_path, "new-refresh");
+  g_assert_false (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  remove_dir_recursive (dir);
+}
+
+/* #1546: auth service-token names the incomplete access-token file. */
+static void
+test_service_token_output_incomplete_remains (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-st-incomplete-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *credential_path = g_build_filename (dir,
+          "credential.json", NULL);
+  g_autofree gchar *output_path = g_build_filename (dir, "access.token",
+          NULL);
+  g_assert_true (g_file_set_contents (credential_path,
+      "{\"version\":1,\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_secret\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      "\n", -1, NULL));
+  g_assert_cmpint (g_chmod (credential_path, 0600), ==, 0);
+  const gchar *const args[] = {
+    "auth", "service-token", "--credential-file", credential_path,
+    "--token-output", output_path, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_auth_incomplete_case ("{\"access_token\":\"access-1\"}", args, &run);
+  assert_tokens_absent (&run);
+  g_assert_null (g_strstr_len (run.err, -1, "aaaaaaaaaaaaaaaa"));
+  assert_fact_forget_exit (&run, 1);
+  g_assert_cmpstr (run.out, ==, "");
+  g_autofree gchar *expected = g_strdup_printf (DC_FAULT_ARMED "wyctl: "
+          "unable to publish access token: %s\n"
+          "wyctl: an incomplete file remains at %s; delete it\n",
+          output_path, output_path);
+  g_assert_cmpstr (run.err, ==, expected);
+  g_assert_nonnull (run.request);
+  assert_token_leftover (output_path, "access-1");
+  remove_dir_recursive (dir);
+}
+
+/* #1546: refresh recreating a missing access file. The refresh file is
+ * replaced first (not a protected create, so the faults pass it by), then the
+ * access create fails and leaves its file: the next refresh would read that
+ * file as present, so wyctl says to delete it first. */
+static void
+test_refresh_access_incomplete_remains (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-refresh-incomplete-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  g_assert_true (g_file_set_contents (refresh_path, "refresh-1", -1, NULL));
+  g_assert_cmpint (g_chmod (refresh_path, 0600), ==, 0);
+  const gchar *const args[] = {
+    "auth", "refresh", "--tenant", "__wr_default", "--token-file",
+    access_path, "--refresh-token-file", refresh_path, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, args, &run);
+  assert_tokens_absent (&run);
+  assert_fact_forget_exit (&run, 1);
+  g_assert_cmpstr (run.out, ==, "");
+  g_autofree gchar *expected = g_strdup_printf (DC_FAULT_ARMED "wyctl: "
+          "refresh token was saved; access-file creation failed and an "
+          "incomplete file remains at %s; delete it, then refresh again\n",
+          access_path);
+  g_assert_cmpstr (run.err, ==, expected);
+  g_assert_nonnull (run.request);
+  assert_token_leftover (refresh_path, "new-refresh");
+  assert_token_leftover (access_path, "new-access");
   remove_dir_recursive (dir);
 }
 #endif
@@ -7931,6 +8145,12 @@ main (int argc, char **argv)
       test_tenant_data_credential_write_faults);
   g_test_add_func ("/wyctl/tenant-data-credential-repeated-fault-flags",
       test_tenant_data_credential_repeated_fault_flags);
+  g_test_add_func ("/wyctl/login-publication-incomplete-remains",
+      test_login_publication_incomplete_remains);
+  g_test_add_func ("/wyctl/service-token-output-incomplete-remains",
+      test_service_token_output_incomplete_remains);
+  g_test_add_func ("/wyctl/refresh-access-incomplete-remains",
+      test_refresh_access_incomplete_remains);
 #endif
   g_test_add_func ("/wyctl/fault-inject-token-file-flag",
       test_fault_inject_token_file_flag);

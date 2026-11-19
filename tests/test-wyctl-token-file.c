@@ -303,19 +303,19 @@ test_status_message_table_has_no_token_placeholder (void)
    * placeholder may exist for the token bytes themselves; that
    * would risk leaking credentials into stderr. */
   for (int s = WYCTL_TOKEN_FILE_OK;
-      s <= WYCTL_TOKEN_FILE_PERMISSION_DENIED; s++) {
+      s <= WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS; s++) {
     const gchar *msg = wyctl_token_file_status_message (
       (WyctlTokenFileStatus) s);
-    if (msg == NULL)
+    if (s == WYCTL_TOKEN_FILE_OK)
       continue;
+    g_assert_nonnull (msg);
     int placeholders = 0;
     for (const gchar * p = msg; *p != '\0'; p++) {
       if (p[0] == '%' && p[1] == 's')
         placeholders++;
     }
     g_assert_cmpint (placeholders, <=, 1);
-    /* Sanity check: ensure no leftover test-token-like string baked
-     * into the table. */
+    /* No test-token-like string is baked into the table. */
     g_assert_null (strstr (msg, "token-1"));
   }
 }
@@ -732,9 +732,8 @@ test_write_fault_is_io (void)
     fault_fixture_clear (&fixture);
   }
 
-  /* A failed write is cleaned up without the directory flush the sync and
-   * close failure paths perform, so the dir-sync point is not reached here
-   * and stays armed. */
+  /* A failed write's cleanup flushes the directory, as the sync and close
+   * failure paths do; a fault there is ignored, so the status stays IO. */
   FaultFixture fixture;
   fault_fixture_init (&fixture);
   wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_WRITE
@@ -742,8 +741,7 @@ test_write_fault_is_io (void)
   g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
       "secret-1", 8), ==, WYCTL_TOKEN_FILE_IO);
   g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
-  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==,
-      WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
   fault_fixture_clear (&fixture);
 }
 
@@ -796,23 +794,63 @@ test_cleanup_unlink_not_reached_on_success (void)
   fault_fixture_clear (&fixture);
 }
 
-/* The status of a failed cleanup unlink changes in a later commit; only the
- * leftover file and the consumed points are pinned here. */
+/* A failed write, file sync or file close whose cleanup cannot remove the
+ * new file reports INCOMPLETE_REMAINS and leaves that file behind: empty
+ * after a failed write, complete after a failed sync or close. */
 static void
 test_cleanup_unlink_fault_fires_independently (void)
 {
-  static const guint faults[] = {
-    WYCTL_TOKEN_FILE_FAULT_FILE_SYNC,
-    WYCTL_TOKEN_FILE_FAULT_WRITE,
+  static const struct
+  {
+    guint fault;
+    const gchar *left;
+  } faults[] = {
+    { WYCTL_TOKEN_FILE_FAULT_WRITE, "" },
+    { WYCTL_TOKEN_FILE_FAULT_FILE_SYNC, "secret-1" },
+    { WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE, "secret-1" },
   };
   for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
     FaultFixture fixture;
     fault_fixture_init (&fixture);
-    wyctl_token_file_arm_faults_once (faults[i]
+    wyctl_token_file_arm_faults_once (faults[i].fault
         | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
-    (void) wyctl_token_file_write_protected (fixture.path, "secret-1", 8);
-    g_assert_true (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+    gint fds_before = count_open_fds ();
+    g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+        "secret-1", 8), ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+    g_assert_cmpint (count_open_fds (), ==, fds_before);
     g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    assert_protected_file (fixture.path, faults[i].left);
+    fault_fixture_clear (&fixture);
+  }
+}
+
+/* The pair writer passes INCOMPLETE_REMAINS through with the failing path.
+ * Skip 0 aims the faults at the refresh write, so nothing else is written;
+ * skip 1 aims them at the access write, and the refresh file is rolled
+ * back while the access leftover stays. */
+static void
+test_pair_incomplete_remains (void)
+{
+  for (guint skip = 0; skip < 2; skip++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    wyctl_token_file_fault_skip_protected_writes (skip);
+    wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_FILE_SYNC
+        | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+    const gchar *failed_path = NULL;
+    g_assert_cmpint (wyctl_token_file_write_pair_protected (fixture.path,
+        "refresh-1", 9, fixture.second_path, "access-1", 8, &failed_path),
+        ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    if (skip == 0) {
+      g_assert_true (failed_path == fixture.path);
+      assert_protected_file (fixture.path, "refresh-1");
+      g_assert_false (g_file_test (fixture.second_path, G_FILE_TEST_EXISTS));
+    } else {
+      g_assert_true (failed_path == fixture.second_path);
+      g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+      assert_protected_file (fixture.second_path, "access-1");
+    }
     fault_fixture_clear (&fixture);
   }
 }
@@ -959,6 +997,8 @@ main (int argc, char **argv)
       test_cleanup_unlink_not_reached_on_success);
   g_test_add_func ("/wyctl/token-file/cleanup-unlink-fault-fires-independently",
       test_cleanup_unlink_fault_fires_independently);
+  g_test_add_func ("/wyctl/token-file/pair-incomplete-remains",
+      test_pair_incomplete_remains);
   g_test_add_func ("/wyctl/token-file/dir-close-fault-keeps-file",
       test_dir_close_fault_keeps_file);
   g_test_add_func ("/wyctl/token-file/pair-dir-close-fault-is-ok",

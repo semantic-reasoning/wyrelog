@@ -504,6 +504,26 @@ wyctl_token_file_check_available (const gchar *path)
 #endif
 }
 
+#ifndef G_OS_WIN32
+/* Remove a protected file this process just created and failed to finish.
+ * IO when it is gone; INCOMPLETE_REMAINS when it is still there. */
+static WyctlTokenFileStatus
+wyctl_token_file_discard_new (int dirfd, const gchar *basename)
+{
+  int result = WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
+  int saved_errno = result == 0 ? 0 : errno;
+  /* ENOENT means the name is already gone, which is all the cleanup wants:
+   * no file of ours remains under it for anyone to mistake for a token. */
+  if (result != 0 && saved_errno != ENOENT)
+    return WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS;
+  /* The removal is flushed on a best-effort basis: the file's creation was
+   * never flushed either, so a failure here cannot resurrect a complete
+   * token, and the status stays IO. */
+  (void) WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd);
+  return WYCTL_TOKEN_FILE_IO;
+}
+#endif
+
 WyctlTokenFileStatus
 wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     gsize token_len)
@@ -591,9 +611,10 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
       continue;
     if (n <= 0) {
       close (fd);
-      (void) WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
+      WyctlTokenFileStatus status = wyctl_token_file_discard_new (dirfd,
+              basename);
       close (dirfd);
-      return WYCTL_TOKEN_FILE_IO;
+      return status;
     }
     written += (gsize) n;
   }
@@ -602,14 +623,14 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
    * report a deferred write error (on NFS, for example). */
   gboolean close_ok = WYCTL_TOKEN_FILE_CLOSE_FILE (fd) == 0;
   if (!sync_ok || !close_ok) {
-    (void) WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
-    (void) WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd);
+    WyctlTokenFileStatus status = wyctl_token_file_discard_new (dirfd,
+            basename);
     close (dirfd);
-    return WYCTL_TOKEN_FILE_IO;
+    return status;
   }
   gboolean parent_sync_ok = WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd) == 0;
-  /* The directory fd is read-only and, once fsync succeeded, the new entry is
-   * already flushed, so a failed close cannot lose anything: discard it. */
+  /* Discard the close result: the fd is read-only, so close cannot lose
+   * data; durability is decided by the fsync above alone. */
   (void) WYCTL_TOKEN_FILE_CLOSE_DIR (dirfd);
   if (!parent_sync_ok)
     return WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN;
@@ -1086,6 +1107,9 @@ wyctl_token_file_write_pair_protected (const gchar *refresh_path,
   }
   status = wyctl_token_file_write_protected
         (access_path, access_token, access_token_len);
+  /* When the access write leaves an incomplete file (INCOMPLETE_REMAINS)
+   * and the refresh rollback below also fails, DURABILITY_UNCERTAIN wins
+   * and masks the access leftover; failed_path still names it. */
   if (status != WYCTL_TOKEN_FILE_OK && failed_path != NULL)
     *failed_path = access_path;
   if (status != WYCTL_TOKEN_FILE_OK
@@ -1135,6 +1159,8 @@ wyctl_token_file_status_message (WyctlTokenFileStatus status)
       return "wyctl: unsafe token output parent: %s";
     case WYCTL_TOKEN_FILE_PERMISSION_DENIED:
       return "wyctl: permission denied for token output: %s";
+    case WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS:
+      return "wyctl: token output failed and an incomplete file remains: %s";
   }
   return NULL;
 }

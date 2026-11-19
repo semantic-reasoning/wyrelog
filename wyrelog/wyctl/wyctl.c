@@ -1640,6 +1640,9 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   if (output_status != WYCTL_TOKEN_FILE_OK) {
     g_printerr ("wyctl: unable to publish access token: %s\n",
         opts.token_output);
+    if (output_status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS)
+      g_printerr ("wyctl: an incomplete file remains at %s; delete it\n",
+          opts.token_output);
     return 1;
   }
   return 0;
@@ -6034,6 +6037,11 @@ emit_login_token_publication_error (WyctlTokenFileStatus status,
       g_printerr ("wyctl: token-file publication failed: I/O error: %s; "
           "server logout was attempted\n", path);
       return;
+    case WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS:
+      g_printerr ("wyctl: token-file publication failed: I/O error and an "
+          "incomplete file remains: %s; delete it; server logout was "
+          "attempted\n", path);
+      return;
     default:
       g_printerr ("wyctl: token-file publication failed: invalid output: "
           "%s; server logout was attempted\n", path);
@@ -6263,7 +6271,13 @@ run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
           new_access, strlen (new_access));
   sodium_memzero (new_access, strlen (new_access));
   if (status != WYCTL_TOKEN_FILE_OK) {
-    if (access_missing)
+    /* A leftover would be read as a present access file next time, so it
+     * must be deleted before another refresh can recover the pair. */
+    if (access_missing && status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS)
+      g_printerr ("wyctl: refresh token was saved; access-file creation "
+          "failed and an incomplete file remains at %s; delete it, then "
+          "refresh again\n", opts.access_token_file);
+    else if (access_missing)
       g_printerr ("wyctl: refresh token was saved; access-file creation "
           "failed, so another refresh can recover the missing access file\n");
     else
@@ -8643,23 +8657,36 @@ data_credential_finish_secret (WylClient *client, const gchar *action,
   WyctlTokenFileStatus status = data_credential_write_secret (output, result);
   if (status != WYCTL_TOKEN_FILE_OK
       && status != WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN) {
-    if (rotating) {
+    /* An incomplete copy is not "gone": part or all of the secret sits in a
+     * file that could not be removed, so it gets its own first line. The
+     * credential still needs the same revoke or rotate. */
+    if (status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS && rotating)
+      g_printerr ("wyctl: credential %s replaced %s, which is now revoked, "
+          "but writing its secret to %s failed and an incomplete copy could "
+          "not be removed; delete it, do not use it\n",
+          credential->credential_id, old_id, output);
+    else if (status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS)
+      g_printerr ("wyctl: credential %s was issued, but writing its secret "
+          "to %s failed and an incomplete copy could not be removed; delete "
+          "it, do not use it\n", credential->credential_id, output);
+    else if (rotating)
       g_printerr ("wyctl: credential %s replaced %s, which is now revoked, "
           "but its secret could not be written to %s: %s; the secret is "
           "gone\n", credential->credential_id, old_id, output,
           data_credential_write_reason (status));
-      g_printerr ("wyctl: rotate it again with `wyctl tenant data-credential "
-          "rotate --tenant %s --id %s --output <fresh path>`\n", tenant,
-          credential->credential_id);
-    } else {
+    else
       g_printerr ("wyctl: credential %s was issued, but its secret could not "
           "be written to %s: %s; the secret is gone\n",
           credential->credential_id, output,
           data_credential_write_reason (status));
+    if (rotating)
+      g_printerr ("wyctl: rotate it again with `wyctl tenant data-credential "
+          "rotate --tenant %s --id %s --output <fresh path>`\n", tenant,
+          credential->credential_id);
+    else
       g_printerr ("wyctl: revoke it with `wyctl tenant data-credential revoke "
           "--tenant %s --id %s`, then issue a new one\n", tenant,
           credential->credential_id);
-    }
     return 1;
   }
 
