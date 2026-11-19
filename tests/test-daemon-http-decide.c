@@ -1145,17 +1145,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 49;
+  const guint expected_exact = 44;
+#elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 48;
   const guint expected_exact = 43;
-#elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 47;
-  const guint expected_exact = 42;
 #elif defined(WYL_HAS_AUDIT)
+  const guint expected_total = 45;
+  const guint expected_exact = 40;
+#else
   const guint expected_total = 44;
   const guint expected_exact = 39;
-#else
-  const guint expected_total = 43;
-  const guint expected_exact = 38;
 #endif
   if (total != expected_total || prefixes != 5 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -1231,9 +1231,15 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     if (rc != 0)
       return rc;
   }
-  const gchar *ownership_paths[] = { "/tenants/show", "/tenants/transfer-owner" };
+  const gchar *ownership_paths[] = { "/tenants/show", "/tenants/transfer-owner",
+                                     "/facts/quota/physical/recompute" };
   for (gsize i = 0; i < G_N_ELEMENTS (ownership_paths); i++) {
-    gint rc = check_exact_route_shape (server, base_url, ownership_paths[i], 405, 33000 + (gint) i * 13);
+    guint canonical_status = 405;
+#ifndef WYL_HAS_FACT_STORE
+    if (g_strcmp0 (ownership_paths[i], "/facts/quota/physical/recompute") == 0)
+      canonical_status = 503;
+#endif
+    gint rc = check_exact_route_shape (server, base_url, ownership_paths[i], canonical_status, 33000 + (gint) i * 13);
     if (rc != 0)
       return rc;
   }
@@ -20131,12 +20137,15 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
   {18, "rule_pack_register", 0, 500, "rule_pack_register_failed"},
   {19, "data_credential", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
    500, "data_credential_failed"},
+  {20, "fact_physical_quota_recompute", 0, 500,
+   "fact_physical_quota_recompute_failed"},
 };
 
 static wyrelog_error_t
 policy_write_owner_fault_prepare_authority (ServiceDenialEnv *env)
 {
   static const gchar *const permissions[] = {
+    "wr.sys.admin",
     "wr.tenant.manage",
     "wr.graph.manage",
     "wr.schema.manage",
@@ -20512,6 +20521,10 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       body = owned_body;
       break;
     }
+    case 20:
+      path = "/facts/quota/physical/recompute";
+      query = g_strdup_printf ("tenant=%s&graph=owner-fault&%s", WYL_TENANT_DEFAULT, guard);
+      break;
     default:
       return 8;
   }
@@ -20553,7 +20566,7 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
 static gint
 check_policy_write_all_owner_faults (void)
 {
-  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 20);
+  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 21);
   G_STATIC_ASSERT (POLICY_WRITE_OWNER_FAULT_MODE_COUNT == 2);
   for (guint mode = 0; mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT; mode++) {
     for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {
@@ -20613,6 +20626,12 @@ check_policy_write_all_owner_faults (void)
             (env.http.server);
       gboolean acquire_mode =
           mode == POLICY_WRITE_OWNER_FAULT_ACQUIRE_AFTER_STORE;
+      guint recompute_status = 503;
+      const gchar *recompute_code = "fact_physical_quota_recompute_unavailable";
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+      recompute_status = 404;
+      recompute_code = "fact_physical_quota_recompute_failed";
+#endif
       WylDaemonPolicyWriteFinalizeSnapshot snapshot = { 0 };
       gboolean snapshot_ok =
           wyl_daemon_http_policy_write_finalize_snapshot_for_test
@@ -20620,10 +20639,12 @@ check_policy_write_all_owner_faults (void)
           && policy_write_fault_snapshot_is_clean (&snapshot,
               acquire_mode ? test_case->acquire_status :
               test_case->owner <= 2 ? 0 :
-              test_case->owner == 17 ? 500 : 200,
+              test_case->owner == 17 ? 500 :
+              test_case->owner == 20 ? recompute_status : 200,
               acquire_mode ? test_case->acquire_code :
               test_case->owner <= 2 ? "non_http" :
-              test_case->owner == 17 ? "restore_operation_failed" : "success",
+              test_case->owner == 17 ? "restore_operation_failed" :
+              test_case->owner == 20 ? recompute_code : "success",
               test_case->owner,
               test_case->name, acquire_mode ? 0 : test_case->resources,
               acquire_mode ? 0 : test_case->owner == 17 ? 2 : 1,

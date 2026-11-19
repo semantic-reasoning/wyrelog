@@ -48,6 +48,7 @@ class RouteSpec:
 
 
 ROUTES = (
+    RouteSpec("/facts/quota/physical/recompute", "facts_physical_quota_recompute_handler"),
     RouteSpec("/healthz", "healthz_handler", "NULL"),
     RouteSpec("/readyz", "readyz_handler"),
     RouteSpec("/facts/status", "facts_status_handler"),
@@ -119,6 +120,9 @@ ISSUE_719_EXACT_PATHS = {
     "/service-credential-operations/recover",
     "/auth/service-token",
 }
+ISSUE_1512_EXACT_PATHS = {
+    "/facts/quota/physical/recompute",
+}
 PREEXISTING_EXACT_PATHS = {
     "/service-management-authority/arm",
 }
@@ -172,7 +176,7 @@ PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
     if spec.path not in PREFIX_PATHS | ISSUE_719_EXACT_PATHS
     | PREEXISTING_EXACT_PATHS | ISSUE_720_EXACT_PATHS | ISSUE_1335_EXACT_PATHS
-    | ISSUE_1213_EXACT_PATHS | ISSUE_1474_EXACT_PATHS
+    | ISSUE_1213_EXACT_PATHS | ISSUE_1474_EXACT_PATHS | ISSUE_1512_EXACT_PATHS
 }
 EXPECTED_BY_PATH = {spec.path: spec for spec in ROUTES}
 

@@ -9,6 +9,8 @@ import sys
 
 
 REQUIRED = {
+    "wyl_client_fact_physical_quota_recompute",
+    "wyl_client_fact_physical_quota_recompute_result_clear",
     "wyl_client_sensitive_text_clear",
     "wyl_client_service_credential_clear",
     "wyl_client_service_credential_issue",

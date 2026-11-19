@@ -116,12 +116,12 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
              fact_root, tenant_id, graph_id, writable, NULL, NULL, out_store);
 }
 
-wyrelog_error_t
-wyl_fact_store_open_provisioned_graph_observed
+static wyrelog_error_t
+open_provisioned_graph_observed
   (wyl_policy_store_t *policy_store, const gchar *fact_root,
     const gchar *tenant_id, const gchar *graph_id, gboolean writable,
     WylFactResourceRecorder *resource_recorder,
-    gboolean *out_quota_rejected,
+    gboolean *out_quota_rejected, gboolean allow_recovery,
     wyl_fact_store_t **out_store)
 {
   if (out_store != NULL)
@@ -140,7 +140,7 @@ wyl_fact_store_open_provisioned_graph_observed
 
   /* A provisioning graph is finished (or degraded) by the idempotent
    * coordinator, then re-read as active. */
-  if (authority->lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING) {
+  if (allow_recovery && authority->lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING) {
     WylPolicyGraphProvisioningRecord *record = NULL;
     rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, &record);
     if (rc == WYRELOG_E_OK)
@@ -210,4 +210,50 @@ wyl_fact_store_open_provisioned_graph_observed
   wyl_policy_graph_provisioning_record_free (record);
   wyl_policy_graph_authority_record_free (authority);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_open_provisioned_graph_observed
+  (wyl_policy_store_t *policy_store, const gchar *fact_root,
+    const gchar *tenant_id, const gchar *graph_id, gboolean writable,
+    WylFactResourceRecorder *resource_recorder, gboolean *out_quota_rejected,
+    wyl_fact_store_t **out_store)
+{
+  return open_provisioned_graph_observed (policy_store, fact_root, tenant_id,
+             graph_id, writable, resource_recorder, out_quota_rejected, TRUE, out_store);
+}
+
+wyrelog_error_t
+wyl_fact_store_recompute_graph_physical_quota (wyl_policy_store_t *policy,
+    const gchar *fact_root, const gchar *tenant, const gchar *graph,
+    WylFactResourceRecorder *recorder, const gchar *actor, const gchar *request_id,
+    WylPolicyFactPhysicalQuotaRecomputeResult *out_result)
+{
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  *out_result = (WylPolicyFactPhysicalQuotaRecomputeResult) { 0 };
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  (void) policy; (void) fact_root; (void) tenant; (void) graph;
+  (void) recorder; (void) actor; (void) request_id;
+  return WYRELOG_E_POLICY;
+#else
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  wyrelog_error_t rc = wyl_policy_store_prepare_fact_physical_quota_recompute
+        (policy, tenant, graph, &authority);
+  wyl_fact_store_t *store = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = open_provisioned_graph_observed (policy, fact_root, tenant, graph,
+            TRUE, recorder, NULL, FALSE, &store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_recompute_physical_quota (store, policy, authority,
+            actor, request_id, out_result);
+  if (store != NULL) {
+    wyrelog_error_t close_rc = wyl_fact_store_close_final (store);
+    if (close_rc != WYRELOG_E_OK) {
+      if (rc == WYRELOG_E_OK) rc = close_rc;
+    }
+  }
+  wyl_policy_graph_authority_record_free (authority);
+  return rc;
+#endif
 }

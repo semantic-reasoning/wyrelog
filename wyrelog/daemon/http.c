@@ -780,7 +780,8 @@ typedef enum
   X (FACT_QUOTA_CONFIGURE, fact_quota_configure) \
   X (FACT_RESTORE, fact_restore) \
   X (RULE_PACK_REGISTER, rule_pack_register) \
-  X (DATA_CREDENTIAL, data_credential)
+  X (DATA_CREDENTIAL, data_credential) \
+  X (FACT_PHYSICAL_QUOTA_RECOMPUTE, fact_physical_quota_recompute)
 
 typedef enum
 {
@@ -8156,6 +8157,102 @@ facts_quota_operation_status_handler (SoupServer *server,
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
       body->str, body->len);
+#endif
+}
+
+static void
+facts_physical_quota_recompute_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) path;
+#ifndef WYL_HAS_FACT_STORE
+  (void) server; (void) query; (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+#else
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  const gchar *tenant = query == NULL ? NULL : g_hash_table_lookup (query, "tenant");
+  const gchar *graph = query == NULL ? NULL : g_hash_table_lookup (query, "graph");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) || graph == NULL || *graph == '\0') {
+    set_json_error (msg, 400, "invalid_fact_quota_request");
+    return;
+  }
+  const gchar *allowed[] = { "tenant", "graph", "session_token", "guard_timestamp",
+                             "guard_loc_class", "guard_risk", NULL };
+  GHashTableIter iter;
+  gpointer key;
+  g_hash_table_iter_init (&iter, query);
+  while (g_hash_table_iter_next (&iter, &key, NULL)) {
+    gboolean found = FALSE;
+    for (guint i = 0; allowed[i] != NULL; i++)
+      found |= g_strcmp0 (key, allowed[i]) == 0;
+    if (!found) {
+      set_json_error (msg, 400, "invalid_fact_quota_request");
+      return;
+    }
+  }
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
+      "wr.sys.admin", tenant, "fact_quota_auth_required", "invalid_fact_quota_auth",
+      "fact_quota_denied", "fact_quota_auth_failed", &auth, &actor,
+      NULL, NULL, NULL, NULL))
+    return;
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+          WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PHYSICAL_QUOTA_RECOMPUTE, &write);
+  WylFactRootWriterLeaseBorrowScope root_scope = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_fact_root_writer_lease_borrow_scope_begin (ctx->handle, &root_scope);
+  WylPolicyFactPhysicalQuotaRecomputeResult result = { 0 };
+  if (rc == WYRELOG_E_OK) {
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+    rc = wyl_fact_store_recompute_graph_physical_quota (write.store,
+            ctx->fact_root, auth.tenant, graph,
+            wyl_handle_fact_resource_recorder (ctx->handle), actor,
+            ensure_request_id_header (msg), &result);
+#else
+    rc = WYRELOG_E_POLICY;
+#endif
+  }
+  wyl_handle_fact_root_writer_lease_borrow_scope_end (&root_scope);
+  guint status = rc == WYRELOG_E_OK ? 200 : rc == WYRELOG_E_BUSY ? 409 :
+      rc == WYRELOG_E_NOT_FOUND ? 404 : rc == WYRELOG_E_INVALID ? 400 : 500;
+  const gchar *code = rc == WYRELOG_E_OK ? "success" : rc == WYRELOG_E_BUSY ?
+      "fact_physical_quota_recompute_busy" : "fact_physical_quota_recompute_failed";
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  if (rc == WYRELOG_E_POLICY) {
+    status = 503;
+    code = "fact_physical_quota_recompute_unavailable";
+  }
+#endif
+  if (wyl_daemon_policy_write_finalize_for_response (msg, status, code) != WYRELOG_E_OK) {
+    status = 500;
+    code = "policy_write_cleanup_failed";
+  }
+  if (!result.committed && !result.outcome_unknown) {
+    set_json_error (msg, status, code);
+    return;
+  }
+  g_autoptr (GString) scope_json = g_string_new (NULL);
+  append_json_string (scope_json, auth.tenant);
+  g_string_append (scope_json, ",\"graph_id\":");
+  append_json_string (scope_json, graph);
+  g_autofree gchar *body = g_strdup_printf (
+    "{\"%s\":\"%s\",\"tenant_id\":%s,"
+    "\"committed\":%s,\"outcome_unknown\":%s,"
+    "\"old_charged_bytes\":%" G_GUINT64_FORMAT ",\"new_charged_bytes\":%" G_GUINT64_FORMAT
+    ",\"old_committed_bytes\":%" G_GUINT64_FORMAT ",\"new_committed_bytes\":%" G_GUINT64_FORMAT "}",
+    status == 200 ? "status" : "error", code, scope_json->str, result.committed ? "true" : "false",
+    result.outcome_unknown ? "true" : "false", result.old_charged_bytes,
+    result.new_charged_bytes, result.old_committed_bytes, result.new_committed_bytes);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, status, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body, strlen (body));
 #endif
 }
 
@@ -22333,6 +22430,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   wyl_daemon_http_add_exact_handler (server, "/facts/verify",
       facts_verify_handler, ctx, NULL);
 #endif
+  wyl_daemon_http_add_exact_handler (server, "/facts/quota/physical/recompute",
+      facts_physical_quota_recompute_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/quota",
       facts_quota_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/quota/operation-status",

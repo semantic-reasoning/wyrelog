@@ -454,3 +454,11 @@ daemon or of a `wyctl` process, is an accepted out-of-scope threat for v1.
 > described under #363 above and should be reconciled in a separate change. This
 > threat model describes the implemented in-memory behavior, which is
 > authoritative.
+
+
+Physical quota recompute requires guarded `wr.sys.admin` authority in the
+effective tenant. The graph identity and materialization are revalidated in
+the accounting transaction. Caller byte counts or historical inventory
+evidence cannot lower a charge: the operation captures fresh evidence under
+the exact exclusive namespace lease, refuses unresolved reservations, and
+atomically persists its scoped old/new audit event with the ledger update.

@@ -5955,6 +5955,8 @@ wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
   if (namespace_ == NULL || lease == NULL || out_evidence == NULL
       || namespace_->tenant_id == NULL || namespace_->graph_id == NULL)
     return WYRELOG_E_INVALID;
+  if (lease->namespace_ != namespace_ || !lease->exclusive)
+    return WYRELOG_E_POLICY;
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = lease_revalidate_unlocked (lease);

@@ -61,6 +61,7 @@
     "tests/test-fact-graph-seal.c": 1,
     "tests/test-fact-offline-backup-source.c": 1,
     "tests/test-fact-offline-restore-stage-replay.c": 1,
+    "tests/test-fact-store-provisioned.c": 2,
     "tests/test-human-user-store.c": 7,
     "tests/test-policy-graph-authority.c": 12,
     "tests/test-policy-service-namespace.c": 5,

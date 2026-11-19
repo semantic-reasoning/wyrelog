@@ -155,6 +155,16 @@ typedef struct
 {
   gchar *tenant;
   gchar *graph;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactPhysicalRecomputeOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
   gchar *batch_id;
   gchar *operation_id;
   gchar *payload_digest;
@@ -521,6 +531,19 @@ wyctl_fact_quota_options_clear (WyctlFactQuotaOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactQuotaOptions,
     wyctl_fact_quota_options_clear);
+
+static void
+wyctl_fact_physical_recompute_options_clear (WyctlFactPhysicalRecomputeOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactPhysicalRecomputeOptions,
+    wyctl_fact_physical_recompute_options_clear);
 
 static void
 wyctl_fact_quota_operation_options_clear
@@ -4183,6 +4206,76 @@ run_fact_quota_operation_status (const WyctlOptions *global_opts, gint argc,
 }
 
 static int
+run_fact_physical_recompute (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlFactPhysicalRecomputeOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file, "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING, &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class, "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg, "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new (
+    "- wyrelog fact quota physical recompute");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected argument: %s\n", argv[1]); return 2;
+  }
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+          global_opts->settings, "default-graph");
+  if (tenant == NULL || *tenant == '\0' || graph == NULL || *graph == '\0') {
+    g_printerr ("wyctl: physical recompute requires --tenant and --graph\n"); return 2;
+  }
+  gint64 timestamp = 0, risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &timestamp, &risk)) return 2;
+  g_autofree gchar *url = wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout = wyctl_resolve_uint_option_as_string (
+    global_opts->timeout_ms_arg, global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *token = wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+  g_autoptr (WylClient) client = NULL;
+  int exit_rc = create_fact_client (url, timeout, tenant, token, &client);
+  if (exit_rc != 0) return exit_rc;
+  WylClientFactPhysicalQuotaRecomputeResult result = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_physical_quota_recompute (client, tenant,
+          graph, timestamp, opts.guard_loc_class, risk, &result);
+  exit_rc = fact_remote_exit (client, "fact quota physical recompute", rc,
+          "fact_physical_quota_recompute_failed");
+  if (result.committed || result.outcome_unknown)
+    g_print ("tenant=%s graph=%s committed=%s outcome_unknown=%s old_charged_bytes=%"
+        G_GUINT64_FORMAT " new_charged_bytes=%" G_GUINT64_FORMAT
+        " old_committed_bytes=%" G_GUINT64_FORMAT " new_committed_bytes=%" G_GUINT64_FORMAT "\n",
+        result.tenant_id, result.graph_id, result.committed ? "true" : "false",
+        result.outcome_unknown ? "true" : "false", result.old_charged_bytes,
+        result.new_charged_bytes, result.old_committed_bytes, result.new_committed_bytes);
+  wyl_client_fact_physical_quota_recompute_result_clear (&result);
+  return exit_rc;
+}
+
+static int
+run_fact_quota_physical_command (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  if (argc >= 2 && g_strcmp0 (argv[1], "recompute") == 0)
+    return run_fact_physical_recompute (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: expected fact quota physical recompute\n");
+  return 2;
+}
+
+static int
 run_fact_quota_command (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
@@ -4190,6 +4283,8 @@ run_fact_quota_command (const WyctlOptions *global_opts, gint argc,
     g_printerr ("wyctl: missing fact quota command\n");
     return 2;
   }
+  if (g_strcmp0 (argv[1], "physical") == 0)
+    return run_fact_quota_physical_command (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "configure") == 0)
     return run_fact_quota (global_opts, TRUE, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "status") == 0)

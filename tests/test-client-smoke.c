@@ -2856,6 +2856,31 @@ main (void)
   http.status = 0;
   check_tenant_data_credentials (&http, management_client, local_base_url);
 
+  WylClientFactPhysicalQuotaRecomputeResult recomputed = { 0 };
+  http.body = "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"g\","
+      "\"committed\":true,\"outcome_unknown\":false,\"old_charged_bytes\":100,"
+      "\"new_charged_bytes\":40,\"old_committed_bytes\":150,\"new_committed_bytes\":90}";
+  g_assert_cmpint (wyl_client_fact_physical_quota_recompute (management_client,
+      "__wr_default", "g", 123, "public", 49, &recomputed), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (http.last_method, ==, "POST");
+  g_assert_cmpstr (http.last_path, ==, "/facts/quota/physical/recompute");
+  g_assert_cmpstr (http.last_graph, ==, "g");
+  g_assert_true (recomputed.committed);
+  g_assert_cmpuint (recomputed.new_charged_bytes, ==, 40);
+  http.status = 500;
+  g_assert_cmpint (wyl_client_fact_physical_quota_recompute (management_client,
+      "__wr_default", "g", 123, "public", 49, &recomputed), ==, WYRELOG_E_IO);
+  g_assert_true (recomputed.committed);
+  http.status = 0;
+  g_assert_cmpint (wyl_client_fact_physical_quota_recompute (management_client,
+      "__wr_default", "other", 123, "public", 49, &recomputed), ==, WYRELOG_E_IO);
+  g_assert_null (recomputed.tenant_id);
+  http.body = "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"g\",\"committed\":true}";
+  g_assert_cmpint (wyl_client_fact_physical_quota_recompute (management_client,
+      "__wr_default", "g", 123, "public", 49, &recomputed), ==, WYRELOG_E_IO);
+  g_assert_false (recomputed.committed);
+  wyl_client_fact_physical_quota_recompute_result_clear (&recomputed);
+
   /* #1096: the schema-count quota client must keep its typed contract
    * distinct from graph-count and write-rate quotas. */
   WylClientFactSchemaQuotaStatus schema_quota = { 0 };

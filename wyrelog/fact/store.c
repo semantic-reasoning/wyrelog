@@ -187,6 +187,41 @@ fact_store_release_native (wyl_fact_store_t *store, gboolean *out_released)
   return rc;
 }
 
+/* Keep the exclusive bridge lease alive after all shutdown checkpoint I/O. */
+wyrelog_error_t
+wyl_fact_store_recompute_physical_quota (wyl_fact_store_t *store,
+    wyl_policy_store_t *policy, const WylPolicyGraphAuthorityRecord *expected,
+    const gchar *actor, const gchar *request_id,
+    WylPolicyFactPhysicalQuotaRecomputeResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = (WylPolicyFactPhysicalQuotaRecomputeResult) { 0 };
+  if (store == NULL || policy == NULL || expected == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  (void) actor; (void) request_id;
+  return WYRELOG_E_POLICY;
+#else
+  g_mutex_lock (&store->lock);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (store->health != WYL_FACT_STORE_HEALTHY || store->provisioned_bridge == NULL
+      || store->physical_quota_namespace == NULL || store->physical_quota_lease == NULL
+      || g_strcmp0 (store->identity_store_uuid, expected->store_uuid) != 0)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    duckdb_disconnect (&store->conn);
+    duckdb_close (&store->db);
+    rc = wyl_secure_duckdb_bridge_health (store->provisioned_bridge);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_recompute_fact_physical_quota (policy, expected,
+            store->physical_quota_namespace, store->physical_quota_lease,
+            actor, request_id, out_result);
+  g_mutex_unlock (&store->lock);
+  return rc;
+#endif
+}
+
 static wyrelog_error_t
 fact_store_open_reservation_release (gpointer user_data,
     gboolean *out_released)
@@ -1596,6 +1631,12 @@ wyrelog_error_t
 wyl_fact_store_close_checked (wyl_fact_store_t *store)
 {
   return fact_store_close_checked (store, FALSE);
+}
+
+wyrelog_error_t
+wyl_fact_store_close_final (wyl_fact_store_t *store)
+{
+  return fact_store_close_checked (store, TRUE);
 }
 
 void
