@@ -34,6 +34,148 @@
 #include <unistd.h>
 #endif
 
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+static guint wyctl_token_file_faults_armed;
+static guint wyctl_token_file_faults_skip;
+static gint wyctl_token_file_faults_suspended;
+
+static const struct
+{
+  const gchar *name;
+  guint bit;
+} wyctl_token_file_fault_names[] = {
+  { "write", WYCTL_TOKEN_FILE_FAULT_WRITE },
+  { "file-sync", WYCTL_TOKEN_FILE_FAULT_FILE_SYNC },
+  { "file-close", WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE },
+  { "dir-sync", WYCTL_TOKEN_FILE_FAULT_DIR_SYNC },
+  { "dir-close", WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE },
+  { "cleanup-unlink", WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK },
+};
+
+void
+wyctl_token_file_arm_faults_once (guint mask)
+{
+  g_atomic_int_set (&wyctl_token_file_faults_armed, mask);
+}
+
+guint
+wyctl_token_file_armed_faults (void)
+{
+  return (guint) g_atomic_int_get (&wyctl_token_file_faults_armed);
+}
+
+void
+wyctl_token_file_fault_skip_protected_writes (guint count)
+{
+  g_atomic_int_set (&wyctl_token_file_faults_skip, count);
+}
+
+gboolean
+wyctl_token_file_parse_faults (const gchar *spec, guint *out)
+{
+  if (spec == NULL || spec[0] == '\0')
+    return FALSE;
+  g_auto (GStrv) parts = g_strsplit (spec, ",", -1);
+  guint mask = 0;
+  for (gsize i = 0; parts[i] != NULL; i++) {
+    guint bit = 0;
+    for (gsize j = 0; j < G_N_ELEMENTS (wyctl_token_file_fault_names); j++)
+      if (g_strcmp0 (parts[i], wyctl_token_file_fault_names[j].name) == 0)
+        bit = wyctl_token_file_fault_names[j].bit;
+    if (bit == 0)
+      return FALSE;
+    mask |= bit;
+  }
+  *out = mask;
+  return TRUE;
+}
+
+/* Called once per protected write: consume one skip, if any, and suspend
+ * every fault point for this write. */
+static void
+wyctl_token_file_fault_begin_write (void)
+{
+  guint skip = (guint) g_atomic_int_get (&wyctl_token_file_faults_skip);
+  gboolean suspend = skip > 0;
+  if (suspend)
+    g_atomic_int_set (&wyctl_token_file_faults_skip, skip - 1);
+  g_atomic_int_set (&wyctl_token_file_faults_suspended, suspend);
+}
+
+static gboolean
+wyctl_token_file_fault_take (guint bit)
+{
+  if (g_atomic_int_get (&wyctl_token_file_faults_suspended))
+    return FALSE;
+  return (g_atomic_int_and (&wyctl_token_file_faults_armed, ~bit) & bit) != 0;
+}
+
+static ssize_t
+wyctl_token_file_fault_write (int fd, const void *buf, size_t count)
+{
+  if (wyctl_token_file_fault_take (WYCTL_TOKEN_FILE_FAULT_WRITE)) {
+    errno = EIO;
+    return -1;
+  }
+  return write (fd, buf, count);
+}
+
+static int
+wyctl_token_file_fault_fsync (int fd, guint bit)
+{
+  if (wyctl_token_file_fault_take (bit)) {
+    errno = EIO;
+    return -1;
+  }
+  return fsync (fd);
+}
+
+static int
+wyctl_token_file_fault_close (int fd, guint bit)
+{
+  int result = close (fd);
+  if (wyctl_token_file_fault_take (bit)) {
+    errno = EIO;
+    return -1;
+  }
+  return result;
+}
+
+static int
+wyctl_token_file_fault_unlinkat (int dirfd, const char *name, int flags)
+{
+  if (wyctl_token_file_fault_take (WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK)) {
+    errno = EIO;
+    return -1;
+  }
+  return unlinkat (dirfd, name, flags);
+}
+
+#define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() \
+  wyctl_token_file_fault_begin_write ()
+#define WYCTL_TOKEN_FILE_WRITE(fd, buf, count) \
+  wyctl_token_file_fault_write (fd, buf, count)
+#define WYCTL_TOKEN_FILE_FSYNC_FILE(fd) \
+  wyctl_token_file_fault_fsync (fd, WYCTL_TOKEN_FILE_FAULT_FILE_SYNC)
+#define WYCTL_TOKEN_FILE_CLOSE_FILE(fd) \
+  wyctl_token_file_fault_close (fd, WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE)
+#define WYCTL_TOKEN_FILE_FSYNC_DIR(fd) \
+  wyctl_token_file_fault_fsync (fd, WYCTL_TOKEN_FILE_FAULT_DIR_SYNC)
+#define WYCTL_TOKEN_FILE_CLOSE_DIR(fd) \
+  wyctl_token_file_fault_close (fd, WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE)
+#define WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT(dirfd, name, flags) \
+  wyctl_token_file_fault_unlinkat (dirfd, name, flags)
+#else
+#define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() ((void) 0)
+#define WYCTL_TOKEN_FILE_WRITE(fd, buf, count) write (fd, buf, count)
+#define WYCTL_TOKEN_FILE_FSYNC_FILE(fd) fsync (fd)
+#define WYCTL_TOKEN_FILE_CLOSE_FILE(fd) close (fd)
+#define WYCTL_TOKEN_FILE_FSYNC_DIR(fd) fsync (fd)
+#define WYCTL_TOKEN_FILE_CLOSE_DIR(fd) close (fd)
+#define WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT(dirfd, name, flags) \
+  unlinkat (dirfd, name, flags)
+#endif
+
 struct _WyctlTokenFileLock
 {
 #ifdef G_OS_WIN32
@@ -419,6 +561,7 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   wyctl_token_file_windows_parent_anchor_clear (&anchor);
   return WYCTL_TOKEN_FILE_OK;
 #else
+  WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE ();
   g_autofree gchar *parent = g_path_get_dirname (path);
   g_autofree gchar *basename = g_path_get_basename (path);
   int dirfd = open (parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -442,27 +585,28 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   }
   gsize written = 0;
   while (written < token_len) {
-    ssize_t n = write (fd, token + written, token_len - written);
+    ssize_t n = WYCTL_TOKEN_FILE_WRITE (fd, token + written,
+            token_len - written);
     if (n < 0 && errno == EINTR)
       continue;
     if (n <= 0) {
       close (fd);
-      (void) unlinkat (dirfd, basename, 0);
+      (void) WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
       close (dirfd);
       return WYCTL_TOKEN_FILE_IO;
     }
     written += (gsize) n;
   }
-  gboolean sync_ok = fsync (fd) == 0;
-  gboolean close_ok = close (fd) == 0;
+  gboolean sync_ok = WYCTL_TOKEN_FILE_FSYNC_FILE (fd) == 0;
+  gboolean close_ok = WYCTL_TOKEN_FILE_CLOSE_FILE (fd) == 0;
   if (!sync_ok || !close_ok) {
-    (void) unlinkat (dirfd, basename, 0);
-    (void) fsync (dirfd);
+    (void) WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
+    (void) WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd);
     close (dirfd);
     return WYCTL_TOKEN_FILE_IO;
   }
-  gboolean parent_sync_ok = fsync (dirfd) == 0;
-  gboolean parent_close_ok = close (dirfd) == 0;
+  gboolean parent_sync_ok = WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd) == 0;
+  gboolean parent_close_ok = WYCTL_TOKEN_FILE_CLOSE_DIR (dirfd) == 0;
   if (!parent_sync_ok)
     return WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN;
   if (!parent_close_ok)

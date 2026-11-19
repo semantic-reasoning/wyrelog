@@ -88,6 +88,53 @@ void wyctl_token_file_unlock_refresh (WyctlTokenFileLock * lock);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WyctlTokenFileLock,
     wyctl_token_file_unlock_refresh)
 
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+/* Test-only fault points on the POSIX path of
+ * wyctl_token_file_write_protected (#1546). Compiled in only when the
+ * enable_fault_injection build option is set; otherwise none of these
+ * symbols exist and the writer makes the plain system calls.
+ *
+ * Each armed point fires once, on the next protected write that reaches
+ * it, and then disarms itself; points armed together fire independently.
+ * WRITE, FILE_SYNC, DIR_SYNC and CLEANUP_UNLINK skip the real call and
+ * fail with EIO. FILE_CLOSE and DIR_CLOSE make the real close, so no
+ * descriptor leaks, and then report EIO. DIR_SYNC and CLEANUP_UNLINK
+ * each cover two call sites (the success path and the cleanup flush, and
+ * the write-failure and sync-or-close-failure cleanups), and no single
+ * write reaches both sites of either. A fault point can only make a write
+ * fail; it never bypasses a check. */
+typedef enum
+{
+  WYCTL_TOKEN_FILE_FAULT_WRITE = 1u << 0,
+  WYCTL_TOKEN_FILE_FAULT_FILE_SYNC = 1u << 1,
+  WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE = 1u << 2,
+  WYCTL_TOKEN_FILE_FAULT_DIR_SYNC = 1u << 3,
+  WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE = 1u << 4,
+  WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK = 1u << 5,
+} WyctlTokenFileFault;
+
+/* Replace the armed set with mask; 0 disarms every point. */
+void wyctl_token_file_arm_faults_once (guint mask);
+
+/* The points armed and not yet reached. */
+guint wyctl_token_file_armed_faults (void);
+
+/* Parse a comma-separated list of fault point names (write, file-sync,
+ * file-close, dir-sync, dir-close, cleanup-unlink) into a mask. Returns
+ * FALSE, leaving *out unchanged, for NULL, empty, unknown or empty-element
+ * input. */
+gboolean wyctl_token_file_parse_faults (const gchar * spec, guint * out);
+
+/* Unit-test only: the next count protected writes run with every fault
+ * point suspended, so a fault can be aimed at a later write, such as the
+ * pair writer's access file. Not reachable from the command line.
+ *
+ * The hook assumes a single thread: the armed set, the skip count and the
+ * per-write suspension are process-wide, so concurrent protected writes
+ * would race for the armed points. */
+void wyctl_token_file_fault_skip_protected_writes (guint count);
+#endif
+
 #ifndef G_OS_WIN32
 /* Pure-function classifier: given the result of fstat on an already-
  * opened fd and the invoking process's effective uid, decide whether
