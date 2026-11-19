@@ -5763,6 +5763,25 @@ assert_unknown_outcome_case (guint status, guint delay_ms,
 }
 
 static void
+test_fact_physical_recompute (void)
+{
+  static const gchar *const args[] = {
+    "fact", "quota", "physical", "recompute", "--tenant", "t", "--graph", "g",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  const gchar *body = "{\"tenant_id\":\"t\",\"graph_id\":\"g\","
+      "\"committed\":true,\"outcome_unknown\":false,\"old_charged_bytes\":100,"
+      "\"new_charged_bytes\":40,\"old_committed_bytes\":150,\"new_committed_bytes\":90}";
+  for (guint i=0; i<2; i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_fake_daemon_case (i==0 ? 200 : 500, body, NULL, args, FALSE, &run);
+    assert_fact_forget_exit (&run, i==0 ? 0 : 5);
+    g_assert_true (g_str_has_prefix (run.request, "POST /facts/quota/physical/recompute?"));
+    g_assert_cmpstr (run.out, ==, "tenant=t graph=g committed=true outcome_unknown=false old_charged_bytes=100 new_charged_bytes=40 old_committed_bytes=150 new_committed_bytes=90\n");
+  }
+}
+
+static void
 test_graph_schema_quota_unknown_outcome (void)
 {
   static const gchar *const graph_create[] = {
@@ -7500,6 +7519,7 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/wyctl/fact/physical-recompute", test_fact_physical_recompute);
   g_test_add_func ("/wyctl/login-remote-error", test_login_reports_remote_error);
   g_test_add_data_func ("/wyctl/login-existing-access-preflight",
       GINT_TO_POINTER (1), test_login_existing_output_prevents_request);

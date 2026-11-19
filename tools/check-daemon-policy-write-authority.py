@@ -36,7 +36,7 @@ FUNCTIONS = (
     "tenant_seal_recovery_retain", "tenant_seal_recovery_discard",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler", "tenant_transfer_owner_handler", "mutate_tenant_transfer",
-    "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
+    "graph_create_handler", "facts_quota_handler", "facts_physical_quota_recompute_handler", "graph_seal_handler",
     "facts_graph_update_handler", "facts_graph_update_commit",
     "schema_register_handler", "rule_pack_register_handler",
     "facts_route_handler", "direct_permission_mutation_handler",
@@ -61,6 +61,8 @@ FUNCTIONS = (
     "mutate_data_credential_publication",
 )
 OWNER_INVENTORY = {
+    "facts_physical_quota_recompute_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PHYSICAL_QUOTA_RECOMPUTE",),
     "wyl_daemon_http_context_rotate_access_token_key":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_KEY_ROTATION",),
     "wyl_daemon_http_configure_tenant_for_test":
@@ -108,13 +110,13 @@ TEST_ONLY_OWNER_FUNCTIONS = {
     "wyl_daemon_http_policy_write_for_test",
 }
 FACT_STORE_OWNER_FUNCTIONS = {
-    "graph_create_handler", "facts_quota_handler", "schema_register_handler",
+    "graph_create_handler", "facts_quota_handler", "facts_physical_quota_recompute_handler", "schema_register_handler",
     "rule_pack_register_handler", "facts_route_handler",
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
 }
 FACT_STORE_DISABLED_STUBS = {
-    "graph_create_handler", "facts_quota_handler", "schema_register_handler",
+    "graph_create_handler", "facts_quota_handler", "facts_physical_quota_recompute_handler", "schema_register_handler",
     "rule_pack_register_handler", "facts_route_handler",
 }
 FACT_STORE_FEATURE_MARKER = """#ifdef WYL_HAS_FACT_STORE
@@ -149,12 +151,13 @@ OWNER_TABLE = (
     ("FACT_RESTORE", "fact_restore"),
     ("RULE_PACK_REGISTER", "rule_pack_register"),
     ("DATA_CREDENTIAL", "data_credential"),
+    ("FACT_PHYSICAL_QUOTA_RECOMPUTE", "fact_physical_quota_recompute"),
 )
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler", "tenant_transfer_owner_handler", "tenant_recovery_attempt_before_authorization",
-    "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
+    "graph_create_handler", "facts_quota_handler", "facts_physical_quota_recompute_handler", "graph_seal_handler",
     "schema_register_handler", "rule_pack_register_handler",
     "facts_route_handler", "facts_graph_update_handler",
     "direct_permission_mutation_handler", "policy_permission_transition_handler",
@@ -181,7 +184,7 @@ ALLOW_MUTATORS = ALLOW_ACQUIRE | {
     "mutate_data_credential_publication",
 }
 PROTECTED_HANDLERS = {
-    "tenant_mutation_handler", "tenant_transfer_owner_handler", "graph_create_handler", "facts_quota_handler",
+    "tenant_mutation_handler", "tenant_transfer_owner_handler", "graph_create_handler", "facts_quota_handler", "facts_physical_quota_recompute_handler",
     "graph_seal_handler",
     "schema_register_handler", "rule_pack_register_handler",
     "facts_route_handler",
@@ -581,7 +584,7 @@ def validate_owner_fault_matrix_source(source):
     invoke_values=[value for _,value in invoke[0][2]]
     required_sequences=(
         ("G_STATIC_ASSERT","(","G_N_ELEMENTS","(",
-            "policy_write_owner_fault_cases",")","==","20",")",";"),
+            "policy_write_owner_fault_cases",")","==","21",")",";"),
         ("G_STATIC_ASSERT","(","POLICY_WRITE_OWNER_FAULT_MODE_COUNT","==",
             "2",")",";"),
         ("for","(","guint","mode","=","0",";","mode","<",
@@ -807,6 +810,7 @@ def raw_global_invariants(tokens, defs, check_directives=True):
     exact="wyl_daemon_http_add_exact_handler"
     prefix="wyl_daemon_http_add_prefix_handler"
     route_registrations={
+        "facts_physical_quota_recompute_handler": (exact,'"/facts/quota/physical/recompute"'),
         "tenant_transfer_owner_handler": (exact,'"/tenants/transfer-owner"'),
         "tenant_create_handler": (exact,'"/tenants/create"'),
         "tenant_seal_handler": (exact,'"/tenants/seal"'),
@@ -904,8 +908,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 23:
-        raise GuardError("daemon WRITE owner inventory must contain 23 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 24:
+        raise GuardError("daemon WRITE owner inventory must contain 24 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():

@@ -2821,6 +2821,69 @@ wyl_client_fact_concurrent_open_quota_configure (WylClient *client,
 }
 
 void
+wyl_client_fact_physical_quota_recompute_result_clear
+  (WylClientFactPhysicalQuotaRecomputeResult *result)
+{
+  if (result == NULL) return;
+  g_free (result->tenant_id);
+  g_free (result->graph_id);
+  *result = (WylClientFactPhysicalQuotaRecomputeResult) { 0 };
+}
+
+wyrelog_error_t
+wyl_client_fact_physical_quota_recompute (WylClient *client, const gchar *tenant,
+    const gchar *graph, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactPhysicalQuotaRecomputeResult *out_result)
+{
+  if (out_result == NULL) return WYRELOG_E_INVALID;
+  wyl_client_fact_physical_quota_recompute_result_clear (out_result);
+  if (graph == NULL || *graph == '\0') return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = NULL, *access_token = NULL, *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autofree gchar *guard = client_fact_guard_query (tenant, guard_timestamp,
+          guard_loc_class, guard_risk, access_token != NULL && *access_token != '\0' ?
+          NULL : session_token);
+  g_autofree gchar *encoded_graph = g_uri_escape_string (graph, NULL, FALSE);
+  g_autofree gchar *uri = g_strdup_printf ("%s/facts/quota/physical/recompute?%s&graph=%s",
+          base_url, guard, encoded_graph);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL) return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = NULL;
+  g_autoptr (GBytes) error_body = NULL;
+  rc = client_send_fact_message_full (client, message, &body, &error_body);
+  if (body == NULL) body = g_steal_pointer (&error_body);
+  /* An error after COMMIT must still carry its authoritative result. */
+  if (body == NULL) return rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  g_autofree gchar *rt = parse_simple_json_string_member (data, size, "tenant_id");
+  g_autofree gchar *rg = parse_simple_json_string_member (data, size, "graph_id");
+  WylClientFactPhysicalQuotaRecomputeResult result = { 0 };
+  if (g_strcmp0 (rt, tenant) != 0 || g_strcmp0 (rg, graph) != 0
+      || !parse_simple_json_bool_member (data, size, "committed", &result.committed)
+      || !parse_simple_json_bool_member (data, size, "outcome_unknown", &result.outcome_unknown)
+      || (result.committed == result.outcome_unknown)
+      || !parse_simple_json_uint64_member (data, size, "old_charged_bytes", &result.old_charged_bytes)
+      || !parse_simple_json_uint64_member (data, size, "new_charged_bytes", &result.new_charged_bytes)
+      || !parse_simple_json_uint64_member (data, size, "old_committed_bytes", &result.old_committed_bytes)
+      || !parse_simple_json_uint64_member (data, size, "new_committed_bytes", &result.new_committed_bytes)
+      || result.old_committed_bytes > G_MAXINT64 || result.new_committed_bytes > G_MAXINT64
+      || result.old_charged_bytes > result.old_committed_bytes
+      || result.new_charged_bytes > result.new_committed_bytes
+      || result.old_committed_bytes - result.old_charged_bytes !=
+      result.new_committed_bytes - result.new_charged_bytes)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
+  if (rc == WYRELOG_E_OK && !result.committed) return WYRELOG_E_IO;
+  result.tenant_id = g_steal_pointer (&rt);
+  result.graph_id = g_steal_pointer (&rg);
+  *out_result = result;
+  return rc;
+}
+
+void
 wyl_client_fact_physical_quota_status_clear
   (WylClientFactPhysicalQuotaStatus *status)
 {

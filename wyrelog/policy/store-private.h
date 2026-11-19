@@ -8,6 +8,13 @@
 #include "wyrelog/error.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/graph-artifact-inventory-private.h"
+#ifdef G_OS_WIN32
+typedef struct WylFactArtifactWinNamespace WylFactArtifactNamespace;
+typedef struct WylFactArtifactWinLease WylFactArtifactMutationLease;
+#else
+typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
+typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
+#endif
 #include "wyrelog/fact/offline-backup-manifest-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-exchange-audit-private.h"
@@ -2977,6 +2984,29 @@ wyrelog_error_t wyl_policy_store_cancel_fact_logical_quota
     const WylPolicyFactLogicalQuotaOperation *operation,
     gboolean definite_noncommit,
     WylPolicyFactLogicalOperationStatus *out_status);
+typedef struct
+{
+  guint64 old_charged_bytes;
+  guint64 new_charged_bytes;
+  guint64 old_committed_bytes;
+  guint64 new_committed_bytes;
+  gboolean committed;
+  gboolean outcome_unknown;
+} WylPolicyFactPhysicalQuotaRecomputeResult;
+
+/* Preflight only. Recompute repeats these checks in its transaction. */
+wyrelog_error_t wyl_policy_store_prepare_fact_physical_quota_recompute
+  (wyl_policy_store_t *store, const gchar *tenant, const gchar *graph,
+    WylPolicyGraphAuthorityRecord **out_authority);
+/* Requires the exact live exclusive namespace lease through return. Captures
+ * fresh evidence itself; historical evidence/byte counts are never inputs.
+ * Records an authoritative audit row and intention atomically with the reset. */
+wyrelog_error_t wyl_policy_store_recompute_fact_physical_quota
+  (wyl_policy_store_t *store, const WylPolicyGraphAuthorityRecord *expected,
+    WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
+    const gchar *actor, const gchar *request_id,
+    WylPolicyFactPhysicalQuotaRecomputeResult *out_result);
+
 wyrelog_error_t wyl_policy_store_get_fact_physical_quota_status
   (wyl_policy_store_t *store, const gchar *tenant_id,
     WylPolicyFactPhysicalQuotaStatus *out_status);

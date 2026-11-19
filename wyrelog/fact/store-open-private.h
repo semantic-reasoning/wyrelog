@@ -44,4 +44,11 @@ wyrelog_error_t wyl_fact_store_open_legacy_graph_observed
     gboolean * out_quota_rejected,
     wyl_fact_store_t ** out_store);
 
+
+/* Recompute only from a live exclusive observation; result survives cleanup errors. */
+wyrelog_error_t wyl_fact_store_recompute_graph_physical_quota
+  (wyl_policy_store_t *policy, const gchar *fact_root, const gchar *tenant,
+    const gchar *graph, WylFactResourceRecorder *recorder, const gchar *actor,
+    const gchar *request_id, WylPolicyFactPhysicalQuotaRecomputeResult *out_result);
+
 G_END_DECLS;

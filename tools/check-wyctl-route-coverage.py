@@ -50,6 +50,7 @@ RUNBOOK_SECTION = "## Routes Without a wyctl Command"
 UNSUPPORTED_HEADING = "### Unsupported by the daemon"
 
 COVERAGE = {
+    "/facts/quota/physical/recompute": ("fact", "quota", "physical", "recompute"),
     "/users": ("user", "create"),
     "/healthz": ("status",),
     "/readyz": ("status",),
@@ -128,6 +129,7 @@ PENDING: dict[str, tuple[str, ...]] = {}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {
+    ("fact", "quota", "physical"): "run_fact_quota_physical_command",
     ("user",): "run_user",
     (): "main",
     ("policy",): "run_policy",

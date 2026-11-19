@@ -1120,6 +1120,26 @@ wyrelog_error_t wyl_client_fact_concurrent_open_quota_configure
     WylClientFactConcurrentOpenQuotaStatus * out_status);
 void wyl_client_fact_concurrent_open_quota_status_clear
   (WylClientFactConcurrentOpenQuotaStatus * status);
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  guint64 old_charged_bytes;
+  guint64 new_charged_bytes;
+  guint64 old_committed_bytes;
+  guint64 new_committed_bytes;
+  gboolean committed;
+  gboolean outcome_unknown;
+} WylClientFactPhysicalQuotaRecomputeResult;
+
+/* On a postcommit error, retain the confirmed/uncertain outcome in out_result. */
+wyrelog_error_t wyl_client_fact_physical_quota_recompute
+  (WylClient *client, const gchar *tenant, const gchar *graph,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactPhysicalQuotaRecomputeResult *out_result);
+void wyl_client_fact_physical_quota_recompute_result_clear
+  (WylClientFactPhysicalQuotaRecomputeResult *result);
+
 wyrelog_error_t wyl_client_fact_physical_quota_status
   (WylClient * client, const gchar * tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,

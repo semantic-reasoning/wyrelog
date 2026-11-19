@@ -41,6 +41,7 @@
 #endif
 
 #include "store-private.h"
+#include "fact/graph-artifact-namespace-private.h"
 
 #include "policy/store-handoff-delivery-private.h"
 #include "policy/store-handoff-maintenance-private.h"
@@ -20560,6 +20561,233 @@ wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
     rc = fact_physical_quota_commit (store);
   if (rc != WYRELOG_E_OK)
     wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+static void
+physical_recompute_append_json_string (GString *json, const gchar *value)
+{
+  g_string_append_c (json, '"');
+  for (const guchar * p = (const guchar *)value; *p != '\0'; p++) {
+    switch (*p) {
+      case '"':
+        g_string_append (json, "\\\"");
+        break;
+      case '\\':
+        g_string_append (json, "\\\\");
+        break;
+      case '\b':
+        g_string_append (json, "\\b");
+        break;
+      case '\f':
+        g_string_append (json, "\\f");
+        break;
+      case '\n':
+        g_string_append (json, "\\n");
+        break;
+      case '\r':
+        g_string_append (json, "\\r");
+        break;
+      case '\t':
+        g_string_append (json, "\\t");
+        break;
+      default:
+        if (*p < 0x20)
+          g_string_append_printf (json, "\\u%04x", *p);
+        else
+          g_string_append_c (json, (gchar) * p);
+        break;
+    }
+  }
+  g_string_append_c (json, '"');
+}
+
+wyrelog_error_t
+wyl_policy_store_prepare_fact_physical_quota_recompute (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *graph,
+    WylPolicyGraphAuthorityRecord **out_authority)
+{
+  if (out_authority == NULL)
+    return WYRELOG_E_INVALID;
+  *out_authority = NULL;
+  if (store == NULL || !wyl_policy_store_tenant_id_is_valid (tenant)
+      || !fact_graph_customer_name_is_valid (graph))
+    return WYRELOG_E_INVALID;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_graph_authority (store, tenant,
+          graph, &authority);
+  if (rc == WYRELOG_E_OK
+      && ((authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      && authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_SEALED)
+      || !authority->has_store_identity || authority->store_uuid == NULL
+      || authority->format_version != 1 || authority->path_encoding_version != 1
+      || authority->last_error_class != WYL_POLICY_GRAPH_ERROR_NONE
+      || authority->materialization_state != WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED))
+    rc = WYRELOG_E_POLICY;
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "SELECT 1 FROM fact_physical_quota_reservations WHERE tenant_id=?1 "
+            "AND graph_id=?2 AND state IN ('pending','reconciling') "
+            "UNION ALL SELECT 1 FROM fact_logical_quota_operations WHERE tenant_id=?1 "
+            "AND graph_id=?2 AND state IN ('pending','reconciling') LIMIT 1;", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, tenant);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, graph);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    rc = step == SQLITE_DONE ? WYRELOG_E_OK :
+        step == SQLITE_ROW ? WYRELOG_E_BUSY : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    *out_authority = authority;
+  else
+    wyl_policy_graph_authority_record_free (authority);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_recompute_fact_physical_quota (wyl_policy_store_t *store,
+    const WylPolicyGraphAuthorityRecord *expected,
+    WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
+    const gchar *actor, const gchar *request_id,
+    WylPolicyFactPhysicalQuotaRecomputeResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = (WylPolicyFactPhysicalQuotaRecomputeResult) { 0 };
+  if (store == NULL || expected == NULL || namespace_ == NULL || lease == NULL
+      || expected->tenant_id == NULL || expected->graph_id == NULL
+      || actor == NULL || *actor == '\0' || !wyl_request_id_is_canonical (request_id)
+      || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyGraphAuthorityRecord *current = NULL;
+  rc = wyl_policy_store_prepare_fact_physical_quota_recompute (store,
+          expected->tenant_id, expected->graph_id, &current);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (current->store_uuid, expected->store_uuid) != 0
+      || current->lifecycle_state != expected->lifecycle_state
+      || current->lifecycle_generation != expected->lifecycle_generation
+      || current->reconciliation_generation != expected->reconciliation_generation
+      || current->format_version != expected->format_version
+      || current->path_encoding_version != expected->path_encoding_version))
+    rc = WYRELOG_E_CONFLICT;
+  wyl_policy_graph_authority_record_free (current);
+  g_autoptr (WylFactArtifactPhysicalQuotaEvidence) evidence = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+          (namespace_, lease, &evidence);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (expected->tenant_id,
+      wyl_fact_artifact_physical_quota_evidence_tenant_id (evidence)) != 0
+      || g_strcmp0 (expected->graph_id,
+      wyl_fact_artifact_physical_quota_evidence_graph_id (evidence)) != 0))
+    rc = WYRELOG_E_CONFLICT;
+  WylPolicyFactPhysicalQuotaRecomputeResult result = { 0 };
+  guint64 pending = 0, reconciling = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_usage_ensure (store, expected->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_usage_load (store, expected->tenant_id,
+            &result.old_committed_bytes, &pending, &reconciling);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, "SELECT coalesce(sum(charged_bytes),0) FROM "
+            "fact_physical_quota_graph_charges WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, expected->tenant_id);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_ROW || sqlite3_column_type (stmt, 0) != SQLITE_INTEGER
+        || sqlite3_column_int64 (stmt, 0) < 0
+        || (guint64) sqlite3_column_int64 (stmt, 0) != result.old_committed_bytes)
+      rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_graph_charge_load (store, expected->tenant_id,
+            expected->graph_id, &result.old_charged_bytes);
+  if (rc == WYRELOG_E_OK)
+    result.new_charged_bytes =
+        wyl_fact_artifact_physical_quota_evidence_allocated_bytes (evidence);
+  if (rc == WYRELOG_E_OK
+      && (result.old_charged_bytes > result.old_committed_bytes
+      || result.new_charged_bytes > G_MAXINT64
+      || result.old_committed_bytes - result.old_charged_bytes
+      > G_MAXINT64 - result.new_charged_bytes))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    result.new_committed_bytes = result.old_committed_bytes
+        - result.old_charged_bytes + result.new_charged_bytes;
+    rc = prepare_stmt (store->db,
+            "INSERT INTO fact_physical_quota_graph_charges "
+            "(tenant_id,graph_id,charged_bytes,updated_at) VALUES (?,?,?,unixepoch()) "
+            "ON CONFLICT(tenant_id,graph_id) DO UPDATE SET "
+            "charged_bytes=excluded.charged_bytes,updated_at=excluded.updated_at;", &stmt);
+  }
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, expected->tenant_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, expected->graph_id);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 3,
+      (sqlite3_int64) result.new_charged_bytes) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_usage_update (store, expected->tenant_id,
+            result.new_committed_bytes, pending, reconciling);
+  g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (event);
+  g_autofree gchar *resource = g_strdup_printf ("%s/%s", expected->tenant_id,
+          expected->graph_id);
+  g_autoptr (GString) summary = g_string_new ("{\"version\":1,\"tenant_id\":");
+  physical_recompute_append_json_string (summary, expected->tenant_id);
+  g_string_append (summary, ",\"graph_id\":");
+  physical_recompute_append_json_string (summary, expected->graph_id);
+  if (rc == WYRELOG_E_OK) {
+    g_string_append (summary, ",\"inventory_generation\":");
+    physical_recompute_append_json_string (summary,
+        wyl_fact_artifact_physical_quota_evidence_generation (evidence));
+    g_string_append (summary, ",\"inventory_digest\":");
+    physical_recompute_append_json_string (summary,
+        wyl_fact_artifact_physical_quota_evidence_digest (evidence));
+  }
+  g_string_append_printf (summary,
+      ",\"old_charged_bytes\":%" G_GUINT64_FORMAT
+      ",\"new_charged_bytes\":%" G_GUINT64_FORMAT
+      ",\"old_committed_bytes\":%" G_GUINT64_FORMAT
+      ",\"new_committed_bytes\":%" G_GUINT64_FORMAT "}",
+      result.old_charged_bytes, result.new_charged_bytes,
+      result.old_committed_bytes, result.new_committed_bytes);
+  gboolean inserted = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_record_audit_intention_full (store, audit_id,
+            wyl_audit_event_get_created_at_us (event), actor,
+            "fact_physical_quota_recompute", resource, summary->str,
+            wyl_fact_artifact_physical_quota_evidence_digest (evidence),
+            request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
+            wyl_audit_event_get_created_at_us (event), actor,
+            "fact_physical_quota_recompute", resource, summary->str,
+            wyl_fact_artifact_physical_quota_evidence_digest (evidence),
+            request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_publication_transaction_commit (store);
+    if (rc == WYRELOG_E_OK)
+      result.committed = TRUE;
+    else if (wyl_policy_store_is_autocommit (store))
+      result.outcome_unknown = TRUE;
+  }
+  if (rc != WYRELOG_E_OK && wyl_policy_store_transaction_owned_by_caller (store)) {
+    wyrelog_error_t rollback =
+        publication_transaction_abort_owned (store);
+    if (rollback != WYRELOG_E_OK) rc = rollback;
+  }
+  if (result.committed || result.outcome_unknown)
+    *out_result = result;
   return rc;
 }
 

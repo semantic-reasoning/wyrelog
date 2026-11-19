@@ -133,12 +133,13 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
 }
 RAW_PROFILE_ADDITIONS = {
     ("wyrelog/fact/store.c", "WYL_HAS_SECURE_DUCKDB_BRIDGE"): (
-        (4, 0, 2, 2),
+        (6, 2, 2, 2),
         {
+            "wyl_fact_store_recompute_physical_quota": 2,
             "wyl_fact_store_open_provisioned_pair": 2,
             "wyl_fact_store_open_provisioned_namespace_with_lease": 2,
         },
-        {},
+        {"wyl_fact_store_recompute_physical_quota": 2},
     ),
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
@@ -220,6 +221,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "fact_store_duckdb_apply_config",
         "wyl_fact_store_close",
         "wyl_fact_store_close_checked",
+        "wyl_fact_store_close_final",
         "forget_survey_unlocked",
         "quarantine_forget_intent_unlocked",
         "wyl_fact_store_open_reservation_begin",

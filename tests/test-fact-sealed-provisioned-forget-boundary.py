@@ -58,9 +58,15 @@ def validate(root: pathlib.Path) -> None:
     open_wrapper = function_body(
         opener, "wyl_fact_store_open_provisioned_graph"
     )
-    open_body = function_body(
+    observed_wrapper = function_body(
         opener, "wyl_fact_store_open_provisioned_graph_observed"
     )
+    require(re.sub(r"\s+", "", observed_wrapper) ==
+            "{returnopen_provisioned_graph_observed(policy_store,fact_root,"
+            "tenant_id,graph_id,writable,resource_recorder,out_quota_rejected,"
+            "TRUE,out_store);}",
+            "observed opener bypasses its common reservation/recovery path")
+    open_body = function_body(opener, "open_provisioned_graph_observed")
     require("wyl_fact_store_open_provisioned_graph_observed" in open_wrapper,
             "compatibility opener bypasses the observed authority path")
     require("WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE" in open_body,
@@ -227,6 +233,9 @@ def mutate_once(root: pathlib.Path, relative: str, old: str, new: str) -> None:
 
 def self_test(root: pathlib.Path) -> None:
     mutations = (
+        ("wyrelog/fact/store-open-private.c",
+         "resource_recorder, out_quota_rejected, TRUE, out_store);",
+         "resource_recorder, out_quota_rejected, FALSE, out_store);"),
         ("wyrelog/fact/store-open-private.c",
          "      && authority->lifecycle_state != "
          "WYL_POLICY_GRAPH_LIFECYCLE_SEALED", ""),

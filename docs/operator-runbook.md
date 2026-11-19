@@ -3287,7 +3287,7 @@ files and any filesystem preallocation), so a settle charges only its growth
 past the highest observation already charged to the graph: `committed_bytes`
 is the sum of each graph's high-water allocation. A smaller observation, for
 example after a checkpoint shrinks the WAL, lowers nothing; a graph's charge is
-released only when its tenant is deleted. A COMMIT that DuckDB reports as
+released when its tenant is deleted or an administrator explicitly recomputes it. A COMMIT that DuckDB reports as
 failed may still be durable, and the error does not reliably say which, so
 the mutation answers with an internal error and its reservation is settled
 from the observation in the same way; the charge is right whether or not the
@@ -3312,6 +3312,35 @@ held reservation and fails with `500`: if the batch is not stored, resubmit
 it under a new key and `batch_id`. This dimension is enforced only by builds
 with the secure DuckDB bridge; other builds accept the configuration and
 report it, but never refuse on it.
+
+To reset one materialized graph's high-water charge to its current physical
+allocation, use a build with the secure DuckDB bridge and `wr.sys.admin`:
+
+```sh
+wyctl fact quota physical recompute --tenant acme --graph orders \
+  --access-token-file /run/wyrelog/admin.token \
+  --guard-timestamp 123 --guard-loc-class trusted --guard-risk 0
+```
+
+This POSTs `/facts/quota/physical/recompute` and prints old/new graph charges
+and tenant committed bytes. Both tenant and graph are required (configured
+defaults apply); there is no tenant-wide sweep. Native shutdown/checkpoint
+finishes before the stable bounded observation; the exclusive graph lease
+remains held through the accounting transaction. The transaction preserves
+`committed_bytes = SUM(charged_bytes)` and writes an authoritative
+`fact_physical_quota_recompute` audit event with actor, request ID, scope,
+evidence generation/digest and old/new values, even when runtime audit emission
+is disabled. Subsequent mutations grow the charge from this new baseline.
+
+Pending or reconciling operations, including zero-byte holds, return busy;
+recompute does not clear their reservations. Concurrent-open quota admission
+also applies. Unstable/unavailable allocation evidence, missing storage,
+identity mismatch, and graphs that were never materialized fail closed without
+resetting counters. Builds without the secure bridge return `503
+fact_physical_quota_recompute_unavailable`. A late cleanup/publication error
+can follow a durable commit: retain `committed`/`outcome_unknown` and old/new
+values printed by wyctl, and inspect quota status/audit before retrying.
+
 
 ### Committed but reconciling
 

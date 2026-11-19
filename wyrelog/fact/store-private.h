@@ -126,6 +126,8 @@ void wyl_fact_store_set_forget_transaction_test_hook
   (wyl_fact_store_t * store, WylFactStoreForgetTransactionTestHook hook,
     gpointer user_data);
 #endif
+/* Consumes the store, including on cleanup failure. */
+wyrelog_error_t wyl_fact_store_close_final (wyl_fact_store_t *store);
 void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 /* Close the DuckDB instance and release any secure bridge, returning bridge
@@ -521,5 +523,13 @@ wyrelog_error_t wyl_fact_store_forget_pending_count (wyl_fact_store_t * store,
  * materialized. */
 wyrelog_error_t wyl_fact_store_has_durable_batches (wyl_fact_store_t * store,
     gboolean * out_has_batches);
+
+
+/* Terminal operation: disconnect native DB, retaining bridge lease through commit.
+ * Caller must immediately close the consumed store, including on failure. */
+wyrelog_error_t wyl_fact_store_recompute_physical_quota
+  (wyl_fact_store_t *store, wyl_policy_store_t *policy,
+    const WylPolicyGraphAuthorityRecord *expected, const gchar *actor,
+    const gchar *request_id, WylPolicyFactPhysicalQuotaRecomputeResult *out_result);
 
 G_END_DECLS;

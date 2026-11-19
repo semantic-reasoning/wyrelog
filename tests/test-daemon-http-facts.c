@@ -5688,9 +5688,13 @@ check_schema_cleanup_failure_skips_replay (WylHandle *handle,
 
 static gint
 check_live_empty_schema (WylHandle *handle, SoupServer *server,
-    const gchar *base_url)
+    const gchar *base_url, gboolean recompute_cleanup)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+      "facts-admin", "wr.sys.admin", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (store,
+      "facts-admin", "wr.sys.admin", WYL_TENANT_DEFAULT, "armed"), ==, WYRELOG_E_OK);
   register_test_human (store, "facts-reader");
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
       "facts-reader", "wr.datalog.query", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
@@ -5778,6 +5782,33 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
       "tenant=__wr_default&namespace=shop&schema_version=1&batch_id=sibling&"
       "idempotency_key=sibling&" FACT_GUARD, "order_id\tamount\nsibling\t17\n",
       200, "\"committed\":true");
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  identity_http_post (session, base_url, admin_token,
+      "/facts/quota/physical/recompute",
+      "tenant=__wr_default&graph=live-sibling&" FACT_GUARD, NULL,
+      200, "\"committed\":true");
+  WylClientFactPhysicalQuotaRecomputeResult recomputed = { 0 };
+  g_assert_cmpint (wyl_client_fact_physical_quota_recompute (admin,
+      WYL_TENANT_DEFAULT, "live-sibling", 123, "trusted", 29, &recomputed), ==, WYRELOG_E_OK);
+  g_assert_true (recomputed.committed);
+  wyl_client_fact_physical_quota_recompute_result_clear (&recomputed);
+#else
+  identity_http_post (session, base_url, admin_token,
+      "/facts/quota/physical/recompute",
+      "tenant=__wr_default&graph=live-sibling&" FACT_GUARD, NULL,
+      503, "fact_physical_quota_recompute_unavailable");
+#endif
+  identity_http_post (session, base_url, reader_token,
+      "/facts/quota/physical/recompute",
+      "tenant=__wr_default&graph=live-sibling&" FACT_GUARD, NULL,
+      403, "fact_quota_denied");
+  identity_http_post (session, base_url, admin_token,
+      "/facts/quota/physical/recompute", "tenant=__wr_default&" FACT_GUARD,
+      NULL, 400, "invalid_fact_quota_request");
+  identity_http_post (session, base_url, admin_token,
+      "/facts/quota/physical/recompute",
+      "tenant=__wr_default&graph=live-sibling&limit=0&" FACT_GUARD,
+      NULL, 400, "invalid_fact_quota_request");
   WylFactGraphRuntimeStatus sibling_before = { 0 };
   g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
       WYL_TENANT_DEFAULT, "live-sibling", &sibling_before), ==, WYRELOG_E_OK);
@@ -5928,13 +5959,25 @@ check_live_empty_schema (WylHandle *handle, SoupServer *server,
   g_cond_clear (&call.cond);
   g_mutex_clear (&call.mutex);
   wyl_fact_graph_key_clear (&key);
-  check_schema_cleanup_failure_skips_replay (handle, server, session,
-      base_url, admin_token, schema);
+  if (!recompute_cleanup)
+    check_schema_cleanup_failure_skips_replay (handle, server, session,
+        base_url, admin_token, schema);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  if (recompute_cleanup) {
+    wyl_daemon_http_suspend_service_auth_maintenance_for_test (server);
+    wyl_daemon_http_fail_next_policy_write_finalize_for_test (server,
+        WYL_DAEMON_POLICY_WRITE_FINALIZE_FAULT_PREVALIDATION);
+    g_assert_cmpint (wyl_client_fact_physical_quota_recompute (admin,
+        WYL_TENANT_DEFAULT, "live-sibling", 123, "trusted", 29, &recomputed), ==, WYRELOG_E_IO);
+    g_assert_true (recomputed.committed);
+    wyl_client_fact_physical_quota_recompute_result_clear (&recomputed);
+  }
+#endif
   return 0;
 }
 
 static gint
-run_fact_http_fixture (gboolean empty_schema_only)
+run_fact_http_fixture (gboolean empty_schema_only, gboolean recompute_cleanup)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *fact_root = wyl_test_make_secure_fact_root
@@ -5981,7 +6024,7 @@ run_fact_http_fixture (gboolean empty_schema_only)
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
   gint rc = empty_schema_only
-      ? check_live_empty_schema (handle, http.server, base_url)
+      ? check_live_empty_schema (handle, http.server, base_url, recompute_cleanup)
       : check_fact_http_contract (handle, http.server, fact_root, base_url);
   if (rc != 0)
     g_printerr ("fact HTTP contract failed rc=%d\n", rc);
@@ -6005,9 +6048,14 @@ main (int argc, char **argv)
   gboolean empty_schema_only = argc == 2
       && g_strcmp0 (argv[1], "--empty-schema-only") == 0;
   gint rc;
-  if (argc == 1 || empty_schema_only)
-    rc = run_fact_http_fixture (empty_schema_only);
-  else {
+  if (argc == 1 || empty_schema_only) {
+    rc = run_fact_http_fixture (empty_schema_only, FALSE);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+    /* Each injected cleanup fault makes its authority terminal. */
+    if (rc == 0 && empty_schema_only)
+      rc = run_fact_http_fixture (TRUE, TRUE);
+#endif
+  } else {
     g_printerr ("usage: %s [--empty-schema-only]\n", argv[0]);
     rc = 2;
   }

@@ -1,8 +1,8 @@
 {
-  "aggregate": "287ee70ca000a752d37ec19c2d758567474afdae16b5f7cbc14e384b82fdc953",
+  "aggregate": "f7933ff49c827891e9ec68854ca0210987ba98ea02bd9179bd0cb5fa9a207ff0",
   "directives": {
-    "count": 590,
-    "sha256": "a1da1000b510e7bde9e74d5c56d7c185580ffbb0d77feb905271a5c2458886f5"
+    "count": 598,
+    "sha256": "bb8612a9a389b4e1747302b495a5a185c61dc0653586dcc8c36b72bb29642603"
   },
   "functions": {
     "direct_permission_mutation_handler": "96a5a83b20c41cb6c2aef671c721d732730956cf2026d7308b0442c045c18e31",
@@ -10,6 +10,7 @@
     "ensure_policy_role_exists": "a690de0724da0211c1f115f0921869df174a712e45ddc95e65ee0549b5ccbb6d",
     "facts_graph_update_commit": "32c5bc5a7311b0e05e80ec69304afebc5adb47a01714d1341b8fc57c59675950",
     "facts_graph_update_handler": "143a2c190d9ad0410c8f3588b2276e879f72f5aa6f6b20e342d0c802e57337a3",
+    "facts_physical_quota_recompute_handler": "e2b762da87b12a3df2ddb36e459205b8f2823c49c15a3f2a14290bfe69709975",
     "facts_quota_handler": "9ff4f019e3007fcf028c21f19e292a2d877c2110fd66291b514c05c3807a181f",
     "facts_route_handler": "9663207da58af8531a9ac54f1e4c544c25abe2e6e84ed34d3064aff89ff2db02",
     "graph_create_handler": "20b80e15fd53428c2976821e59dc71f384b335f153425be93a0ab6c14bd9716f",
@@ -86,8 +87,8 @@
     "wyl_daemon_policy_write_record_primary": "fd545eb0aa25baaf932a661079bf4cf18a04b49204f08d86f45db4ebbfae4e30"
   },
   "owners": {
-    "count": 20,
-    "sha256": "b3875b8913cbb0aad01cc0e4759cbced34f21c78f703d4b8084c8d35ca758e7a"
+    "count": 21,
+    "sha256": "f74320d81036abe8e4241ffb9edb1ca98da66535c38eca964eec7cc0aadc23d9"
   },
   "profile": "raw-conditional-declarations-v1",
   "rationale": "Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.",
