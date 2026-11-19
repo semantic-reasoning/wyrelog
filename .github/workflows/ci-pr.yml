@@ -639,7 +639,11 @@ jobs:
     # with exactly those options and runs the packaged suite (NOT the whole
     # --suite wyrelog, to keep it independent of unrelated pre-existing
     # fact-store-config failures) so the platform matrix's Linux runtime claim
-    # is actually exercised on a runner.
+    # is actually exercised on a runner. It is also the only job built with
+    # enable_fault_injection, so it runs the wyctl token-file write-fault
+    # tests too (#1546): the wyctl-token-file unit tests (including the fault
+    # cases) and the wyctl-token-file-write-faults CLI cases
+    # (--fault-inject-token-file).
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -689,7 +693,9 @@ jobs:
             service-credential-rotation-e2e \
             service-credential-leak-scan-e2e \
             service-credential-publication-fault-e2e \
-            service-credential-platform-matrix
+            service-credential-platform-matrix \
+            wyctl-token-file \
+            wyctl-token-file-write-faults
 
       - name: Upload meson logs on failure
         if: ${{ runner.environment == 'github-hosted' && (failure()) }}
