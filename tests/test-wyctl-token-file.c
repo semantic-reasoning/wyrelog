@@ -605,6 +605,269 @@ test_windows_final_reparse_is_rejected (void)
 }
 #endif
 
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+typedef struct
+{
+  gchar *dir;
+  gchar *path;
+  gchar *second_path;
+} FaultFixture;
+
+static void
+fault_fixture_init (FaultFixture *fixture)
+{
+  wyctl_token_file_arm_faults_once (0);
+  wyctl_token_file_fault_skip_protected_writes (0);
+  fixture->dir = g_dir_make_tmp ("wyctl-fault-XXXXXX", NULL);
+  g_assert_nonnull (fixture->dir);
+  fixture->path = g_build_filename (fixture->dir, "token", NULL);
+  fixture->second_path = g_build_filename (fixture->dir, "second", NULL);
+}
+
+static void
+fault_fixture_clear (FaultFixture *fixture)
+{
+  wyctl_token_file_arm_faults_once (0);
+  wyctl_token_file_fault_skip_protected_writes (0);
+  g_unlink (fixture->path);
+  g_unlink (fixture->second_path);
+  g_rmdir (fixture->dir);
+  g_free (fixture->path);
+  g_free (fixture->second_path);
+  g_free (fixture->dir);
+}
+
+static void
+assert_protected_file (const gchar *path, const gchar *expected)
+{
+  struct stat st;
+  g_assert_cmpint (lstat (path, &st), ==, 0);
+  g_assert_true (S_ISREG (st.st_mode));
+  g_assert_cmpint (st.st_mode & 0777, ==, 0600);
+  g_autofree gchar *contents = NULL;
+  gsize length = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &length, NULL));
+  g_assert_cmpmem (contents, length, expected, strlen (expected));
+}
+
+/* Number of open descriptors, or -1 where /proc/self/fd is unavailable. The
+ * directory handle used to count is open during both counts, so it cancels
+ * out of a before/after comparison. */
+static gint
+count_open_fds (void)
+{
+#ifdef __linux__
+  GDir *dir = g_dir_open ("/proc/self/fd", 0, NULL);
+  g_assert_nonnull (dir);
+  gint count = 0;
+  while (g_dir_read_name (dir) != NULL)
+    count++;
+  g_dir_close (dir);
+  return count;
+#else
+  return -1;
+#endif
+}
+
+static void
+test_fault_spec_parse (void)
+{
+  static const struct
+  {
+    const gchar *name;
+    guint bit;
+  } names[] = {
+    { "write", WYCTL_TOKEN_FILE_FAULT_WRITE },
+    { "file-sync", WYCTL_TOKEN_FILE_FAULT_FILE_SYNC },
+    { "file-close", WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE },
+    { "dir-sync", WYCTL_TOKEN_FILE_FAULT_DIR_SYNC },
+    { "dir-close", WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE },
+    { "cleanup-unlink", WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK },
+  };
+  guint all = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
+    guint mask = 0;
+    g_assert_true (wyctl_token_file_parse_faults (names[i].name, &mask));
+    g_assert_cmpuint (mask, ==, names[i].bit);
+    g_assert_cmpuint (all & names[i].bit, ==, 0);
+    all |= names[i].bit;
+  }
+  guint mask = 0;
+  g_assert_true (wyctl_token_file_parse_faults
+        ("write,file-sync,file-close,dir-sync,dir-close,cleanup-unlink",
+      &mask));
+  g_assert_cmpuint (mask, ==, all);
+  g_assert_true (wyctl_token_file_parse_faults ("file-sync,cleanup-unlink",
+      &mask));
+  g_assert_cmpuint (mask, ==, WYCTL_TOKEN_FILE_FAULT_FILE_SYNC
+      | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+
+  static const gchar *const rejected[] = {
+    "", ",", "write,", ",write", "write,,dir-sync", "bogus", "write,bogus",
+    "Write", " write", "write ",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (rejected); i++)
+    g_assert_false (wyctl_token_file_parse_faults (rejected[i], &mask));
+  g_assert_false (wyctl_token_file_parse_faults (NULL, &mask));
+}
+
+static void
+test_write_fault_is_io (void)
+{
+  static const guint faults[] = {
+    WYCTL_TOKEN_FILE_FAULT_WRITE,
+    WYCTL_TOKEN_FILE_FAULT_FILE_SYNC,
+    WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (faults[i]);
+    gint fds_before = count_open_fds ();
+    g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+        "secret-1", 8), ==, WYCTL_TOKEN_FILE_IO);
+    g_assert_cmpint (count_open_fds (), ==, fds_before);
+    g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    fault_fixture_clear (&fixture);
+  }
+
+  /* A failed write is cleaned up without the directory flush the sync and
+   * close failure paths perform, so the dir-sync point is not reached here
+   * and stays armed. */
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_WRITE
+      | WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+      "secret-1", 8), ==, WYCTL_TOKEN_FILE_IO);
+  g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==,
+      WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  fault_fixture_clear (&fixture);
+}
+
+static void
+test_dir_sync_fault_is_durability_uncertain (void)
+{
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+      "secret-1", 8), ==, WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  assert_protected_file (fixture.path, "secret-1");
+  fault_fixture_clear (&fixture);
+}
+
+static void
+test_cleanup_flush_fault_stays_io (void)
+{
+  static const guint faults[] = {
+    WYCTL_TOKEN_FILE_FAULT_FILE_SYNC,
+    WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (faults[i]
+        | WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+    gint fds_before = count_open_fds ();
+    g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+        "secret-1", 8), ==, WYCTL_TOKEN_FILE_IO);
+    g_assert_cmpint (count_open_fds (), ==, fds_before);
+    g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    fault_fixture_clear (&fixture);
+  }
+}
+
+static void
+test_cleanup_unlink_not_reached_on_success (void)
+{
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+      "secret-1", 8), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==,
+      WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+  assert_protected_file (fixture.path, "secret-1");
+  fault_fixture_clear (&fixture);
+}
+
+/* The status of a failed cleanup unlink changes in a later commit; only the
+ * leftover file and the consumed points are pinned here. */
+static void
+test_cleanup_unlink_fault_fires_independently (void)
+{
+  static const guint faults[] = {
+    WYCTL_TOKEN_FILE_FAULT_FILE_SYNC,
+    WYCTL_TOKEN_FILE_FAULT_WRITE,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (faults[i]
+        | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+    (void) wyctl_token_file_write_protected (fixture.path, "secret-1", 8);
+    g_assert_true (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    fault_fixture_clear (&fixture);
+  }
+}
+
+/* The status of a failed parent close changes in a later commit; only the
+ * kept file, the consumed point and the closed descriptor are pinned. */
+static void
+test_dir_close_fault_keeps_file (void)
+{
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE);
+  gint fds_before = count_open_fds ();
+  (void) wyctl_token_file_write_protected (fixture.path, "secret-1", 8);
+  g_assert_cmpint (count_open_fds (), ==, fds_before);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  assert_protected_file (fixture.path, "secret-1");
+  fault_fixture_clear (&fixture);
+}
+
+static void
+test_fault_skip_protected_writes (void)
+{
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  wyctl_token_file_fault_skip_protected_writes (1);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_WRITE);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+      "secret-1", 8), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==,
+      WYCTL_TOKEN_FILE_FAULT_WRITE);
+  assert_protected_file (fixture.path, "secret-1");
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.second_path,
+      "secret-2", 8), ==, WYCTL_TOKEN_FILE_IO);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  g_assert_false (g_file_test (fixture.second_path, G_FILE_TEST_EXISTS));
+  fault_fixture_clear (&fixture);
+
+  /* The pair writer makes the refresh write first; skipping it lets the
+   * fault land on the access write, and the refresh file is rolled back. */
+  fault_fixture_init (&fixture);
+  wyctl_token_file_fault_skip_protected_writes (1);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_FILE_SYNC);
+  const gchar *failed_path = NULL;
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (fixture.path,
+      "refresh-1", 9, fixture.second_path, "access-1", 8, &failed_path), ==,
+      WYCTL_TOKEN_FILE_IO);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  g_assert_true (failed_path == fixture.second_path);
+  g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (fixture.second_path, G_FILE_TEST_EXISTS));
+  fault_fixture_clear (&fixture);
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -659,6 +922,23 @@ main (int argc, char **argv)
       test_windows_ancestor_reparse_is_rejected);
   g_test_add_func ("/wyctl/token-file/windows-final-reparse-rejected",
       test_windows_final_reparse_is_rejected);
+#endif
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+  g_test_add_func ("/wyctl/token-file/fault-spec-parse", test_fault_spec_parse);
+  g_test_add_func ("/wyctl/token-file/write-fault-is-io",
+      test_write_fault_is_io);
+  g_test_add_func ("/wyctl/token-file/dir-sync-fault-is-durability-uncertain",
+      test_dir_sync_fault_is_durability_uncertain);
+  g_test_add_func ("/wyctl/token-file/cleanup-flush-fault-stays-io",
+      test_cleanup_flush_fault_stays_io);
+  g_test_add_func ("/wyctl/token-file/cleanup-unlink-not-reached-on-success",
+      test_cleanup_unlink_not_reached_on_success);
+  g_test_add_func ("/wyctl/token-file/cleanup-unlink-fault-fires-independently",
+      test_cleanup_unlink_fault_fires_independently);
+  g_test_add_func ("/wyctl/token-file/dir-close-fault-keeps-file",
+      test_dir_close_fault_keeps_file);
+  g_test_add_func ("/wyctl/token-file/fault-skip-protected-writes",
+      test_fault_skip_protected_writes);
 #endif
   return wyl_test_normalize_exit_status (g_test_run ());
 }
