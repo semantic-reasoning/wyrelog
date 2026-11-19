@@ -386,6 +386,13 @@ test('service-credential-platform-matrix', python3,
     meson.project_source_root() / '.github' / 'workflows' / 'ci-pr.yml',
     meson.current_source_dir()
       / 'test-service-credential-operation-coordinator-execute.c',
+    meson.current_source_dir() / 'test-wyctl-basic.c',
+  ],
+)
+test('service-credential-platform-matrix-self-test', python3,
+  args : [
+    meson.current_source_dir() / 'check-service-credential-platform-matrix.py',
+    '--self-test',
   ],
 )
 
@@ -1310,6 +1317,37 @@ if build_client and host_machine.system() != 'windows'
         timeout : 180,
       )
     endforeach
+    # #1546: the token-file write-fault CLI cases, on their own so the
+    # fault-injection CI job can name them. The hook and its hidden flag exist
+    # only in enable_fault_injection builds on POSIX hosts. wyctl-basic runs
+    # the same cases in those builds too, so they run twice there; that is
+    # accepted to keep this registration a plain filter. The login case waits
+    # out a 1000 ms logout against the one-request fake daemon.
+    # The Windows exclusion is deliberate though no Windows job enables fault
+    # injection: it mirrors the C gate (!G_OS_WIN32) on the hook and flag.
+    if get_option('enable_fault_injection').allowed() and \
+        host_machine.system() != 'windows'
+      wyctl_token_file_fault_paths = [
+        '/wyctl/tenant-data-credential-write-faults',
+        '/wyctl/tenant-data-credential-repeated-fault-flags',
+        '/wyctl/login-publication-incomplete-remains',
+        '/wyctl/service-token-output-incomplete-remains',
+        '/wyctl/refresh-access-incomplete-remains',
+        '/wyctl/fault-inject-token-file-flag',
+      ]
+      wyctl_token_file_fault_args = [
+        files('run-wyctl-with-private-tmpdir.py'), test_wyctl_basic,
+      ]
+      foreach fault_path : wyctl_token_file_fault_paths
+        wyctl_token_file_fault_args += ['-p', fault_path]
+      endforeach
+      test('wyctl-token-file-write-faults', python3,
+        args : wyctl_token_file_fault_args,
+        depends : [wyctl_exe, wyctl_gschemas_compiled, test_wyctl_basic],
+        env : wyctl_gsettings_test_env,
+        timeout : 120,
+      )
+    endif
   else
     # Keep Meson's normal cross-build skip behavior without an exe wrapper.
     test('wyctl-basic', test_wyctl_basic,

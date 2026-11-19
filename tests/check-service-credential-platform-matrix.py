@@ -25,6 +25,16 @@ agreement with docs/service-credential-platform-support.md:
                                   (macOS, Windows) MUST have its runner job and
                                   named native gates present. A matrix-claimed
                                   platform with no runner BLOCKS the gate.
+                                  The service-credential-e2e job, the only
+                                  enable_fault_injection build, MUST also run
+                                  the wyctl token-file fault tests (#1546).
+  * tests/test-wyctl-basic.c   -- every `-p` path the filtered
+                                  wyctl-token-file-write-faults registration
+                                  passes MUST be a g_test_add_func literal
+                                  there: GLib exits 0 with `1..0` for an
+                                  unknown -p, so a typo would pass silently.
+
+`--self-test` runs the #1546 checks against built-in negative cases.
 
 The checker NEVER skips-as-pass: a missing file it needs to read is a FAILURE,
 not a pass.
@@ -59,9 +69,17 @@ WINDOWS_NEGATIVE_GATE = "host_machine.system() != 'windows'"
 WINDOWS_NATIVE_GATES = ("secure-duckdb-bridge", "fact-artifact-namespace-windows")
 MACOS_NATIVE_GATES = ("secure-duckdb-bridge",)
 
+# The wyctl token-file write-fault tests (#1546). The hook and its CLI flag
+# exist only in enable_fault_injection builds, and service-credential-e2e is
+# the only CI job built that way, so it must name both in its meson test list.
+TOKEN_FILE_FAULT_TESTS = ("wyctl-token-file", "wyctl-token-file-write-faults")
+TOKEN_FILE_FAULT_REGISTRATION = "wyctl-token-file-write-faults"
+TOKEN_FILE_FAULT_PATHS_VAR = "wyctl_token_file_fault_paths"
+
 USAGE = (
     "usage: check-service-credential-platform-matrix.py "
-    "MESON_BUILD MATRIX_DOC CI_MAIN CI_PR EVIDENCE_C"
+    "MESON_BUILD MATRIX_DOC CI_MAIN CI_PR EVIDENCE_C TEST_WYCTL_BASIC_C\n"
+    "       check-service-credential-platform-matrix.py --self-test"
 )
 
 
@@ -219,6 +237,141 @@ def check_meson_gating(meson_text: str) -> None:
         )
 
 
+def fault_job_meson_tests(label: str, ci_text: str) -> list[str]:
+    """Test names on the service-credential-e2e job's `meson test` line.
+
+    Exact tokens, so `wyctl-token-file-write-faults` cannot stand in for
+    `wyctl-token-file`, and a mention in a comment or another job does not
+    count.
+    """
+    lines = ci_text.splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if line.rstrip() == "  service-credential-e2e:"), None)
+    if start is None:
+        fail(f"{label}: no 'service-credential-e2e:' job to hold the "
+             "enable_fault_injection tests")
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r"^  \S", lines[i])), len(lines))
+    job = "\n".join(strip_yaml_comment(line) for line in lines[start:end])
+    match = re.search(r"meson test -C builddir((?:[^\n]*\\\n)*[^\n]*)", job)
+    if match is None:
+        fail(f"{label}: the service-credential-e2e job has no "
+             "`meson test -C builddir` step")
+    return [token for token in re.split(r"[\s\\]+", match.group(1))
+            if token and not token.startswith("-")]
+
+
+def strip_yaml_comment(line: str) -> str:
+    stripped = line.lstrip()
+    return "" if stripped.startswith("#") else line
+
+
+def check_ci_token_file_faults(label: str, ci_text: str) -> None:
+    tests = fault_job_meson_tests(label, ci_text)
+    for name in TOKEN_FILE_FAULT_TESTS:
+        if name not in tests:
+            fail(f"{label}: the service-credential-e2e job is the only "
+                 f"enable_fault_injection build, so its meson test list must "
+                 f"name '{name}' (#1546); it names {tests!r}")
+
+
+def token_file_fault_paths(meson_text: str) -> list[str]:
+    lines = meson_text.splitlines()
+    idx = find_test_line(lines, TOKEN_FILE_FAULT_REGISTRATION)
+    conditions = " || ".join(open_if_conditions_at(lines, idx))
+    if FAULT_INJECTION_GATE not in conditions:
+        fail(f"test('{TOKEN_FILE_FAULT_REGISTRATION}') must sit under a "
+             f"`{FAULT_INJECTION_GATE}` gate; open conditions were: "
+             f"{conditions!r}")
+    match = re.search(re.escape(TOKEN_FILE_FAULT_PATHS_VAR)
+                      + r"\s*=\s*\[(.*?)\]", meson_text, re.DOTALL)
+    if match is None:
+        fail(f"tests/meson.build: no `{TOKEN_FILE_FAULT_PATHS_VAR} = [...]` "
+             f"list for test('{TOKEN_FILE_FAULT_REGISTRATION}')")
+    paths = re.findall(r"'([^']+)'", match.group(1))
+    if not paths:
+        fail(f"tests/meson.build: `{TOKEN_FILE_FAULT_PATHS_VAR}` is empty, so "
+             f"test('{TOKEN_FILE_FAULT_REGISTRATION}') would run nothing")
+    return paths
+
+
+def check_token_file_fault_paths(meson_text: str, c_text: str) -> None:
+    registered = set(re.findall(r'g_test_add_func\s*\(\s*"([^"]+)"', c_text))
+    for path in token_file_fault_paths(meson_text):
+        if path not in registered:
+            fail(f"tests/meson.build: test('{TOKEN_FILE_FAULT_REGISTRATION}') "
+                 f"passes -p '{path}', but tests/test-wyctl-basic.c has no "
+                 "g_test_add_func for it; GLib exits 0 with '1..0' for an "
+                 "unknown -p, so the test would pass without running it")
+
+
+def self_test() -> None:
+    job = (
+        "jobs:\n"
+        "  service-credential-e2e:\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          meson test -C builddir --print-errorlogs \\\n"
+        "            service-credential-platform-matrix \\\n"
+        "{tests}"
+        "  next-job:\n"
+        "    steps:\n"
+        "      - run: meson test -C builddir wyctl-token-file\n"
+    )
+    both = ("            wyctl-token-file \\\n"
+            "            wyctl-token-file-write-faults\n")
+    meson = (
+        "if get_option('enable_fault_injection').allowed()\n"
+        "  wyctl_token_file_fault_paths = [\n"
+        "{paths}"
+        "  ]\n"
+        "  test('wyctl-token-file-write-faults', python3)\n"
+        "endif\n"
+    )
+    c_text = ('  g_test_add_func ("/wyctl/a", test_a);\n'
+              '  g_test_add_func (\n      "/wyctl/b", test_b);\n')
+
+    def expect(action, needle: str | None) -> None:
+        try:
+            action()
+        except SystemExit as exc:
+            if needle is None or needle not in str(exc):
+                raise SystemExit(f"self-test: unexpected failure: {exc}")
+            return
+        if needle is not None:
+            raise SystemExit(f"self-test: expected a failure naming {needle!r}")
+
+    expect(lambda: check_ci_token_file_faults("ok.yml",
+           job.format(tests=both)), None)
+    # Only the longer name: the shorter must not match as a substring.
+    expect(lambda: check_ci_token_file_faults("short.yml", job.format(
+           tests="            wyctl-token-file-write-faults\n")),
+           "must name 'wyctl-token-file'")
+    # The unit test named only in a comment and in another job.
+    expect(lambda: check_ci_token_file_faults("comment.yml", job.format(
+           tests="            # wyctl-token-file\n"
+                 "            wyctl-token-file-write-faults\n")),
+           "must name 'wyctl-token-file'")
+    expect(lambda: check_ci_token_file_faults("missing.yml", job.format(
+           tests="            wyctl-token-file\n")),
+           "must name 'wyctl-token-file-write-faults'")
+    expect(lambda: check_ci_token_file_faults("nojob.yml", "jobs:\n"),
+           "no 'service-credential-e2e:' job")
+
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n    '/wyctl/b',\n"), c_text), None)
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n    '/wyctl/renamed',\n"), c_text),
+           "passes -p '/wyctl/renamed'")
+    expect(lambda: check_token_file_fault_paths(meson.format(paths=""),
+           c_text), "is empty")
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "get_option('enable_fault_injection').allowed()", "true"),
+           c_text), "must sit under a `enable_fault_injection` gate")
+    print("service-credential platform matrix self-test passed")
+
+
 def check_matrix_doc(doc_text: str) -> None:
     lowered = doc_text.lower()
 
@@ -308,6 +461,7 @@ def check_ci_workflow(path: Path, ci_text: str) -> None:
         if test_name not in ci_text:
             fail(f"{label}: the service-credential-e2e job must run "
                  f"'{test_name}'; the packaged runtime gate must be exercised")
+    check_ci_token_file_faults(label, ci_text)
 
     # Build-only platform: macOS runner + its native gate present.
     if "macos-latest" not in ci_text:
@@ -329,7 +483,10 @@ def check_ci_workflow(path: Path, ci_text: str) -> None:
 
 
 def main(argv: list[str]) -> None:
-    if len(argv) != 6:
+    if len(argv) == 2 and argv[1] == "--self-test":
+        self_test()
+        return
+    if len(argv) != 7:
         fail(USAGE)
 
     meson_path = Path(argv[1])
@@ -337,11 +494,14 @@ def main(argv: list[str]) -> None:
     ci_main_path = Path(argv[3])
     ci_pr_path = Path(argv[4])
     evidence_path = Path(argv[5])
+    wyctl_basic_path = Path(argv[6])
 
     meson_text = read_text_or_fail(meson_path, "tests/meson.build")
     doc_text = read_text_or_fail(doc_path, "matrix doc")
     ci_main_text = read_text_or_fail(ci_main_path, "ci-main.yml")
     ci_pr_text = read_text_or_fail(ci_pr_path, "ci-pr.yml")
+    wyctl_basic_text = read_text_or_fail(wyctl_basic_path,
+                                         "tests/test-wyctl-basic.c")
 
     # The C-unit evidence the doc links must actually exist.
     if not evidence_path.is_file():
@@ -351,6 +511,7 @@ def main(argv: list[str]) -> None:
         )
 
     check_meson_gating(meson_text)
+    check_token_file_fault_paths(meson_text, wyctl_basic_text)
     check_matrix_doc(doc_text)
     check_ci_workflow(ci_main_path, ci_main_text)
     check_ci_workflow(ci_pr_path, ci_pr_text)
