@@ -35,7 +35,8 @@ GATED = {
     "enable_audit": "18 audit-gated registrations",
     "enable_secure_duckdb_bridge": "6 secure-bridge registrations",
     "enable_break_glass": "2 break-glass registrations",
-    "enable_fault_injection": "the fault-injection registration",
+    "enable_fault_injection": "fault-injection cases, including the "
+        "wyctl token-file write-fault cases (--fault-inject-token-file)",
 }
 
 # What --strict insists on: everything the documented setup command can turn on
