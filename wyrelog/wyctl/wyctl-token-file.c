@@ -598,6 +598,8 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     written += (gsize) n;
   }
   gboolean sync_ok = WYCTL_TOKEN_FILE_FSYNC_FILE (fd) == 0;
+  /* A failed close of the written file stays IO and is cleaned up: close can
+   * report a deferred write error (on NFS, for example). */
   gboolean close_ok = WYCTL_TOKEN_FILE_CLOSE_FILE (fd) == 0;
   if (!sync_ok || !close_ok) {
     (void) WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
@@ -606,11 +608,11 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     return WYCTL_TOKEN_FILE_IO;
   }
   gboolean parent_sync_ok = WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd) == 0;
-  gboolean parent_close_ok = WYCTL_TOKEN_FILE_CLOSE_DIR (dirfd) == 0;
+  /* The directory fd is read-only and, once fsync succeeded, the new entry is
+   * already flushed, so a failed close cannot lose anything: discard it. */
+  (void) WYCTL_TOKEN_FILE_CLOSE_DIR (dirfd);
   if (!parent_sync_ok)
     return WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN;
-  if (!parent_close_ok)
-    return WYCTL_TOKEN_FILE_IO;
   return WYCTL_TOKEN_FILE_OK;
 #endif
 }

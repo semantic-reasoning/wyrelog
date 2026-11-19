@@ -817,8 +817,8 @@ test_cleanup_unlink_fault_fires_independently (void)
   }
 }
 
-/* The status of a failed parent close changes in a later commit; only the
- * kept file, the consumed point and the closed descriptor are pinned. */
+/* The directory was flushed before the failed close, so the write is
+ * complete and durable: OK, with the file kept and no descriptor leaked. */
 static void
 test_dir_close_fault_keeps_file (void)
 {
@@ -826,11 +826,35 @@ test_dir_close_fault_keeps_file (void)
   fault_fixture_init (&fixture);
   wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE);
   gint fds_before = count_open_fds ();
-  (void) wyctl_token_file_write_protected (fixture.path, "secret-1", 8);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+      "secret-1", 8), ==, WYCTL_TOKEN_FILE_OK);
   g_assert_cmpint (count_open_fds (), ==, fds_before);
   g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
   assert_protected_file (fixture.path, "secret-1");
   fault_fixture_clear (&fixture);
+}
+
+/* A parent close failure after a flushed directory is success on either
+ * write of the pair: skip 0 aims it at the refresh write, skip 1 at the
+ * access write. Both files are kept. */
+static void
+test_pair_dir_close_fault_is_ok (void)
+{
+  for (guint skip = 0; skip < 2; skip++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    wyctl_token_file_fault_skip_protected_writes (skip);
+    wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE);
+    const gchar *failed_path = NULL;
+    g_assert_cmpint (wyctl_token_file_write_pair_protected (fixture.path,
+        "refresh-1", 9, fixture.second_path, "access-1", 8, &failed_path),
+        ==, WYCTL_TOKEN_FILE_OK);
+    g_assert_null (failed_path);
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    assert_protected_file (fixture.path, "refresh-1");
+    assert_protected_file (fixture.second_path, "access-1");
+    fault_fixture_clear (&fixture);
+  }
 }
 
 static void
@@ -937,6 +961,8 @@ main (int argc, char **argv)
       test_cleanup_unlink_fault_fires_independently);
   g_test_add_func ("/wyctl/token-file/dir-close-fault-keeps-file",
       test_dir_close_fault_keeps_file);
+  g_test_add_func ("/wyctl/token-file/pair-dir-close-fault-is-ok",
+      test_pair_dir_close_fault_is_ok);
   g_test_add_func ("/wyctl/token-file/fault-skip-protected-writes",
       test_fault_skip_protected_writes);
 #endif
