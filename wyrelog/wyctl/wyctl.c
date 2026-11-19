@@ -9087,6 +9087,33 @@ run_profile (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+/* #1546 test-only token-file write fault injection. This callback and its
+ * hidden option exist only in enable_fault_injection builds; a release wyctl
+ * has neither. It arms the named single-shot fault points and warns loudly. */
+static gboolean
+wyctl_fault_inject_token_file_cb (const gchar *option_name,
+    const gchar *value, gpointer data, GError **error)
+{
+  (void) option_name;
+  (void) data;
+  guint mask = 0;
+  if (!wyctl_token_file_parse_faults (value, &mask)) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "invalid --fault-inject-token-file value: %s", value);
+    return FALSE;
+  }
+  /* A repeated flag adds to the armed set, as the comma form does; the
+   * warning is printed once, by the first use. */
+  guint armed = wyctl_token_file_armed_faults ();
+  if (armed == 0)
+    g_printerr ("wyctl: WARNING: token-file write fault injection ARMED; "
+        "test only, not for production\n");
+  wyctl_token_file_arm_faults_once (armed | mask);
+  return TRUE;
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -9098,6 +9125,11 @@ main (int argc, char **argv)
      "Daemon probe timeout in milliseconds", "N"},
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts.show_version,
      "Print version and exit", NULL},
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+    {"fault-inject-token-file", 0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_CALLBACK,
+     (gpointer) wyctl_fault_inject_token_file_cb,
+     "Test only: fail the named token-file write steps once", "LIST"},
+#endif
     {NULL}
   };
   g_autoptr (GError) error = NULL;

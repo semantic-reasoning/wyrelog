@@ -52,15 +52,18 @@ option('enable_fact_store',
 option('enable_fault_injection',
   type : 'feature',
   value : 'disabled',
-  description : 'Compile in the test-only, single-shot service-credential '
-              + 'publication fault-injection seam and its daemon arming flag '
-              + '(--fault-inject-sc-publication-once). Disabled by default so '
-              + 'release builds do not contain the seam or the flag at all: '
-              + 'with this off the macro WYL_ENABLE_FAULT_INJECTION is '
+  description : 'Compile in the test-only, single-shot fault-injection '
+              + 'seams and their arming flags: the service-credential '
+              + 'publication seam with the daemon flag '
+              + '--fault-inject-sc-publication-once, and the wyctl token-file '
+              + 'write hook with the hidden wyctl flag '
+              + '--fault-inject-token-file (POSIX only). Disabled by default '
+              + 'so release builds do not contain the seams or the flags at '
+              + 'all: with this off the macro WYL_ENABLE_FAULT_INJECTION is '
               + 'undefined and the injection code is not compiled, making a '
-              + 'release daemon byte-identical to today and impossible to arm. '
-              + 'Enable only for test/CI builds that run the packaged '
-              + 'service-credential publication-fault end-to-end proof.'
+              + 'release daemon and wyctl byte-identical to today and '
+              + 'impossible to arm. Enable only for test/CI builds that run '
+              + 'the fault-injection proofs.'
 )
 
 option('enable_windows_artifact_test_hooks',

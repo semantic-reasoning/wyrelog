@@ -6771,13 +6771,18 @@ test_tenant_refusals (void)
   "with `--request-id " id "` to find out (a created credential comes " \
   "back as a replay)\n"
 
-/* Runs `wyctl tenant data-credential ACTION --tenant acme` with the token,
- * the guards and the NULL-terminated EXTRA arguments. */
+/* Runs `wyctl [GLOBALS] tenant data-credential ACTION --tenant acme` with
+ * the token, the guards and the NULL-terminated EXTRA arguments. GLOBALS,
+ * when not NULL, is a NULL-terminated list of global options placed before
+ * the command, where strict POSIX parsing still reads them. */
 static void
-run_data_credential_case (guint status, const gchar *body,
-    const gchar *action, const gchar *const *extra, FactForgetRun *run)
+run_data_credential_case_with_globals (const gchar *const *globals,
+    guint status, const gchar *body, const gchar *action,
+    const gchar *const *extra, FactForgetRun *run)
 {
   g_autoptr (GPtrArray) args = g_ptr_array_new ();
+  for (const gchar *const *arg = globals; arg != NULL && *arg != NULL; arg++)
+    g_ptr_array_add (args, (gpointer) *arg);
   const gchar *const fixed[] = {
     "tenant", "data-credential", action, "--tenant", "acme",
     "--access-token-file", "@TOKEN@", GRAPH_GUARDS,
@@ -6793,6 +6798,30 @@ run_data_credential_case (guint status, const gchar *body,
       (const gchar * const *) args->pdata, FALSE, run);
   umask (saved);
 }
+
+static void
+run_data_credential_case (guint status, const gchar *body,
+    const gchar *action, const gchar *const *extra, FactForgetRun *run)
+{
+  run_data_credential_case_with_globals (NULL, status, body, action, extra,
+      run);
+}
+
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+/* run_data_credential_case with token-file write faults FAULTS armed through
+ * --fault-inject-token-file. */
+static void
+run_data_credential_fault_case (const gchar *faults, guint status,
+    const gchar *body, const gchar *action, const gchar *const *extra,
+    FactForgetRun *run)
+{
+  g_autofree gchar *flag = g_strconcat ("--fault-inject-token-file=", faults,
+          NULL);
+  const gchar *const globals[] = { flag, NULL };
+  run_data_credential_case_with_globals (globals, status, body, action,
+      extra, run);
+}
+#endif
 
 static const gchar *
 data_credential_request_body (const gchar *request)
@@ -7282,6 +7311,211 @@ test_tenant_data_credential_rotate (void)
   remove_dir_recursive (dir);
 }
 
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+#define DC_FAULT_ARMED \
+  "wyctl: WARNING: token-file write fault injection ARMED; test only, not " \
+  "for production\n"
+
+/* The stderr of an issue or rotate whose secret write failed with an I/O
+ * error and was cleaned up, after the ARMED line. */
+static gchar *
+data_credential_fault_gone_err (gboolean rotating, const gchar *path)
+{
+  if (rotating)
+    return g_strdup_printf (DC_FAULT_ARMED "wyctl: credential " DC_ID
+               " replaced " DC_OLD_ID ", which is now revoked, but its "
+               "secret could not be written to %s: I/O error; the secret "
+               "is gone\n"
+               "wyctl: rotate it again with `wyctl tenant data-credential "
+               "rotate --tenant acme --id " DC_ID " --output <fresh "
+               "path>`\n", path);
+  return g_strdup_printf (DC_FAULT_ARMED "wyctl: credential " DC_ID
+             " was issued, but its secret could not be written to %s: "
+             "I/O error; the secret is gone\n"
+             "wyctl: revoke it with `wyctl tenant data-credential revoke "
+             "--tenant acme --id " DC_ID "`, then issue a new one\n", path);
+}
+
+/* #1546: each token-file write fault point, armed from the command line,
+ * against issue and rotate. The daemon answer is a success, so every outcome
+ * here is the local secret write's. */
+static void
+test_tenant_data_credential_write_faults (void)
+{
+  typedef enum
+  {
+    DC_FAULT_GONE,
+    DC_FAULT_UNCERTAIN,
+    DC_FAULT_WRITTEN,
+  } DcFaultOutcome;
+  static const struct
+  {
+    const gchar *fault;
+    DcFaultOutcome outcome;
+  } faults[] = {
+    {"write", DC_FAULT_GONE},
+    {"file-sync", DC_FAULT_GONE},
+    {"file-close", DC_FAULT_GONE},
+    {"dir-sync", DC_FAULT_UNCERTAIN},
+    {"dir-close", DC_FAULT_WRITTEN},
+  };
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-dc-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "dc.json", NULL);
+  for (gsize rotating = 0; rotating < 2; rotating++) {
+    for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+      const gchar *const issue_args[] = {
+        "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output",
+        path, "--request-id", DC_REQUEST_ID, NULL,
+      };
+      const gchar *const rotate_args[] = {
+        "--id", DC_OLD_ID, "--output", path, "--request-id", DC_REQUEST_ID,
+        NULL,
+      };
+      g_auto (FactForgetRun) run = { 0 };
+      if (rotating)
+        run_data_credential_fault_case (faults[i].fault, 200,
+            DC_ISSUED (DC_CREDENTIAL ("\"" DC_OLD_ID "\"")), "rotate",
+            rotate_args, &run);
+      else
+        run_data_credential_fault_case (faults[i].fault, 200,
+            DC_ISSUED (DC_CREDENTIAL ("null")), "issue", issue_args, &run);
+      assert_secret_absent (&run);
+      g_assert_nonnull (run.request);
+
+      const gchar *success_line = rotating
+          ? "tenant=acme credential_id=" DC_ID " rotated_from=" DC_OLD_ID
+          " generation=1 state=active expires_at_us=200 request_id="
+          DC_REQUEST_ID "\n"
+          : "tenant=acme credential_id=" DC_ID " state=active "
+          "operations=query,insert graphs=g1,g%202 expires_at_us=200 "
+          "request_id=" DC_REQUEST_ID "\n";
+      g_autofree gchar *expected_err = NULL;
+      switch (faults[i].outcome) {
+        case DC_FAULT_GONE:
+          assert_fact_forget_exit (&run, 1);
+          g_assert_cmpstr (run.out, ==, "");
+          g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+          expected_err = data_credential_fault_gone_err (rotating != 0, path);
+          break;
+        case DC_FAULT_UNCERTAIN:
+          assert_fact_forget_exit (&run, 1);
+          g_assert_cmpstr (run.out, ==, success_line);
+          assert_data_credential_document (path);
+          expected_err = g_strdup_printf (DC_FAULT_ARMED "wyctl: secret "
+                  "written to %s (mode 0600), but flushing its directory "
+                  "failed, so the file may not survive a crash; inspect it "
+                  "before acting on it\n", path);
+          break;
+        case DC_FAULT_WRITTEN:
+          /* Pins the outcome; test-wyctl-token-file covers the firing. */
+          assert_fact_forget_exit (&run, 0);
+          g_assert_cmpstr (run.out, ==, success_line);
+          assert_data_credential_document (path);
+          expected_err = g_strdup_printf (DC_FAULT_ARMED "wyctl: secret "
+                  "written to %s (mode 0600); it is not shown again\n", path);
+          break;
+        default:
+          g_assert_not_reached ();
+      }
+      g_assert_cmpstr (run.err, ==, expected_err);
+      g_unlink (path);
+    }
+  }
+  remove_dir_recursive (dir);
+}
+
+/* A repeated --fault-inject-token-file adds to what is armed, as the comma
+ * form does. One write cannot reach both write and dir-sync (a failed write
+ * is cleaned up without a directory flush), so the two orders together are
+ * the proof: write first shows a later flag does not replace an earlier one,
+ * and write second shows the later flag is armed at all. Either way the
+ * write fault decides the outcome, and the ARMED line is printed once. */
+static void
+test_tenant_data_credential_repeated_fault_flags (void)
+{
+  static const gchar *const orders[][3] = {
+    {"--fault-inject-token-file=write",
+     "--fault-inject-token-file=dir-sync", NULL},
+    {"--fault-inject-token-file=dir-sync",
+     "--fault-inject-token-file=write", NULL},
+  };
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-dc-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "dc.json", NULL);
+  const gchar *const issue_args[] = {
+    "--ops", "query", "--all-graphs", "--expires-in", "1h", "--output", path,
+    "--request-id", DC_REQUEST_ID, NULL,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (orders); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_data_credential_case_with_globals (orders[i], 200,
+        DC_ISSUED (DC_CREDENTIAL ("null")), "issue", issue_args, &run);
+    assert_secret_absent (&run);
+    assert_fact_forget_exit (&run, 1);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+    g_autofree gchar *expected = data_credential_fault_gone_err (FALSE, path);
+    g_assert_cmpstr (run.err, ==, expected);
+  }
+  remove_dir_recursive (dir);
+}
+#endif
+
+/* --fault-inject-token-file exists only in fault-injection builds, and is
+ * hidden from help there. */
+static void
+test_fault_inject_token_file_flag (void)
+{
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint wait_status = 0;
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+  static const gchar *const helps[] = { "--help", "--help-all" };
+  for (gsize i = 0; i < G_N_ELEMENTS (helps); i++) {
+    gchar *help_argv[] = { WYL_TEST_WYCTL_PATH, (gchar *) helps[i], NULL };
+    g_clear_pointer (&out, g_free);
+    g_clear_pointer (&err, g_free);
+    run_child (help_argv, &out, &err, &wait_status);
+    g_assert_true (wait_status_is_success (wait_status));
+    g_assert_nonnull (g_strstr_len (out, -1, "--daemon-url"));
+    g_assert_null (g_strstr_len (out, -1, "fault-inject"));
+    g_assert_null (g_strstr_len (err, -1, "fault-inject"));
+  }
+
+  static const gchar *const rejected[] = {
+    "--fault-inject-token-file=bogus",
+    "--fault-inject-token-file=write,",
+    "--fault-inject-token-file=",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (rejected); i++) {
+    gchar *bad_argv[] = {
+      WYL_TEST_WYCTL_PATH, (gchar *) rejected[i], "status", NULL,
+    };
+    g_clear_pointer (&out, g_free);
+    g_clear_pointer (&err, g_free);
+    run_child (bad_argv, &out, &err, &wait_status);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+    g_assert_cmpstr (out, ==, "");
+    g_autofree gchar *expected = g_strdup_printf ("wyctl: invalid "
+            "--fault-inject-token-file value: %s\n", rejected[i]
+            + strlen ("--fault-inject-token-file="));
+    g_assert_cmpstr (err, ==, expected);
+  }
+#else
+  gchar *absent_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--fault-inject-token-file=write", "status", NULL,
+  };
+  run_child (absent_argv, &out, &err, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "wyctl: Unknown option "
+      "--fault-inject-token-file=write\n");
+#endif
+}
+
 static void
 test_tenant_data_credential_revoke (void)
 {
@@ -7692,6 +7926,14 @@ main (int argc, char **argv)
       test_tenant_data_credential_list);
   g_test_add_func ("/wyctl/tenant-data-credential-help",
       test_tenant_data_credential_help);
+#if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
+  g_test_add_func ("/wyctl/tenant-data-credential-write-faults",
+      test_tenant_data_credential_write_faults);
+  g_test_add_func ("/wyctl/tenant-data-credential-repeated-fault-flags",
+      test_tenant_data_credential_repeated_fault_flags);
+#endif
+  g_test_add_func ("/wyctl/fault-inject-token-file-flag",
+      test_fault_inject_token_file_flag);
   g_test_add_func ("/wyctl/profile-status", test_profile_status);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);
