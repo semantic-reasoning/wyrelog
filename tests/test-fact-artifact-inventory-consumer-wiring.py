@@ -55,13 +55,13 @@ EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
 EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
-# #1512 adds the exact exclusive-lease exporter check; open/syscall and
-# preprocessing/header profiles retain their previous identities.
+# #1512 checks exact exclusive leases; #1550 scopes errno to each readdir.
+# Open/syscall and preprocessing/header profiles retain their identities.
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "87c72b6754ccf70bb75272d04932dcbce2e1abe9cf37c5fef20205dd1623c9ba"
+    "fadaff01f5b2c34980bb00543255cc8cbf21c7ec759765736a1d4898ba571e8c"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "a27051f84773b5bb10a7f945f47a74722faf6807998aa59f83de736087cf5127"
+    "e03caa779b1b88c5495277eff95fd863d14f64ecfe1aa96a93419edcdb2de252"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
     "52742b63fbdb778655424edc5b1dcf8e203ebc967e9fbe76be864103a43231d1"
@@ -724,13 +724,13 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 31815)
+        artifact_lock_require(len(semantic_tokens) == 31833)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
         )
         call_profile = c_named_call_profile(commentless_source)
-        artifact_lock_require(call_profile is not None and len(call_profile) == 2143)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2146)
         assert call_profile is not None
         artifact_lock_require(
             hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
@@ -1342,7 +1342,8 @@ SECURE_POSIX_ACTIVE_COMMANDS = (
 WINDOWS_ACTIVE_COMMANDS = (
     "$command = @'",
     "@echo off",
-    'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"',
+    'call .github\\scripts\\windows-clang-env.cmd',
+    'if errorlevel 1 exit 1',
     "set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\\tools\\pkgconf\\pkgconf.exe",
     'if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\\subprojects\\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%',
     'if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\\builddir\\subprojects\\duckdb-2.0.0;%PATH%',

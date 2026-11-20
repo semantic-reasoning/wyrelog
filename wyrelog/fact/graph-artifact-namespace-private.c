@@ -4693,8 +4693,16 @@ duckdb_temp_root_audit_unlocked (WylFactDuckdbTempRoot *root)
     return WYRELOG_E_IO;
   }
   wyrelog_error_t result = WYRELOG_E_OK;
-  errno = 0;
-  for (struct dirent * entry; (entry = readdir (dir)) != NULL;) {
+  for (;;) {
+    /* Successful identity checks may leave errno set (Darwin probes an
+     * absent provisioning stage). Only readdir owns this error sample. */
+    errno = 0;
+    struct dirent *entry = readdir (dir);
+    if (entry == NULL) {
+      if (errno != 0)
+        result = WYRELOG_E_IO;
+      break;
+    }
     if (g_strcmp0 (entry->d_name, ".") == 0
         || g_strcmp0 (entry->d_name, "..") == 0)
       continue;
@@ -4706,8 +4714,6 @@ duckdb_temp_root_audit_unlocked (WylFactDuckdbTempRoot *root)
       break;
     }
   }
-  if (errno && result == WYRELOG_E_OK)
-    result = WYRELOG_E_IO;
   if (closedir (dir) != 0 && result == WYRELOG_E_OK)
     result = WYRELOG_E_IO;
   /* Directory enumeration alone cannot observe an externally removed bound
@@ -5134,8 +5140,16 @@ wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
     result = WYRELOG_E_NOMEM;
     goto done;
   }
-  errno = 0;
-  for (struct dirent * entry; (entry = readdir (dir)) != NULL;) {
+  for (;;) {
+    /* Successful identity checks may leave errno set (Darwin probes an
+     * absent provisioning stage). Only readdir owns this error sample. */
+    errno = 0;
+    struct dirent *entry = readdir (dir);
+    if (entry == NULL) {
+      if (errno != 0)
+        result = WYRELOG_E_IO;
+      break;
+    }
     if (g_strcmp0 (entry->d_name, ".") == 0
         || g_strcmp0 (entry->d_name, "..") == 0)
       continue;
@@ -5148,9 +5162,8 @@ wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
     }
     g_ptr_array_add (listed, duckdb_temp_child_ref (child));
   }
-  if (errno != 0 && result == WYRELOG_E_OK)
+  if (closedir (dir) != 0 && result == WYRELOG_E_OK)
     result = WYRELOG_E_IO;
-  closedir (dir);
   if (result == WYRELOG_E_OK
       && duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK)
     result = WYRELOG_E_POLICY;

@@ -1514,7 +1514,8 @@ jobs:
         shell: cmd
         run: |
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig;%VCPKG_INSTALLED_DIR%\share\pkgconfig
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
@@ -1558,7 +1559,8 @@ jobs:
         run: |
           $command = @'
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
           if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
@@ -1597,7 +1599,8 @@ jobs:
         run: |
           $command = @'
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-daemon-http-recursive-credentials
@@ -1613,7 +1616,8 @@ jobs:
         run: |
           $command = @'
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir test-fact-store-forget-transaction
@@ -1628,7 +1632,8 @@ jobs:
         run: |
           $command = @'
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
           if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
@@ -1645,7 +1650,8 @@ jobs:
         run: |
           $command = @'
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
           if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%
@@ -1676,7 +1682,8 @@ jobs:
         run: |
           $command = @'
           @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call .github\scripts\windows-clang-env.cmd
+          if errorlevel 1 exit 1
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64-v2.0.0;%PATH%
           if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-2.0.0;%PATH%

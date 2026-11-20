@@ -4914,3 +4914,9 @@ test_daemon_signals = executable('test-daemon-signals',
   dependencies : glib_dep,
 )
 test('daemon-signals', test_daemon_signals)
+
+# Keep hosted Clang and the selected MSVC STL compatible across image updates.
+test('windows-clang-env', python3,
+  args : [files('test-windows-clang-env.py'), meson.project_source_root()])
+test('windows-clang-env-self-test', python3,
+  args : [files('test-windows-clang-env.py'), '--self-test', meson.project_source_root()])
