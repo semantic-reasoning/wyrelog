@@ -9234,6 +9234,27 @@ wyctl_fault_inject_token_file_cb (const gchar *option_name,
   wyctl_token_file_arm_faults_once (armed | mask);
   return TRUE;
 }
+
+/* #1551 test-only companion: run the next N protected writes with every
+ * fault point suspended, so the armed faults land on a later write, such as
+ * the access file of a login pair. It arms nothing itself, so it prints no
+ * warning; --fault-inject-token-file does. A repeated flag replaces the
+ * count; it does not add to it. */
+static gboolean
+wyctl_fault_inject_token_file_skip_cb (const gchar *option_name,
+    const gchar *value, gpointer data, GError **error)
+{
+  (void) option_name;
+  (void) data;
+  guint64 count = 0;
+  if (!g_ascii_string_to_unsigned (value, 10, 0, G_MAXUINT, &count, NULL)) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "invalid --fault-inject-token-file-skip value: %s", value);
+    return FALSE;
+  }
+  wyctl_token_file_fault_skip_protected_writes ((guint) count);
+  return TRUE;
+}
 #endif
 
 int
@@ -9251,6 +9272,10 @@ main (int argc, char **argv)
     {"fault-inject-token-file", 0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_CALLBACK,
      (gpointer) wyctl_fault_inject_token_file_cb,
      "Test only: fail the named token-file write steps once", "LIST"},
+    {"fault-inject-token-file-skip", 0, G_OPTION_FLAG_HIDDEN,
+     G_OPTION_ARG_CALLBACK,
+     (gpointer) wyctl_fault_inject_token_file_skip_cb,
+     "Test only: let N protected token-file writes pass unfaulted", "N"},
 #endif
     {NULL}
   };

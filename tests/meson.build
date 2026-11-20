@@ -1318,19 +1318,20 @@ if build_client and host_machine.system() != 'windows'
       )
     endforeach
     # #1546: the token-file write-fault CLI cases, on their own so the
-    # fault-injection CI job can name them. The hook and its hidden flag exist
+    # fault-injection CI job can name them. The hook and its hidden flags exist
     # only in enable_fault_injection builds on POSIX hosts. wyctl-basic runs
     # the same cases in those builds too, so they run twice there; that is
-    # accepted to keep this registration a plain filter. The login case waits
+    # accepted to keep this registration a plain filter. The login cases wait
     # out a 1000 ms logout against the one-request fake daemon.
     # The Windows exclusion is deliberate though no Windows job enables fault
-    # injection: it mirrors the C gate (!G_OS_WIN32) on the hook and flag.
+    # injection: it mirrors the C gate (!G_OS_WIN32) on the hook and flags.
     if get_option('enable_fault_injection').allowed() and \
         host_machine.system() != 'windows'
       wyctl_token_file_fault_paths = [
         '/wyctl/tenant-data-credential-write-faults',
         '/wyctl/tenant-data-credential-repeated-fault-flags',
         '/wyctl/login-publication-incomplete-remains',
+        '/wyctl/login-publication-skip-aims-access',
         '/wyctl/service-token-output-incomplete-remains',
         '/wyctl/refresh-access-incomplete-remains',
         '/wyctl/fault-inject-token-file-flag',

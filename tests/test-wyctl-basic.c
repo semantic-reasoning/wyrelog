@@ -7538,10 +7538,12 @@ test_tenant_data_credential_repeated_fault_flags (void)
 
 /* Runs wyctl ARGS against a one-request fake daemon answering 200 with BODY,
  * with file-sync and cleanup-unlink armed, so the first protected write
- * fails and leaves its incomplete file behind. */
+ * fails and leaves its incomplete file behind. A non-NULL SKIP passes
+ * --fault-inject-token-file-skip=SKIP, aiming the faults at a later write;
+ * SKIP_FIRST puts it before the fault flag instead of after. */
 static void
-run_auth_incomplete_case (const gchar *body, const gchar *const *args,
-    FactForgetRun *run)
+run_auth_incomplete_case (const gchar *body, const gchar *skip,
+    gboolean skip_first, const gchar *const *args, FactForgetRun *run)
 {
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -7557,8 +7559,14 @@ run_auth_incomplete_case (const gchar *body, const gchar *const *args,
   g_ptr_array_add (argv, daemon_url);
   g_ptr_array_add (argv, (gpointer) "--timeout-ms");
   g_ptr_array_add (argv, (gpointer) "1000");
+  g_autofree gchar *skip_arg = skip == NULL ? NULL
+      : g_strconcat ("--fault-inject-token-file-skip=", skip, NULL);
+  if (skip_arg != NULL && skip_first)
+    g_ptr_array_add (argv, skip_arg);
   g_ptr_array_add (argv,
       (gpointer) "--fault-inject-token-file=file-sync,cleanup-unlink");
+  if (skip_arg != NULL && !skip_first)
+    g_ptr_array_add (argv, skip_arg);
   for (const gchar *const *arg = args; *arg != NULL; arg++)
     g_ptr_array_add (argv, (gpointer) *arg);
   g_ptr_array_add (argv, NULL);
@@ -7608,7 +7616,7 @@ test_login_publication_incomplete_remains (void)
     refresh_path, NULL,
   };
   g_auto (FactForgetRun) run = { 0 };
-  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, args, &run);
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, NULL, FALSE, args, &run);
   assert_tokens_absent (&run);
   assert_fact_forget_exit (&run, 1);
   g_assert_cmpstr (run.out, ==, "");
@@ -7622,6 +7630,41 @@ test_login_publication_incomplete_remains (void)
   assert_token_leftover (refresh_path, "new-refresh");
   g_assert_false (g_file_test (access_path, G_FILE_TEST_EXISTS));
   remove_dir_recursive (dir);
+}
+
+/* #1551: skipping the first protected write aims the faults at the access
+ * file. The pair writer rolls the refresh file back, and the access leftover
+ * is the one named. The skip flag works before or after the fault flag. */
+static void
+test_login_publication_skip_aims_access (void)
+{
+  for (gsize order = 0; order < 2; order++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyctl-login-skip-XXXXXX", NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+    g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+    const gchar *const args[] = {
+      "auth", "login", "--subject", "alice", "--skip-mfa", "--tenant",
+      "__wr_default", "--token-output", access_path,
+      "--refresh-token-output", refresh_path, NULL,
+    };
+    g_auto (FactForgetRun) run = { 0 };
+    run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, "1", order == 1, args,
+        &run);
+    assert_tokens_absent (&run);
+    assert_fact_forget_exit (&run, 1);
+    g_assert_cmpstr (run.out, ==, "");
+    g_autofree gchar *expected = g_strdup_printf (DC_FAULT_ARMED "wyctl: "
+            "token-file publication failed: I/O error and an incomplete file "
+            "remains: %s; delete it; server logout was attempted\n",
+            access_path);
+    g_assert_cmpstr (run.err, ==, expected);
+    g_assert_nonnull (run.request);
+    g_assert_nonnull (g_strstr_len (run.request, -1, "POST /auth/login?"));
+    assert_token_leftover (access_path, "new-access");
+    g_assert_false (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+    remove_dir_recursive (dir);
+  }
 }
 
 /* #1546: auth service-token names the incomplete access-token file. */
@@ -7645,7 +7688,8 @@ test_service_token_output_incomplete_remains (void)
     "--token-output", output_path, NULL,
   };
   g_auto (FactForgetRun) run = { 0 };
-  run_auth_incomplete_case ("{\"access_token\":\"access-1\"}", args, &run);
+  run_auth_incomplete_case ("{\"access_token\":\"access-1\"}", NULL, FALSE,
+      args, &run);
   assert_tokens_absent (&run);
   g_assert_null (g_strstr_len (run.err, -1, "aaaaaaaaaaaaaaaa"));
   assert_fact_forget_exit (&run, 1);
@@ -7679,7 +7723,7 @@ test_refresh_access_incomplete_remains (void)
     access_path, "--refresh-token-file", refresh_path, NULL,
   };
   g_auto (FactForgetRun) run = { 0 };
-  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, args, &run);
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, NULL, FALSE, args, &run);
   assert_tokens_absent (&run);
   assert_fact_forget_exit (&run, 1);
   g_assert_cmpstr (run.out, ==, "");
@@ -7695,8 +7739,8 @@ test_refresh_access_incomplete_remains (void)
 }
 #endif
 
-/* --fault-inject-token-file exists only in fault-injection builds, and is
- * hidden from help there. */
+/* --fault-inject-token-file and --fault-inject-token-file-skip exist only in
+ * fault-injection builds, and are hidden from help there. */
 static void
 test_fault_inject_token_file_flag (void)
 {
@@ -7736,6 +7780,40 @@ test_fault_inject_token_file_flag (void)
             + strlen ("--fault-inject-token-file="));
     g_assert_cmpstr (err, ==, expected);
   }
+
+  static const gchar *const skip_rejected[] = {
+    "", "x", "-1", "1x", "4294967296",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (skip_rejected); i++) {
+    g_autofree gchar *arg = g_strconcat ("--fault-inject-token-file-skip=",
+            skip_rejected[i], NULL);
+    gchar *bad_argv[] = { WYL_TEST_WYCTL_PATH, arg, "status", NULL };
+    g_clear_pointer (&out, g_free);
+    g_clear_pointer (&err, g_free);
+    run_child (bad_argv, &out, &err, &wait_status);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+    g_assert_cmpstr (out, ==, "");
+    g_autofree gchar *expected = g_strdup_printf ("wyctl: invalid "
+            "--fault-inject-token-file-skip value: %s\n", skip_rejected[i]);
+    g_assert_cmpstr (err, ==, expected);
+  }
+
+  /* The skip count alone arms nothing, so it prints no ARMED warning; 0, no
+   * skip, is a valid count. */
+  static const gchar *const skip_accepted[] = {
+    "--fault-inject-token-file-skip=1", "--fault-inject-token-file-skip=0",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (skip_accepted); i++) {
+    gchar *skip_argv[] = {
+      WYL_TEST_WYCTL_PATH, (gchar *) skip_accepted[i], "--version", NULL,
+    };
+    g_clear_pointer (&out, g_free);
+    g_clear_pointer (&err, g_free);
+    run_child (skip_argv, &out, &err, &wait_status);
+    g_assert_true (wait_status_is_success (wait_status));
+    g_assert_cmpstr (err, ==, "");
+  }
 #else
   gchar *absent_argv[] = {
     WYL_TEST_WYCTL_PATH, "--fault-inject-token-file=write", "status", NULL,
@@ -7746,6 +7824,18 @@ test_fault_inject_token_file_flag (void)
   g_assert_cmpstr (out, ==, "");
   g_assert_cmpstr (err, ==, "wyctl: Unknown option "
       "--fault-inject-token-file=write\n");
+
+  gchar *skip_absent_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--fault-inject-token-file-skip=1", "status", NULL,
+  };
+  g_clear_pointer (&out, g_free);
+  g_clear_pointer (&err, g_free);
+  run_child (skip_absent_argv, &out, &err, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "wyctl: Unknown option "
+      "--fault-inject-token-file-skip=1\n");
 #endif
 }
 
@@ -8167,6 +8257,8 @@ main (int argc, char **argv)
       test_tenant_data_credential_repeated_fault_flags);
   g_test_add_func ("/wyctl/login-publication-incomplete-remains",
       test_login_publication_incomplete_remains);
+  g_test_add_func ("/wyctl/login-publication-skip-aims-access",
+      test_login_publication_skip_aims_access);
   g_test_add_func ("/wyctl/service-token-output-incomplete-remains",
       test_service_token_output_incomplete_remains);
   g_test_add_func ("/wyctl/refresh-access-incomplete-remains",
