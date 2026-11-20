@@ -38,6 +38,7 @@
 static guint wyctl_token_file_faults_armed;
 static guint wyctl_token_file_faults_skip;
 static gint wyctl_token_file_faults_suspended;
+static guint wyctl_token_file_faults_enoent_seen;
 
 static const struct
 {
@@ -50,12 +51,20 @@ static const struct
   { "dir-sync", WYCTL_TOKEN_FILE_FAULT_DIR_SYNC },
   { "dir-close", WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE },
   { "cleanup-unlink", WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK },
+  { "cleanup-enoent", WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT },
 };
 
 void
 wyctl_token_file_arm_faults_once (guint mask)
 {
   g_atomic_int_set (&wyctl_token_file_faults_armed, mask);
+  g_atomic_int_set (&wyctl_token_file_faults_enoent_seen, 0);
+}
+
+guint
+wyctl_token_file_fault_cleanup_enoent_seen (void)
+{
+  return (guint) g_atomic_int_get (&wyctl_token_file_faults_enoent_seen);
 }
 
 guint
@@ -141,6 +150,8 @@ wyctl_token_file_fault_close (int fd, guint bit)
   return result;
 }
 
+/* CLEANUP_UNLINK is taken before CLEANUP_ENOENT is looked at, so when both
+ * are armed the unlink fault fires and CLEANUP_ENOENT stays armed. */
 static int
 wyctl_token_file_fault_unlinkat (int dirfd, const char *name, int flags)
 {
@@ -148,7 +159,18 @@ wyctl_token_file_fault_unlinkat (int dirfd, const char *name, int flags)
     errno = EIO;
     return -1;
   }
-  return unlinkat (dirfd, name, flags);
+  if (!wyctl_token_file_fault_take (WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT))
+    return unlinkat (dirfd, name, flags);
+  /* Remove the name first, so the real call below fails with a genuine
+   * ENOENT, as when something else removed it in between. Count that
+   * failure, keeping errno for the caller. */
+  (void) unlinkat (dirfd, name, flags);
+  int result = unlinkat (dirfd, name, flags);
+  int saved_errno = errno;
+  if (result != 0 && saved_errno == ENOENT)
+    g_atomic_int_inc (&wyctl_token_file_faults_enoent_seen);
+  errno = saved_errno;
+  return result;
 }
 
 #define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() \
@@ -505,22 +527,32 @@ wyctl_token_file_check_available (const gchar *path)
 }
 
 #ifndef G_OS_WIN32
+/* The status of a failed operation after its cleanup tried to remove the new
+ * file: `failed` when the file's name is gone, INCOMPLETE_REMAINS when it is
+ * still there. */
+static WyctlTokenFileStatus
+wyctl_token_file_cleanup_status (gboolean name_gone,
+    WyctlTokenFileStatus failed)
+{
+  return name_gone ? failed : WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS;
+}
+
 /* Remove a protected file this process just created and failed to finish.
  * IO when it is gone; INCOMPLETE_REMAINS when it is still there. */
 static WyctlTokenFileStatus
 wyctl_token_file_discard_new (int dirfd, const gchar *basename)
 {
   int result = WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT (dirfd, basename, 0);
-  int saved_errno = result == 0 ? 0 : errno;
   /* ENOENT means the name is already gone, which is all the cleanup wants:
-   * no file of ours remains under it for anyone to mistake for a token. */
-  if (result != 0 && saved_errno != ENOENT)
-    return WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS;
+   * no file of ours remains under it for anyone to mistake for a token.
+   * errno is read before any other call can change it. */
+  gboolean name_gone = result == 0 || errno == ENOENT;
   /* The removal is flushed on a best-effort basis: the file's creation was
    * never flushed either, so a failure here cannot resurrect a complete
    * token, and the status stays IO. */
-  (void) WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd);
-  return WYCTL_TOKEN_FILE_IO;
+  if (name_gone)
+    (void) WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd);
+  return wyctl_token_file_cleanup_status (name_gone, WYCTL_TOKEN_FILE_IO);
 }
 #endif
 
