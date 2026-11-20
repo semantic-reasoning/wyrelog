@@ -140,9 +140,11 @@ guint wyctl_token_file_fault_cleanup_enoent_seen (void);
  * empty-element input. */
 gboolean wyctl_token_file_parse_faults (const gchar * spec, guint * out);
 
-/* Unit-test only: the next count protected writes run with every fault
- * point suspended, so a fault can be aimed at a later write, such as the
- * pair writer's access file. Not reachable from the command line.
+/* Test only: the next count protected writes run with every fault point
+ * suspended, so a fault can be aimed at a later write, such as the pair
+ * writer's access file. wyctl reaches it through the hidden
+ * --fault-inject-token-file-skip=N flag. A later call replaces the count;
+ * it does not add to it.
  *
  * The hook assumes a single thread: the armed set, the skip count and the
  * per-write suspension are process-wide, so concurrent protected writes
