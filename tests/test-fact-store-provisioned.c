@@ -971,6 +971,11 @@ physical_settle_temp_peak (PhysicalFixture *fx)
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence (lease, &root, &orphan), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child_binding (root,
       temp_name, &child, &binding, &fd, &orphan), ==, WYRELOG_E_OK);
+  GPtrArray *children = NULL;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &children), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (children->len, ==, 1);
+  g_assert_true (g_ptr_array_index (children, 0) == child);
+  g_ptr_array_unref (children);
   guint8 bytes[65536] = { 1 };
   for (guint i=0; i<256; i++) {
     g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding, fd), ==, WYRELOG_E_OK);
