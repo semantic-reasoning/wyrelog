@@ -58,3 +58,17 @@ void wyl_fact_store_open_reservation_refuse_transitions_once_for_test
   (guint skip, guint count);
 void wyl_fact_store_refuse_open_reservation_transitions_for_test
   (wyl_fact_store_t * store, guint skip, guint count);
+
+/* Install only between synchronous mutations; user_data must outlive the call.
+ * OK delegates to the real policy transition; other values refuse it before
+ * any policy side effect. */
+typedef enum
+{
+  WYL_FACT_STORE_PHYSICAL_QUOTA_FINISH_TEST_SETTLE,
+  WYL_FACT_STORE_PHYSICAL_QUOTA_FINISH_TEST_CANCEL,
+} WylFactStorePhysicalQuotaFinishTestPhase;
+typedef wyrelog_error_t (*WylFactStorePhysicalQuotaFinishTestHook)
+  (WylFactStorePhysicalQuotaFinishTestPhase phase, gpointer user_data);
+void wyl_fact_store_set_physical_quota_finish_hook_for_test
+  (wyl_fact_store_t *store, WylFactStorePhysicalQuotaFinishTestHook hook,
+    gpointer user_data);

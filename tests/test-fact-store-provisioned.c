@@ -1581,6 +1581,83 @@ test_physical_limit_admits_and_refuses (gconstpointer data)
   physical_fixture_clear (&fx);
 }
 
+/* #1526: refusal is injected before the real policy call. OK delegates to
+ * SQLite, so terminal state and headroom assertions exercise real accounting. */
+typedef struct
+{
+  guint settle_busy, cancel_busy;
+  guint settle_calls, cancel_calls;
+  wyrelog_error_t cancel_error;
+} PhysicalFinishProbe;
+
+static wyrelog_error_t
+physical_finish_probe (WylFactStorePhysicalQuotaFinishTestPhase phase,
+    gpointer data)
+{
+  PhysicalFinishProbe *probe = data;
+  if (phase == WYL_FACT_STORE_PHYSICAL_QUOTA_FINISH_TEST_SETTLE) {
+    probe->settle_calls++;
+    return probe->settle_calls <= probe->settle_busy ? WYRELOG_E_BUSY : WYRELOG_E_OK;
+  }
+  g_assert_cmpint (phase, ==, WYL_FACT_STORE_PHYSICAL_QUOTA_FINISH_TEST_CANCEL);
+  probe->cancel_calls++;
+  return probe->cancel_calls <= probe->cancel_busy ? WYRELOG_E_BUSY : probe->cancel_error;
+}
+
+static void
+test_physical_quota_settle_busy (gconstpointer data)
+{
+  guint mode = GPOINTER_TO_UINT (data);
+  gboolean update = (mode & 1) != 0;
+  gboolean exhausted = (mode & 2) != 0;
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  for (guint i = 0; i < (exhausted ? 1u : 2u); i++) {
+    g_autofree gchar *key = g_strdup_printf ("busy-%u", i);
+    fx.batch.batch_id = key;
+    fx.batch.request_id = key;
+    fx.batch.idempotency_key = key;
+    fx.values[1].as.text = key;
+    PhysicalFinishProbe probe = { .settle_busy = exhausted ? G_MAXUINT : i == 0 ? 1 : 8 };
+    wyl_fact_store_set_physical_quota_finish_hook_for_test (fx.store, physical_finish_probe, &probe);
+    gboolean inserted = TRUE;
+    wyl_fact_commit_delta_t delta = { 0 };
+    g_assert_cmpint (physical_apply_delta (&fx, update, &fx.batch, &inserted, &delta), ==,
+        exhausted ? WYRELOG_E_BUSY : WYRELOG_E_OK);
+    wyl_fact_store_set_physical_quota_finish_hook_for_test (fx.store, NULL, NULL);
+    g_assert_cmpuint (probe.settle_calls, ==, exhausted || i == 1 ? 9 : 2);
+    g_assert_cmpuint (probe.cancel_calls, ==, 0);
+    g_assert_cmpint (inserted, ==, !exhausted);
+    g_assert_cmpint (delta.inserted, ==, !exhausted);
+    g_assert_false (delta.quota_exceeded);
+    g_autofree gchar *state = reservation_state (fx.policy_store, key);
+    g_assert_cmpstr (state, ==, exhausted ? "pending" : "settled");
+    WylPolicyFactPhysicalQuotaStatus status = { 0 };
+    g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (fx.policy_store,
+        tenant_id, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (status.committed_bytes, ==, (guint64) graph_charge (fx.policy_store));
+    g_assert_cmpuint (status.reconciling_bytes, ==, 0);
+    if (exhausted) {
+      g_assert_cmpuint (status.pending_bytes, >, 0);
+      g_assert_cmpint (delta.committed_row_delta, ==, 0);
+      g_assert_cmpint (delta.logical_byte_delta, ==, 0);
+    } else
+      g_assert_cmpuint (status.pending_bytes, ==, 0);
+    g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM fact_batches WHERE batch_id='%s';", key);
+    gint64 present = -1;
+    g_assert_cmpint (wyl_fact_store_test_query_int64 (fx.store, sql, &present), ==, WYRELOG_E_OK);
+    g_assert_cmpint (present, ==, 1);
+  }
+  if (!exhausted) {
+    gboolean inserted = FALSE;
+    g_assert_cmpint (physical_apply (&fx, FALSE, &fx.other, &inserted), ==, WYRELOG_E_OK);
+    g_assert_true (inserted);
+    WylPolicyFactPhysicalQuotaStatus status = { 0 };
+    assert_physical_settled (fx.policy_store, &status);
+  }
+  physical_fixture_clear (&fx);
+}
+
 /* The fallback cases arm the shared namespace test fault, which a Windows
  * build defines only with the artifact test hooks. */
 #if !defined (G_OS_WIN32) || defined (WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
@@ -1604,19 +1681,34 @@ typedef struct
   FallbackMode mode;
   wyrelog_error_t rc;
   const gchar *state;
+  gboolean update;
+  guint settle_busy, cancel_busy;
+  wyrelog_error_t cancel_error;
 } FallbackCase;
 
 static const FallbackCase fallback_cases[] = {
   { "precommit-observation-fails", FALLBACK_PRECOMMIT_EXPORT_FAILS,
-    WYRELOG_E_IO, "cancelled" },
-  { "precommit-settle-fails", FALLBACK_PRECOMMIT_SETTLE_FAILS, WYRELOG_E_IO,
-    "cancelled" },
+    WYRELOG_E_IO, "cancelled", FALSE, 0, 1, WYRELOG_E_OK },
+  { "precommit-settle-fails", FALLBACK_PRECOMMIT_SETTLE_FAILS,
+    WYRELOG_E_IO, "cancelled", FALSE, 0, 1, WYRELOG_E_OK },
   { "unknown-outcome-observation-fails", FALLBACK_UNKNOWN_EXPORT_FAILS,
-    WYRELOG_E_INTERNAL, "reconciling" },
-  { "commit-observation-fails", FALLBACK_COMMIT_EXPORT_FAILS, WYRELOG_E_OK,
-    "reconciling" },
-  { "commit-settle-fails", FALLBACK_COMMIT_SETTLE_FAILS, WYRELOG_E_IO,
-    "reconciling" },
+    WYRELOG_E_INTERNAL, "reconciling", FALSE, 0, 1, WYRELOG_E_OK },
+  { "commit-observation-fails", FALLBACK_COMMIT_EXPORT_FAILS,
+    WYRELOG_E_OK, "reconciling", FALSE, 0, 1, WYRELOG_E_OK },
+  { "commit-settle-fails", FALLBACK_COMMIT_SETTLE_FAILS,
+    WYRELOG_E_IO, "reconciling", FALSE, 0, 1, WYRELOG_E_OK },
+  { "settle-and-cancel-last-retry-update", FALLBACK_COMMIT_SETTLE_FAILS,
+    WYRELOG_E_IO, "reconciling", TRUE, 8, 8, WYRELOG_E_OK },
+  { "observation-cancel-busy-update", FALLBACK_PRECOMMIT_EXPORT_FAILS,
+    WYRELOG_E_IO, "cancelled", TRUE, 0, 1, WYRELOG_E_OK },
+  { "observation-cancel-busy-exhausted", FALLBACK_COMMIT_EXPORT_FAILS,
+    WYRELOG_E_BUSY, "pending", FALSE, 0, G_MAXUINT, WYRELOG_E_OK },
+  { "settle-cancel-busy-exhausted-update", FALLBACK_PRECOMMIT_SETTLE_FAILS,
+    WYRELOG_E_IO, "pending", TRUE, 0, G_MAXUINT, WYRELOG_E_OK },
+  { "observation-cancel-error-update", FALLBACK_COMMIT_EXPORT_FAILS,
+    WYRELOG_E_CONFLICT, "pending", TRUE, 0, 0, WYRELOG_E_CONFLICT },
+  { "settle-cancel-error", FALLBACK_COMMIT_SETTLE_FAILS,
+    WYRELOG_E_IO, "pending", FALSE, 0, 0, WYRELOG_E_CONFLICT },
 };
 
 /* Arms the inventory fault, so the next evidence export fails, at one phase
@@ -1633,7 +1725,8 @@ export_fault_hook (WylFactStoreTransactionTestKind kind,
     WylFactStoreTransactionTestPhase phase, gpointer user_data)
 {
   ExportFaultHook *hook = user_data;
-  if (kind == WYL_FACT_STORE_TRANSACTION_TEST_APPEND_CORE
+  if ((kind == WYL_FACT_STORE_TRANSACTION_TEST_APPEND_CORE
+      || kind == WYL_FACT_STORE_TRANSACTION_TEST_COMPOUND_PUT)
       && phase == hook->phase && !hook->armed) {
     hook->armed = TRUE;
     wyl_fact_artifact_namespace_set_test_fault
@@ -1670,9 +1763,15 @@ test_physical_quota_fallback (gconstpointer data)
         "SET auto_checkpoint_skip_wal_threshold=9999999999;"
         "SET wal_autocheckpoint_entries=1;"
         "SET debug_checkpoint_abort='before_header'"));
+  PhysicalFinishProbe probe = { .settle_busy = c->settle_busy,
+                                .cancel_busy = c->cancel_busy, .cancel_error = c->cancel_error };
+  wyl_fact_store_set_physical_quota_finish_hook_for_test (fx.store, physical_finish_probe, &probe);
   gboolean inserted = FALSE;
-  g_assert_cmpint (physical_apply (&fx, FALSE, &fx.batch, &inserted), ==,
-      c->rc);
+  g_assert_cmpint (physical_apply (&fx, c->update, &fx.batch, &inserted), ==, c->rc);
+  wyl_fact_store_set_physical_quota_finish_hook_for_test (fx.store, NULL, NULL);
+  g_assert_cmpuint (probe.settle_calls, ==, settle_fails ? c->settle_busy + 1 : 0);
+  g_assert_cmpuint (probe.cancel_calls, ==, MIN (c->cancel_busy, 8u) + 1);
+  g_assert_cmpint (inserted, ==, c->rc == WYRELOG_E_OK);
   wyl_fact_store_test_set_transaction_hook (fx.store, NULL, NULL);
   if (!settle_fails) {
     g_assert_true (hook.armed);
@@ -1684,11 +1783,22 @@ test_physical_quota_fallback (gconstpointer data)
   WylPolicyFactPhysicalQuotaStatus status = { 0 };
   g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status
         (fx.policy_store, tenant_id, &status), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (status.pending_bytes, ==, 0);
-  if (g_strcmp0 (c->state, "cancelled") == 0)
-    g_assert_cmpuint (status.reconciling_bytes, ==, 0);
+  if (g_strcmp0 (c->state, "pending") == 0)
+    g_assert_cmpuint (status.pending_bytes, >, 0);
   else
+    g_assert_cmpuint (status.pending_bytes, ==, 0);
+  if (g_strcmp0 (c->state, "reconciling") == 0)
     g_assert_cmpuint (status.reconciling_bytes, >, 0);
+  else
+    g_assert_cmpuint (status.reconciling_bytes, ==, 0);
+  g_assert_cmpuint (status.committed_bytes, ==, (guint64) graph_charge (fx.policy_store));
+  if (c->mode != FALLBACK_UNKNOWN_EXPORT_FAILS) {
+    gint64 present = -1;
+    g_assert_cmpint (wyl_fact_store_test_query_int64 (fx.store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id='outcome';", &present), ==, WYRELOG_E_OK);
+    g_assert_cmpint (present, ==, c->mode == FALLBACK_PRECOMMIT_EXPORT_FAILS
+        || c->mode == FALLBACK_PRECOMMIT_SETTLE_FAILS ? 0 : 1);
+  }
   physical_fixture_clear (&fx);
 }
 #endif
@@ -1698,6 +1808,11 @@ main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/store-provisioned/physical-quota/recompute/never-materialized", test_physical_recompute_never_materialized);
+  const gchar *busy_cases[] = { "settle-append", "settle-update", "settle-exhausted-append", "settle-exhausted-update" };
+  for (guint i = 0; i < G_N_ELEMENTS (busy_cases); i++) {
+    g_autofree gchar *name = g_strdup_printf ("/fact/store-provisioned/physical-quota/busy/%s", busy_cases[i]);
+    g_test_add_data_func (name, GUINT_TO_POINTER (i), test_physical_quota_settle_busy);
+  }
   const gchar *lifecycle[] = { "existing-writer", "open-quota", "cleanup-after-commit" };
   for (guint i=0; i<G_N_ELEMENTS (lifecycle); i++) {
     g_autofree gchar *name = g_strdup_printf ("/fact/store-provisioned/physical-quota/recompute/%s", lifecycle[i]);

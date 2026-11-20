@@ -30,6 +30,7 @@ PROTECTED = {
     "wyl_fact_store_test_query_text",
     "wyl_fact_store_test_arm_metadata_value_column_rename_once",
     "wyl_fact_store_test_set_transaction_hook",
+    "wyl_fact_store_set_physical_quota_finish_hook_for_test",
     "wyl_fact_store_test_set_session_admission_hook",
     "wyl_fact_store_test_try_lock",
     "wyl_fact_store_test_session_admission_count",
