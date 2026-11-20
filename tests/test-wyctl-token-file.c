@@ -683,6 +683,7 @@ test_fault_spec_parse (void)
     { "dir-sync", WYCTL_TOKEN_FILE_FAULT_DIR_SYNC },
     { "dir-close", WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE },
     { "cleanup-unlink", WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK },
+    { "cleanup-enoent", WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT },
   };
   guint all = 0;
   for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
@@ -694,8 +695,8 @@ test_fault_spec_parse (void)
   }
   guint mask = 0;
   g_assert_true (wyctl_token_file_parse_faults
-        ("write,file-sync,file-close,dir-sync,dir-close,cleanup-unlink",
-      &mask));
+        ("write,file-sync,file-close,dir-sync,dir-close,cleanup-unlink,"
+      "cleanup-enoent", &mask));
   g_assert_cmpuint (mask, ==, all);
   g_assert_true (wyctl_token_file_parse_faults ("file-sync,cleanup-unlink",
       &mask));
@@ -822,6 +823,58 @@ test_cleanup_unlink_fault_fires_independently (void)
     assert_protected_file (fixture.path, faults[i].left);
     fault_fixture_clear (&fixture);
   }
+}
+
+/* A cleanup unlink that finds the name already gone (ENOENT) has nothing left
+ * to remove, so the failed write stays IO and the cleanup flush still runs:
+ * the armed DIR_SYNC is consumed there. The seen counter proves the real
+ * cleanup unlink met ENOENT, not a plain success. */
+static void
+test_cleanup_enoent_is_io (void)
+{
+  static const guint faults[] = {
+    WYCTL_TOKEN_FILE_FAULT_WRITE,
+    WYCTL_TOKEN_FILE_FAULT_FILE_SYNC,
+    WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (faults[i]
+        | WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT
+        | WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+    gint fds_before = count_open_fds ();
+    WyctlTokenFileStatus status =
+        wyctl_token_file_write_protected (fixture.path, "secret-1", 8);
+    g_assert_cmpint (status, ==, WYCTL_TOKEN_FILE_IO);
+    g_assert_cmpuint (wyctl_token_file_fault_cleanup_enoent_seen (), ==, 1);
+    g_assert_cmpint (count_open_fds (), ==, fds_before);
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    g_assert_false (g_file_test (fixture.path, G_FILE_TEST_EXISTS));
+    fault_fixture_clear (&fixture);
+  }
+}
+
+/* With both cleanup faults armed, CLEANUP_UNLINK fires and CLEANUP_ENOENT is
+ * not consumed: it stays armed for a later cleanup. A cleanup that leaves the
+ * file is not flushed, so DIR_SYNC stays armed too. */
+static void
+test_cleanup_unlink_wins_over_enoent (void)
+{
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_FILE_SYNC
+      | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK
+      | WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT
+      | WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture.path,
+      "secret-1", 8), ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==,
+      WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT
+      | WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  g_assert_cmpuint (wyctl_token_file_fault_cleanup_enoent_seen (), ==, 0);
+  assert_protected_file (fixture.path, "secret-1");
+  fault_fixture_clear (&fixture);
 }
 
 /* The pair writer passes INCOMPLETE_REMAINS through with the failing path.
@@ -997,6 +1050,10 @@ main (int argc, char **argv)
       test_cleanup_unlink_not_reached_on_success);
   g_test_add_func ("/wyctl/token-file/cleanup-unlink-fault-fires-independently",
       test_cleanup_unlink_fault_fires_independently);
+  g_test_add_func ("/wyctl/token-file/cleanup-enoent-is-io",
+      test_cleanup_enoent_is_io);
+  g_test_add_func ("/wyctl/token-file/cleanup-unlink-wins-over-enoent",
+      test_cleanup_unlink_wins_over_enoent);
   g_test_add_func ("/wyctl/token-file/pair-incomplete-remains",
       test_pair_incomplete_remains);
   g_test_add_func ("/wyctl/token-file/dir-close-fault-keeps-file",

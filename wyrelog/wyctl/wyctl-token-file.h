@@ -98,14 +98,19 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WyctlTokenFileLock,
  * symbols exist and the writer makes the plain system calls.
  *
  * Each armed point fires once, on the next protected write that reaches
- * it, and then disarms itself; points armed together fire independently.
+ * it, and then disarms itself; points armed together fire independently,
+ * except at the cleanup unlink, where an armed CLEANUP_UNLINK fires and
+ * leaves CLEANUP_ENOENT armed.
  * WRITE, FILE_SYNC, DIR_SYNC and CLEANUP_UNLINK skip the real call and
  * fail with EIO. FILE_CLOSE and DIR_CLOSE make the real close, so no
- * descriptor leaks, and then report EIO. DIR_SYNC covers two call sites,
- * the success path and the cleanup flush, and no single write reaches
- * both; CLEANUP_UNLINK has one, in the cleanup every failed write, file
- * sync or file close goes through. A fault point can only make a write
- * fail; it never bypasses a check. */
+ * descriptor leaks, and then report EIO. CLEANUP_ENOENT removes the new
+ * file's name first, so the real cleanup unlink fails with a genuine
+ * ENOENT. DIR_SYNC covers two call sites, the success path and the cleanup
+ * flush, and no single write reaches both; CLEANUP_UNLINK and
+ * CLEANUP_ENOENT share one, in the cleanup every failed write, file sync
+ * or file close goes through. A fault point either makes a step fail or,
+ * for CLEANUP_ENOENT, removes the new file as a concurrent process could;
+ * it never bypasses a check. */
 typedef enum
 {
   WYCTL_TOKEN_FILE_FAULT_WRITE = 1u << 0,
@@ -114,18 +119,25 @@ typedef enum
   WYCTL_TOKEN_FILE_FAULT_DIR_SYNC = 1u << 3,
   WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE = 1u << 4,
   WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK = 1u << 5,
+  WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT = 1u << 6,
 } WyctlTokenFileFault;
 
-/* Replace the armed set with mask; 0 disarms every point. */
+/* Replace the armed set with mask; 0 disarms every point. Also resets the
+ * cleanup-enoent counter below. */
 void wyctl_token_file_arm_faults_once (guint mask);
 
 /* The points armed and not yet reached. */
 guint wyctl_token_file_armed_faults (void);
 
+/* How many cleanup unlinks, since the last arm, ran with CLEANUP_ENOENT and
+ * really failed with ENOENT. Lets a test tell the ENOENT branch from a
+ * plain successful unlink. */
+guint wyctl_token_file_fault_cleanup_enoent_seen (void);
+
 /* Parse a comma-separated list of fault point names (write, file-sync,
- * file-close, dir-sync, dir-close, cleanup-unlink) into a mask. Returns
- * FALSE, leaving *out unchanged, for NULL, empty, unknown or empty-element
- * input. */
+ * file-close, dir-sync, dir-close, cleanup-unlink, cleanup-enoent) into a
+ * mask. Returns FALSE, leaving *out unchanged, for NULL, empty, unknown or
+ * empty-element input. */
 gboolean wyctl_token_file_parse_faults (const gchar * spec, guint * out);
 
 /* Unit-test only: the next count protected writes run with every fault
