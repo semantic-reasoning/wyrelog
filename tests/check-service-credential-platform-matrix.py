@@ -64,6 +64,15 @@ FAULT_INJECTION_GATE = "enable_fault_injection"
 LINUX_GATE = "host_machine.system() == 'linux'"
 WINDOWS_NEGATIVE_GATE = "host_machine.system() != 'windows'"
 
+# The exact condition terms that open each gate. A gate is open only when one
+# of these is a positive top-level conjunct of an enclosing condition, so a
+# negated gate, an `or` alternative, or an `else` branch does not count.
+LINUX_GATE_FORMS = (LINUX_GATE,)
+FAULT_INJECTION_GATE_FORMS = (
+    f"get_option('{FAULT_INJECTION_GATE}').allowed()",
+    f"get_option('{FAULT_INJECTION_GATE}').enabled()",
+)
+
 # Named native build/security gates that MUST be present for each build-only
 # platform's runner, proving the platform is really exercised (build evidence).
 WINDOWS_NATIVE_GATES = ("secure-duckdb-bridge", "fact-artifact-namespace-windows")
@@ -134,19 +143,37 @@ def paren_balance(text: str) -> int:
     return depth
 
 
+# A block keyword at the start of a line. Meson needs no space after it, so
+# `if(` and `elif(` count; `\b` keeps `if_x = ...` from matching.
+BLOCK_KEYWORD = re.compile(r"(if|elif|else|endif|foreach|endforeach)\b")
+
+
+def block_keyword(stripped: str) -> re.Match[str] | None:
+    return BLOCK_KEYWORD.match(stripped)
+
+
 def read_condition(lines: list[str], start: int) -> tuple[str, int]:
     """Read a possibly multi-line `if`/`elif` condition.
 
     Returns (condition_text, lines_consumed). Continuation is detected by an
     unbalanced parenthesis depth across the accumulated text, which covers the
-    `and`-wrapped multi-line conditions used elsewhere in this meson file.
+    `and`-wrapped multi-line conditions used elsewhere in this meson file, or
+    by a trailing `\\` line continuation, which is dropped from the text.
     """
     first = strip_meson_comment(lines[start]).strip()
     # Drop the leading keyword ('if' or 'elif').
-    condition = first.split(None, 1)[1] if len(first.split(None, 1)) > 1 else ""
+    keyword = block_keyword(first)
+    condition = first[keyword.end():].strip() if keyword else ""
     consumed = 1
     idx = start + 1
-    while paren_balance(condition) != 0 and idx < len(lines):
+
+    def continued(text: str) -> bool:
+        return text.endswith("\\")
+
+    while ((paren_balance(condition) != 0 or continued(condition))
+           and idx < len(lines)):
+        if continued(condition):
+            condition = condition[:-1].rstrip()
         condition += " " + strip_meson_comment(lines[idx]).strip()
         consumed += 1
         idx += 1
@@ -158,35 +185,125 @@ def open_if_conditions_at(lines: list[str], target_idx: int) -> list[str]:
 
     Tracks both `if`/`endif` and `foreach`/`endforeach` on one stack so that
     endif/endforeach match their opener; conditions from currently-open `if`
-    frames are returned outermost-first.
+    frames are returned outermost-first. Inside an `else` branch the frame's
+    condition is the negation of every `if`/`elif` condition before it.
     """
-    stack: list[tuple[str, str]] = []  # (kind, condition)
+    # (kind, condition in force, conditions of the branches seen so far)
+    stack: list[tuple[str, str, list[str]]] = []
     i = 0
     while i < target_idx and i < len(lines):
         stripped = strip_meson_comment(lines[i]).strip()
-        tokens = stripped.split()
-        keyword = tokens[0] if tokens else ""
+        match = block_keyword(stripped)
+        keyword = match.group(1) if match else ""
         if keyword == "if":
             condition, consumed = read_condition(lines, i)
-            stack.append(("if", condition))
+            stack.append(("if", condition, [condition]))
             i += consumed
             continue
         if keyword == "elif":
             condition, consumed = read_condition(lines, i)
             if stack and stack[-1][0] == "if":
-                stack[-1] = ("if", condition)
+                stack[-1] = ("if", condition, stack[-1][2] + [condition])
             i += consumed
             continue
-        if keyword == "endif":
+        if keyword == "else":
+            if stack and stack[-1][0] == "if":
+                branches = stack[-1][2]
+                negated = " and ".join(f"not ({cond})" for cond in branches)
+                stack[-1] = ("if", negated, branches)
+        elif keyword == "endif":
             if stack and stack[-1][0] == "if":
                 stack.pop()
         elif keyword == "foreach":
-            stack.append(("foreach", ""))
+            stack.append(("foreach", "", []))
         elif keyword == "endforeach":
             if stack and stack[-1][0] == "foreach":
                 stack.pop()
         i += 1
-    return [cond for kind, cond in stack if kind == "if"]
+    return [cond for kind, cond, _ in stack if kind == "if"]
+
+
+def split_top_level(text: str, separator: str) -> list[str]:
+    """Split at `separator` outside parentheses and quoted strings."""
+    parts = []
+    depth = 0
+    quote = None
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and text.startswith(separator, i):
+            parts.append(text[start:i])
+            i += len(separator)
+            start = i
+            continue
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def strip_outer_parens(text: str) -> str:
+    """Remove parenthesis pairs that enclose the whole of `text`."""
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        inner = text[1:-1]
+        # The pair encloses everything only if no prefix of the inner text
+        # closes more than it opens, as in `(a) and (b)`.
+        depth = 0
+        quote = None
+        for ch in inner:
+            if quote is not None:
+                if ch == quote:
+                    quote = None
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return text
+        text = inner.strip()
+    return text
+
+
+def positive_terms(condition: str) -> list[str]:
+    """The top-level conjuncts that must hold for `condition` to be true.
+
+    A negated term or an `or` alternative stays whole (`not X`, `X or Y`), so
+    it never equals a gate form: neither guarantees the gate it names.
+    """
+    condition = strip_outer_parens(" ".join(condition.split()))
+    # `and` binds tighter than `or`, so a top-level `or` makes the whole
+    # condition one alternative-bearing term.
+    if len(split_top_level(condition, " or ")) > 1:
+        return [condition]
+    parts = split_top_level(condition, " and ")
+    if len(parts) > 1:
+        return [term for part in parts for term in positive_terms(part)]
+    return [condition]
+
+
+def gate_open(conditions: list[str], forms: tuple[str, ...]) -> bool:
+    """True iff some open condition requires one of the gate's forms.
+
+    Terms are compared whole, not searched, so `not X` does not open X.
+    Unmodelled forms fail closed (`else` of `if not G`, double quotes, other
+    spacing), except the ternary `?:`, which binds looser than `and` and is
+    not parsed; tests/meson.build uses none of these around a gate.
+    """
+    return any(term in forms
+               for condition in conditions
+               for term in positive_terms(condition))
 
 
 def find_test_line(lines: list[str], test_name: str) -> int:
@@ -207,8 +324,7 @@ def check_meson_gating(meson_text: str) -> None:
     for test_name in SC_E2E_TESTS:
         idx = find_test_line(lines, test_name)
         conditions = open_if_conditions_at(lines, idx)
-        joined = " || ".join(conditions)
-        if LINUX_GATE not in joined:
+        if not gate_open(conditions, LINUX_GATE_FORMS):
             fail(
                 f"test('{test_name}') is not inside a `{LINUX_GATE}` gate; "
                 "Linux must be the sole packaged-runtime platform. Open "
@@ -222,13 +338,12 @@ def check_meson_gating(meson_text: str) -> None:
     # only exists where the packaged fault seam is compiled in.
     fault_idx = find_test_line(lines, FAULT_INJECTION_TEST)
     fault_conditions = open_if_conditions_at(lines, fault_idx)
-    fault_joined = " || ".join(fault_conditions)
-    if LINUX_GATE not in fault_joined:
+    if not gate_open(fault_conditions, LINUX_GATE_FORMS):
         fail(
             f"test('{FAULT_INJECTION_TEST}') is not inside a `{LINUX_GATE}` "
             f"gate; open conditions were: {fault_conditions!r}"
         )
-    if FAULT_INJECTION_GATE not in fault_joined:
+    if not gate_open(fault_conditions, FAULT_INJECTION_GATE_FORMS):
         fail(
             f"test('{FAULT_INJECTION_TEST}') (the #380/#754 orphan-recovery "
             f"proof) must be nested under a `{FAULT_INJECTION_GATE}` build gate "
@@ -278,8 +393,9 @@ def check_ci_token_file_faults(label: str, ci_text: str) -> None:
 def token_file_fault_paths(meson_text: str) -> list[str]:
     lines = meson_text.splitlines()
     idx = find_test_line(lines, TOKEN_FILE_FAULT_REGISTRATION)
-    conditions = " || ".join(open_if_conditions_at(lines, idx))
-    if FAULT_INJECTION_GATE not in conditions:
+    open_conditions = open_if_conditions_at(lines, idx)
+    conditions = " || ".join(open_conditions)
+    if not gate_open(open_conditions, FAULT_INJECTION_GATE_FORMS):
         fail(f"test('{TOKEN_FILE_FAULT_REGISTRATION}') must sit under a "
              f"`{FAULT_INJECTION_GATE}` gate; open conditions were: "
              f"{conditions!r}")
@@ -369,6 +485,93 @@ def self_test() -> None:
            paths="    '/wyctl/a',\n").replace(
            "get_option('enable_fault_injection').allowed()", "true"),
            c_text), "must sit under a `enable_fault_injection` gate")
+    # An `else` branch runs exactly when the gate is false.
+    expect(lambda: check_token_file_fault_paths(
+           "if get_option('enable_fault_injection').allowed()\n"
+           "  x = 1\n"
+           "else\n"
+           "  wyctl_token_file_fault_paths = ['/wyctl/a']\n"
+           "  test('wyctl-token-file-write-faults', python3)\n"
+           "endif\n", c_text),
+           "must sit under a `enable_fault_injection` gate")
+    # A negated gate names the option but excludes it.
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "if get_option", "if not get_option"), c_text),
+           "must sit under a `enable_fault_injection` gate")
+    # A parenthesized conjunction still opens the gate (the outer parens are
+    # stripped before splitting).
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "if get_option('enable_fault_injection').allowed()\n",
+           "if (get_option('enable_fault_injection').allowed() and \\\n"
+           "    host_machine.system() != 'windows')\n"), c_text), None)
+    # Parenthesized conjuncts: `(x) and (G)` is not one enclosing pair.
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "if get_option('enable_fault_injection').allowed()\n",
+           "if (x) and (get_option('enable_fault_injection').allowed())\n"),
+           c_text), None)
+    # `.enabled()` opens the gate as well as `.allowed()`.
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(".allowed()", ".enabled()"),
+           c_text), None)
+    # The real form: the gate on a `\`-continued line.
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "if get_option('enable_fault_injection').allowed()\n",
+           "if host_machine.system() != 'windows' and \\\n"
+           "    get_option('enable_fault_injection').allowed()\n"),
+           c_text), None)
+    # `and` binds tighter than `or`: the gate is one alternative, not required.
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "if get_option",
+           "if true or host_machine.system() != 'windows' and get_option"),
+           c_text), "must sit under a `enable_fault_injection` gate")
+    # Names that merely start with a keyword are not block keywords: read as
+    # keywords, `else_y` would flip the gate and `endif_x` would close it.
+    for name in ("else_y", "endif_x"):
+        expect(lambda: check_token_file_fault_paths(meson.format(
+               paths="    '/wyctl/a',\n").replace(
+               "  wyctl_token_file_fault_paths",
+               f"  {name} = 1\n  wyctl_token_file_fault_paths"), c_text),
+               None)
+    # `if(` needs no space either, and its condition still opens the gate.
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "if get_option('enable_fault_injection').allowed()\n",
+           "if(get_option('enable_fault_injection').allowed())\n"),
+           c_text), None)
+    # `elif(` needs no space; its branch runs only when the gate is false.
+    expect(lambda: check_token_file_fault_paths(
+           "if get_option('enable_fault_injection').allowed()\n"
+           "  x = 1\n"
+           "elif(true)\n"
+           "  wyctl_token_file_fault_paths = ['/wyctl/a']\n"
+           "  test('wyctl-token-file-write-faults', python3)\n"
+           "endif\n", c_text),
+           "must sit under a `enable_fault_injection` gate")
+
+    sc_meson = (
+        "if host_machine.system() == 'linux'\n"
+        "  test('service-credential-lifecycle-e2e', sh)\n"
+        "  test('service-credential-zero-survivor-e2e', sh)\n"
+        "  test('service-credential-rotation-e2e', sh)\n"
+        "{leak_scan}"
+        "  if get_option('enable_fault_injection').allowed()\n"
+        "    test('service-credential-publication-fault-e2e', sh)\n"
+        "  endif\n"
+        "{tail}"
+        "endif\n"
+    )
+    leak_scan = "  test('service-credential-leak-scan-e2e', sh)\n"
+    expect(lambda: check_meson_gating(sc_meson.format(
+           leak_scan=leak_scan, tail="")), None)
+    expect(lambda: check_meson_gating(sc_meson.format(
+           leak_scan="", tail="else\n" + leak_scan)),
+           "test('service-credential-leak-scan-e2e') is not inside a "
+           "`host_machine.system() == 'linux'` gate")
     print("service-credential platform matrix self-test passed")
 
 
