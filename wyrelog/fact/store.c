@@ -81,6 +81,8 @@ struct wyl_fact_store_t
   gpointer forget_transaction_test_hook_data;
   guint duckdb_configured_settings;
   gboolean duckdb_read_only;
+  WylFactStorePhysicalQuotaFinishTestHook physical_quota_finish_test_hook;
+  gpointer physical_quota_finish_test_hook_data;
   WylFactStoreTransactionTestHook transaction_test_hook;
   gpointer transaction_test_hook_data;
   WylFactStoreSessionAdmissionTestHook session_admission_test_hook;
@@ -1838,6 +1840,18 @@ wyl_fact_store_test_set_transaction_hook (wyl_fact_store_t *store,
 }
 
 void
+wyl_fact_store_set_physical_quota_finish_hook_for_test (wyl_fact_store_t *store,
+    WylFactStorePhysicalQuotaFinishTestHook hook, gpointer user_data)
+{
+  if (store == NULL)
+    return;
+  g_mutex_lock (&store->lock);
+  store->physical_quota_finish_test_hook = hook;
+  store->physical_quota_finish_test_hook_data = user_data;
+  g_mutex_unlock (&store->lock);
+}
+
+void
 wyl_fact_store_test_set_session_admission_hook (wyl_fact_store_t *store,
     WylFactStoreSessionAdmissionTestHook hook, gpointer user_data)
 {
@@ -2922,6 +2936,69 @@ fact_store_physical_quota_reserve (wyl_fact_store_t *store,
   return rc;
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t
+fact_store_physical_quota_test_response (wyl_fact_store_t *store,
+    WylFactStorePhysicalQuotaFinishTestPhase phase)
+{
+  /* Finalization follows connection_session_end. Do not hold the store lock
+   * while invoking a hook, a policy transition, or a retry delay. */
+  g_mutex_lock (&store->lock);
+  WylFactStorePhysicalQuotaFinishTestHook hook = store->physical_quota_finish_test_hook;
+  gpointer data = store->physical_quota_finish_test_hook_data;
+  g_mutex_unlock (&store->lock);
+  return hook == NULL ? WYRELOG_E_OK : hook (phase, data);
+}
+#endif
+
+/* Match the daemon logical-settle cadence: nine calls, eight requested
+ * sleeps totalling at most 191 ms, excluding policy/SQLite waits. Finalize
+ * only after the connection session ended; retain the same evidence/identity. */
+#define WYL_FACT_PHYSICAL_QUOTA_FINISH_BUSY_RETRIES 8u
+#define WYL_FACT_PHYSICAL_QUOTA_FINISH_BUSY_DELAY_US 1000u
+
+static wyrelog_error_t
+fact_store_physical_quota_cancel (wyl_fact_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    gboolean definite_noncommit, WylPolicyFactPhysicalOperationStatus *status)
+{
+  for (guint attempt = 0; ; attempt++) {
+    wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    rc = fact_store_physical_quota_test_response (store,
+            WYL_FACT_STORE_PHYSICAL_QUOTA_FINISH_TEST_CANCEL);
+#endif
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_cancel_fact_physical_quota (store->physical_quota_policy,
+              operation, definite_noncommit, status);
+    if (rc != WYRELOG_E_BUSY || attempt == WYL_FACT_PHYSICAL_QUOTA_FINISH_BUSY_RETRIES)
+      return rc;
+    g_usleep (WYL_FACT_PHYSICAL_QUOTA_FINISH_BUSY_DELAY_US << MIN (attempt, 6u));
+  }
+}
+
+static wyrelog_error_t
+fact_store_physical_quota_settle (wyl_fact_store_t *store,
+    const wyl_fact_store_batch_t *batch, WylFactPhysicalQuotaAdmission *admission,
+    const WylFactArtifactPhysicalQuotaEvidence *observed,
+    WylPolicyFactPhysicalOperationStatus *status)
+{
+  for (guint attempt = 0; ; attempt++) {
+    wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    rc = fact_store_physical_quota_test_response (store,
+            WYL_FACT_STORE_PHYSICAL_QUOTA_FINISH_TEST_SETTLE);
+#endif
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_settle_fact_physical_quota_observation
+            (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
+              batch->request_id, admission->reservation_evidence, observed, status);
+    if (rc != WYRELOG_E_BUSY || attempt == WYL_FACT_PHYSICAL_QUOTA_FINISH_BUSY_RETRIES)
+      return rc;
+    g_usleep (WYL_FACT_PHYSICAL_QUOTA_FINISH_BUSY_DELAY_US << MIN (attempt, 6u));
+  }
+}
+
 static wyrelog_error_t
 fact_store_physical_quota_finish (wyl_fact_store_t *store,
     const wyl_fact_store_batch_t *batch,
@@ -2954,17 +3031,13 @@ fact_store_physical_quota_finish (wyl_fact_store_t *store,
         (store->physical_quota_namespace, store->physical_quota_lease,
           &observed);
   if (rc != WYRELOG_E_OK)
-    return wyl_policy_store_cancel_fact_physical_quota
-             (store->physical_quota_policy, &operation, definite_noncommit,
-               &operation_status);
-  rc = wyl_policy_store_settle_fact_physical_quota_observation
-        (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
-          batch->request_id, admission->reservation_evidence, observed,
+    return fact_store_physical_quota_cancel (store, &operation,
+               definite_noncommit, &operation_status);
+  rc = fact_store_physical_quota_settle (store, batch, admission, observed,
           &operation_status);
   if (rc != WYRELOG_E_OK && rc != WYRELOG_E_BUSY)
-    (void) wyl_policy_store_cancel_fact_physical_quota
-      (store->physical_quota_policy, &operation, definite_noncommit,
-        &operation_status);
+    (void) fact_store_physical_quota_cancel (store, &operation,
+        definite_noncommit, &operation_status);
   return rc;
 }
 #endif

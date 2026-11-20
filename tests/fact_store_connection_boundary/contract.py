@@ -237,6 +237,7 @@ OLD_AUTHORITY = (
 )
 SEAM_SYMBOLS = (
     "wyl_fact_store_test_set_transaction_hook",
+    "wyl_fact_store_set_physical_quota_finish_hook_for_test",
     "wyl_fact_store_test_set_session_admission_hook",
     "wyl_fact_store_test_try_lock",
     "wyl_fact_store_test_session_admission_count",
