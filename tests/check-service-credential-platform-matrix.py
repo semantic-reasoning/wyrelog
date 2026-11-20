@@ -27,12 +27,15 @@ agreement with docs/service-credential-platform-support.md:
                                   platform with no runner BLOCKS the gate.
                                   The service-credential-e2e job, the only
                                   enable_fault_injection build, MUST also run
-                                  the wyctl token-file fault tests (#1546).
+                                  the wyctl token-file fault tests (#1546),
+                                  in a `meson test -C <dir>` whose <dir> is
+                                  the one it set up with that option.
   * tests/test-wyctl-basic.c   -- every `-p` path the filtered
                                   wyctl-token-file-write-faults registration
                                   passes MUST be a g_test_add_func literal
-                                  there: GLib exits 0 with `1..0` for an
-                                  unknown -p, so a typo would pass silently.
+                                  there, outside comments: GLib exits 0 with
+                                  `1..0` for an unknown -p, so a typo would
+                                  pass silently.
 
 `--self-test` runs the #1546 checks against built-in negative cases.
 
@@ -84,6 +87,7 @@ MACOS_NATIVE_GATES = ("secure-duckdb-bridge",)
 TOKEN_FILE_FAULT_TESTS = ("wyctl-token-file", "wyctl-token-file-write-faults")
 TOKEN_FILE_FAULT_REGISTRATION = "wyctl-token-file-write-faults"
 TOKEN_FILE_FAULT_PATHS_VAR = "wyctl_token_file_fault_paths"
+FAULT_INJECTION_SETUP_OPTION = f"-D{FAULT_INJECTION_GATE}=enabled"
 
 USAGE = (
     "usage: check-service-credential-platform-matrix.py "
@@ -353,11 +357,23 @@ def check_meson_gating(meson_text: str) -> None:
 
 
 def fault_job_meson_tests(label: str, ci_text: str) -> list[str]:
-    """Test names on the service-credential-e2e job's `meson test` line.
+    """Test names the service-credential-e2e job runs in its fault build.
 
-    Exact tokens, so `wyctl-token-file-write-faults` cannot stand in for
+    The fault-injection build is each `meson setup <dir>` in the job whose
+    options include -Denable_fault_injection=enabled. Only a `meson test -C
+    <dir>` whose dir equals one of those exactly counts, so a step against
+    another build (say `builddir-plain`) cannot satisfy the check. Names are
+    exact tokens, so `wyctl-token-file-write-faults` cannot stand in for
     `wyctl-token-file`, and a mention in a comment or another job does not
-    count.
+    count. Each shell command is split at unquoted `;`, `&&`, `||` and `|`
+    and cut at a ` #` comment, so `meson test -C builddir a && meson test
+    -C other b` runs only `a` in builddir.
+
+    Known limits (none occurs in the real workflows): a `meson setup` or
+    `meson test` matches anywhere in the job text, including a step
+    `name:` or an `echo` argument; a later `meson configure` that turns the
+    option off is not seen; and step order is ignored, so a `meson test`
+    placed before its `meson setup` still counts.
     """
     lines = ci_text.splitlines()
     start = next((i for i, line in enumerate(lines)
@@ -368,12 +384,63 @@ def fault_job_meson_tests(label: str, ci_text: str) -> list[str]:
     end = next((i for i in range(start + 1, len(lines))
                 if re.match(r"^  \S", lines[i])), len(lines))
     job = "\n".join(strip_yaml_comment(line) for line in lines[start:end])
-    match = re.search(r"meson test -C builddir((?:[^\n]*\\\n)*[^\n]*)", job)
-    if match is None:
+    # One logical command per line: join `\`-continued lines.
+    commands = [segment
+                for line in re.sub(r"\\[ \t]*\n", " ", job).splitlines()
+                for segment in shell_segments(line)]
+    fault_dirs = set()
+    for command in commands:
+        setup = re.search(r"\bmeson setup\s+(.*)", command)
+        if setup is None:
+            continue
+        args = setup.group(1).split()
+        dirs = [arg for arg in args if not arg.startswith("-")]
+        if dirs and FAULT_INJECTION_SETUP_OPTION in args:
+            fault_dirs.add(dirs[0])
+    if not fault_dirs:
+        fail(f"{label}: the service-credential-e2e job has no `meson setup` "
+             f"with {FAULT_INJECTION_SETUP_OPTION}")
+    tests = None
+    for command in commands:
+        run = re.search(r"\bmeson test\s+-C\s+(\S+)(.*)", command)
+        if run is None or run.group(1) not in fault_dirs:
+            continue
+        tests = (tests or []) + [token for token in run.group(2).split()
+                                 if not token.startswith("-")]
+    if tests is None:
         fail(f"{label}: the service-credential-e2e job has no "
-             "`meson test -C builddir` step")
-    return [token for token in re.split(r"[\s\\]+", match.group(1))
-            if token and not token.startswith("-")]
+             "`meson test -C <dir>` step for its enable_fault_injection "
+             "build")
+    return tests
+
+
+def shell_segments(command: str) -> list[str]:
+    """Split a shell line at unquoted `;`, `&&`, `||`, `|`; drop a ` #` tail."""
+    segments = []
+    current = []
+    quote = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            current.append(ch)
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or command[i - 1] in " \t"):
+            break
+        elif ch in ";|" or command.startswith("&&", i):
+            segments.append("".join(current))
+            current = []
+            i += 2 if command.startswith(("&&", "||"), i) else 1
+            continue
+        current.append(ch)
+        i += 1
+    segments.append("".join(current))
+    return segments
 
 
 def strip_yaml_comment(line: str) -> str:
@@ -411,8 +478,45 @@ def token_file_fault_paths(meson_text: str) -> list[str]:
     return paths
 
 
+def strip_c_comments(text: str) -> str:
+    """Replace C comments with a space, keeping string and char literals.
+
+    A `/*` or `//` inside "..." or '...' (escapes honoured) is not a
+    comment. Newlines inside a block comment are kept.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            j = i + 1
+            while j < n and text[j] != ch and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            out.append(" " + "\n" * text.count("\n", i, end))
+            i = end
+        elif text.startswith("//", i):
+            # A newline after `\\` is spliced away, continuing the comment.
+            end = text.find("\n", i)
+            while end > 0 and text[end - 1] == "\\":
+                end = text.find("\n", end + 1)
+            end = n if end < 0 else end
+            out.append(" " + "\n" * text.count("\n", i, end))
+            i = end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def check_token_file_fault_paths(meson_text: str, c_text: str) -> None:
-    registered = set(re.findall(r'g_test_add_func\s*\(\s*"([^"]+)"', c_text))
+    registered = set(re.findall(r'g_test_add_func\s*\(\s*"([^"]+)"',
+                                strip_c_comments(c_text)))
     for path in token_file_fault_paths(meson_text):
         if path not in registered:
             fail(f"tests/meson.build: test('{TOKEN_FILE_FAULT_REGISTRATION}') "
@@ -422,10 +526,11 @@ def check_token_file_fault_paths(meson_text: str, c_text: str) -> None:
 
 
 def self_test() -> None:
-    job = (
+    job_template = (
         "jobs:\n"
         "  service-credential-e2e:\n"
         "    steps:\n"
+        "{setup}"
         "      - run: |\n"
         "          meson test -C builddir --print-errorlogs \\\n"
         "            service-credential-platform-matrix \\\n"
@@ -434,6 +539,12 @@ def self_test() -> None:
         "    steps:\n"
         "      - run: meson test -C builddir wyctl-token-file\n"
     )
+    fault_setup = ("      - run: |\n"
+                   "          meson setup builddir \\\n"
+                   "            -Denable_client=enabled \\\n"
+                   "            -Denable_fault_injection=enabled \\\n"
+                   "            -Dduckdb_source=prebuilt\n")
+    job = job_template.replace("{setup}", fault_setup)
     both = ("            wyctl-token-file \\\n"
             "            wyctl-token-file-write-faults\n")
     meson = (
@@ -473,6 +584,56 @@ def self_test() -> None:
            "must name 'wyctl-token-file-write-faults'")
     expect(lambda: check_ci_token_file_faults("nojob.yml", "jobs:\n"),
            "no 'service-credential-e2e:' job")
+    # Names run against another build dir do not count, even one whose name
+    # extends the fault-injection build's (builddir-plain vs builddir).
+    plain = ("      - run: meson setup builddir-plain\n"
+             "      - run: |\n"
+             "          meson test -C builddir-plain wyctl-token-file \\\n"
+             "            wyctl-token-file-write-faults\n")
+    expect(lambda: check_ci_token_file_faults("plain.yml", job_template.replace(
+           "{setup}", plain + fault_setup).format(
+           tests="            other-test\n")),
+           "must name 'wyctl-token-file'")
+    no_fault_setup = ("the service-credential-e2e job has no `meson setup` "
+                      "with -Denable_fault_injection=enabled")
+    expect(lambda: check_ci_token_file_faults("nosetup.yml",
+           job_template.replace("{setup}", "").format(tests=both)),
+           no_fault_setup)
+    expect(lambda: check_ci_token_file_faults("disabled.yml", job.replace(
+           "-Denable_fault_injection=enabled",
+           "-Denable_fault_injection=disabled").format(tests=both)),
+           no_fault_setup)
+    # A chained command runs its names against another dir, and a shell
+    # comment runs nothing.
+    expect(lambda: check_ci_token_file_faults("chain.yml", job.format(
+           tests="            other-test && meson test -C builddir-plain \\\n"
+                 "            wyctl-token-file \\\n"
+                 "            wyctl-token-file-write-faults\n")),
+           "must name 'wyctl-token-file'")
+    expect(lambda: check_ci_token_file_faults("shellcomment.yml", job.format(
+           tests="            wyctl-token-file-write-faults"
+                 " # wyctl-token-file\n")),
+           "must name 'wyctl-token-file'")
+    # A chained command against the fault build still counts.
+    expect(lambda: check_ci_token_file_faults("chainok.yml", job.format(
+           tests="            other-test && meson test -C builddir \\\n"
+                 "            wyctl-token-file \\\n"
+                 "            wyctl-token-file-write-faults\n")),
+           None)
+    # A separator inside quotes does not split the command.
+    expect(lambda: check_ci_token_file_faults("quoted.yml", job.format(
+           tests="            --test-args 'a;b' \\\n" + both)), None)
+    # The build dir is the first positional; the source dir is not one.
+    expect(lambda: check_ci_token_file_faults("srcdir.yml", job.replace(
+           "meson setup builddir", "meson setup builddir srcdir").replace(
+           "meson test -C builddir --print",
+           "meson test -C srcdir --print").format(tests=both)),
+           "has no `meson test -C <dir>` step")
+    # The fault-injection build exists, but no meson test runs against it.
+    expect(lambda: check_ci_token_file_faults("otherdir.yml", job.replace(
+           "meson test -C builddir", "meson test -C otherdir").format(
+           tests=both)),
+           "has no `meson test -C <dir>` step")
 
     expect(lambda: check_token_file_fault_paths(meson.format(
            paths="    '/wyctl/a',\n    '/wyctl/b',\n"), c_text), None)
@@ -481,6 +642,35 @@ def self_test() -> None:
            "passes -p '/wyctl/renamed'")
     expect(lambda: check_token_file_fault_paths(meson.format(paths=""),
            c_text), "is empty")
+    expect(lambda: check_token_file_fault_paths(meson.format(paths="").replace(
+           "wyctl_token_file_fault_paths = [\n  ]\n", ""), c_text),
+           "no `wyctl_token_file_fault_paths = [...]` list")
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/a',\n").replace(
+           "test('wyctl-token-file-write-faults'", "test('renamed'"), c_text),
+           "no test('wyctl-token-file-write-faults'")
+    # A registration inside a C comment does not count; comment openers
+    # inside string and character literals are not comments.
+    c_comments = (c_text
+                  + '  /* g_test_add_func ("/wyctl/c", test_c); */\n'
+                  + '  // g_test_add_func ("/wyctl/d", test_d);\n')
+    for path in ("/wyctl/c", "/wyctl/d"):
+        expect(lambda: check_token_file_fault_paths(meson.format(
+               paths=f"    '{path}',\n"), c_comments),
+               f"passes -p '{path}'")
+    # C splices a line ending in `\\`, so the `//` comment continues.
+    c_spliced = (c_text + "  // x \\\n"
+                 + '  g_test_add_func ("/wyctl/c", test_c);\n')
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/c',\n"), c_spliced), "passes -p '/wyctl/c'")
+    c_char = (c_text + "  c = '\"'; /* g_test_add_func (\"/wyctl/c\", t); */\n")
+    expect(lambda: check_token_file_fault_paths(meson.format(
+           paths="    '/wyctl/c',\n"), c_char), "passes -p '/wyctl/c'")
+    for literal in ('"/* not a comment"', '"\\" /* still a string"'):
+        c_string = (f"  g_print ({literal});\n"
+                    '  g_test_add_func ("/wyctl/e", test_e);\n')
+        expect(lambda: check_token_file_fault_paths(meson.format(
+               paths="    '/wyctl/e',\n"), c_string), None)
     expect(lambda: check_token_file_fault_paths(meson.format(
            paths="    '/wyctl/a',\n").replace(
            "get_option('enable_fault_injection').allowed()", "true"),
