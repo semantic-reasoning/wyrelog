@@ -1,14 +1,20 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Expose POSIX.1-2008 symlink/lstat/mkfifo under strict c_std=c17.
- * Must precede every system header. */
+/* Expose POSIX.1-2008 symlink/lstat/mkfifo/realpath under strict
+ * c_std=c17. glibc declares realpath only with _XOPEN_SOURCE (or the
+ * default feature set), not with _POSIX_C_SOURCE alone. Must precede every
+ * system header. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
 #endif
 #include "test-exit-status.h"
 
 #include <fcntl.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -369,18 +375,25 @@ test_protected_writer_is_no_replace (void)
   g_unlink (path);
 }
 
+/* A successful replace clears *out_leftover and leaves no temporary file
+ * beside the target. */
 static void
 test_protected_replace_and_remove (void)
 {
-  g_autofree gchar *path = NULL;
-  gint fd = g_file_open_tmp ("wyctl-replace-XXXXXX", &path, NULL);
-  g_assert_cmpint (fd, >=, 0);
-  g_assert_true (g_close (fd, NULL));
-  g_unlink (path);
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-replace-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "token", NULL);
   g_assert_cmpint (wyctl_token_file_write_protected (path, "old-token", 9),
       ==, WYCTL_TOKEN_FILE_OK);
-  g_assert_cmpint (wyctl_token_file_replace_protected (path, "new-token", 9),
-      ==, WYCTL_TOKEN_FILE_OK);
+  gchar *leftover = (gchar *) "not cleared";
+  g_assert_cmpint (wyctl_token_file_replace_protected (path, "new-token", 9,
+      &leftover), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_null (leftover);
+  GDir *entries = g_dir_open (dir, 0, NULL);
+  g_assert_nonnull (entries);
+  g_assert_cmpstr (g_dir_read_name (entries), ==, "token");
+  g_assert_null (g_dir_read_name (entries));
+  g_dir_close (entries);
   g_autofree gchar *token = NULL;
   g_assert_cmpint (wyctl_token_file_read (path, &token), ==,
       WYCTL_TOKEN_FILE_OK);
@@ -388,6 +401,7 @@ test_protected_replace_and_remove (void)
   g_assert_cmpint (wyctl_token_file_remove_protected (path), ==,
       WYCTL_TOKEN_FILE_OK);
   g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
 
 static void
@@ -624,11 +638,38 @@ fault_fixture_init (FaultFixture *fixture)
   fixture->second_path = g_build_filename (fixture->dir, "second", NULL);
 }
 
+/* Number of replace temporaries (.wyctl-token-*) in DIR; the first one's
+ * name is stored in *first when FIRST is non-NULL. */
+static guint
+count_replace_temporaries (const gchar *dir, gchar **first)
+{
+  GDir *entries = g_dir_open (dir, 0, NULL);
+  g_assert_nonnull (entries);
+  guint count = 0;
+  const gchar *name;
+  while ((name = g_dir_read_name (entries)) != NULL) {
+    if (!g_str_has_prefix (name, ".wyctl-token-"))
+      continue;
+    if (count == 0 && first != NULL)
+      *first = g_strdup (name);
+    count++;
+  }
+  g_dir_close (entries);
+  return count;
+}
+
 static void
 fault_fixture_clear (FaultFixture *fixture)
 {
   wyctl_token_file_arm_faults_once (0);
   wyctl_token_file_fault_skip_protected_writes (0);
+  gchar *temporary = NULL;
+  while (count_replace_temporaries (fixture->dir, &temporary) > 0) {
+    g_autofree gchar *temporary_path = g_build_filename (fixture->dir,
+            temporary, NULL);
+    g_assert_cmpint (g_unlink (temporary_path), ==, 0);
+    g_clear_pointer (&temporary, g_free);
+  }
   g_unlink (fixture->path);
   g_unlink (fixture->second_path);
   g_rmdir (fixture->dir);
@@ -684,6 +725,7 @@ test_fault_spec_parse (void)
     { "dir-close", WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE },
     { "cleanup-unlink", WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK },
     { "cleanup-enoent", WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT },
+    { "rename", WYCTL_TOKEN_FILE_FAULT_RENAME },
   };
   guint all = 0;
   for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
@@ -696,7 +738,7 @@ test_fault_spec_parse (void)
   guint mask = 0;
   g_assert_true (wyctl_token_file_parse_faults
         ("write,file-sync,file-close,dir-sync,dir-close,cleanup-unlink,"
-      "cleanup-enoent", &mask));
+      "cleanup-enoent,rename", &mask));
   g_assert_cmpuint (mask, ==, all);
   g_assert_true (wyctl_token_file_parse_faults ("file-sync,cleanup-unlink",
       &mask));
@@ -877,6 +919,179 @@ test_cleanup_unlink_wins_over_enoent (void)
   fault_fixture_clear (&fixture);
 }
 
+/* The faults a replace reaches: writing, flushing and closing its temporary
+ * file, and renaming it over the target. */
+static const guint replace_faults[] = {
+  WYCTL_TOKEN_FILE_FAULT_WRITE,
+  WYCTL_TOKEN_FILE_FAULT_FILE_SYNC,
+  WYCTL_TOKEN_FILE_FAULT_FILE_CLOSE,
+  WYCTL_TOKEN_FILE_FAULT_RENAME,
+};
+
+static void
+replace_fixture_init (FaultFixture *fixture)
+{
+  fault_fixture_init (fixture);
+  g_assert_cmpint (wyctl_token_file_write_protected (fixture->path,
+      "old-token", 9), ==, WYCTL_TOKEN_FILE_OK);
+}
+
+/* A failed replace removes its temporary file: IO, no leftover, and the
+ * target keeps the old token. */
+static void
+test_replace_fault_is_io (void)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (replace_faults); i++) {
+    FaultFixture fixture;
+    replace_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (replace_faults[i]);
+    gint fds_before = count_open_fds ();
+    gchar *leftover = NULL;
+    WyctlTokenFileStatus status = wyctl_token_file_replace_protected
+          (fixture.path, "new-token", 9, &leftover);
+    g_assert_cmpint (status, ==, WYCTL_TOKEN_FILE_IO);
+    g_assert_null (leftover);
+    g_assert_cmpint (count_open_fds (), ==, fds_before);
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    assert_protected_file (fixture.path, "old-token");
+    g_assert_cmpuint (count_replace_temporaries (fixture.dir, NULL), ==, 0);
+    fault_fixture_clear (&fixture);
+  }
+}
+
+/* A failed replace whose cleanup cannot remove the temporary file reports
+ * INCOMPLETE_REMAINS and names it: the resolved directory plus the
+ * temporary's name. It is empty after a failed write and holds the new token
+ * otherwise; the target keeps the old token. */
+static void
+test_replace_incomplete_remains (void)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (replace_faults); i++) {
+    FaultFixture fixture;
+    replace_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (replace_faults[i]
+        | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+    gint fds_before = count_open_fds ();
+    g_autofree gchar *leftover = NULL;
+    WyctlTokenFileStatus status = wyctl_token_file_replace_protected
+          (fixture.path, "new-token", 9, &leftover);
+    g_assert_cmpint (status, ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+    g_assert_nonnull (leftover);
+    g_assert_cmpint (count_open_fds (), ==, fds_before);
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    g_autofree gchar *temporary = NULL;
+    g_assert_cmpuint (count_replace_temporaries (fixture.dir, &temporary), ==,
+        1);
+    gchar *resolved = realpath (fixture.dir, NULL);
+    g_assert_nonnull (resolved);
+    g_autofree gchar *expected = g_build_filename (resolved, temporary, NULL);
+    free (resolved);
+    g_assert_cmpstr (leftover, ==, expected);
+    assert_protected_file (leftover,
+        replace_faults[i] == WYCTL_TOKEN_FILE_FAULT_WRITE ? "" : "new-token");
+    assert_protected_file (fixture.path, "old-token");
+    fault_fixture_clear (&fixture);
+  }
+}
+
+/* A replace cleanup that finds its temporary already gone stays IO, with no
+ * leftover; the cleanup flush runs and consumes DIR_SYNC. */
+static void
+test_replace_cleanup_enoent_is_io (void)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (replace_faults); i++) {
+    FaultFixture fixture;
+    replace_fixture_init (&fixture);
+    wyctl_token_file_arm_faults_once (replace_faults[i]
+        | WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT
+        | WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+    gchar *leftover = NULL;
+    WyctlTokenFileStatus status = wyctl_token_file_replace_protected
+          (fixture.path, "new-token", 9, &leftover);
+    g_assert_cmpint (status, ==, WYCTL_TOKEN_FILE_IO);
+    g_assert_cmpuint (wyctl_token_file_fault_cleanup_enoent_seen (), ==, 1);
+    g_assert_null (leftover);
+    g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+    assert_protected_file (fixture.path, "old-token");
+    g_assert_cmpuint (count_replace_temporaries (fixture.dir, NULL), ==, 0);
+    fault_fixture_clear (&fixture);
+  }
+}
+
+/* Unlike the protected writer, replace accepts a target reached through a
+ * symlinked parent: it resolves the parent first. A leftover is then named
+ * inside the resolved directory, not through the link. */
+static void
+test_replace_leftover_resolves_parent_symlink (void)
+{
+  FaultFixture fixture;
+  fault_fixture_init (&fixture);
+  g_autofree gchar *real = g_build_filename (fixture.dir, "real", NULL);
+  g_assert_cmpint (g_mkdir (real, 0700), ==, 0);
+  g_autofree gchar *link = g_build_filename (fixture.dir, "link", NULL);
+  g_assert_cmpint (symlink ("real", link), ==, 0);
+  g_autofree gchar *real_token = g_build_filename (real, "token", NULL);
+  g_autofree gchar *link_token = g_build_filename (link, "token", NULL);
+  g_assert_cmpint (wyctl_token_file_write_protected (real_token, "old-token",
+      9), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_write_protected (link_token, "x", 1), ==,
+      WYCTL_TOKEN_FILE_UNSAFE_PARENT);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_WRITE
+      | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+  g_autofree gchar *leftover = NULL;
+  g_assert_cmpint (wyctl_token_file_replace_protected (link_token,
+      "new-token", 9, &leftover), ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+  g_autofree gchar *temporary = NULL;
+  g_assert_cmpuint (count_replace_temporaries (real, &temporary), ==, 1);
+  gchar *resolved = realpath (real, NULL);
+  g_assert_nonnull (resolved);
+  g_autofree gchar *expected = g_build_filename (resolved, temporary, NULL);
+  free (resolved);
+  g_assert_cmpstr (leftover, ==, expected);
+  g_assert_false (g_str_has_prefix (leftover, link));
+  assert_protected_file (real_token, "old-token");
+  g_assert_cmpint (g_unlink (leftover), ==, 0);
+  g_assert_cmpint (g_unlink (real_token), ==, 0);
+  g_assert_cmpint (g_unlink (link), ==, 0);
+  g_assert_cmpint (g_rmdir (real), ==, 0);
+  fault_fixture_clear (&fixture);
+}
+
+/* The rename happened but the directory flush failed. */
+static void
+test_replace_dir_sync_fault_is_durability_uncertain (void)
+{
+  FaultFixture fixture;
+  replace_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_DIR_SYNC);
+  gchar *leftover = NULL;
+  g_assert_cmpint (wyctl_token_file_replace_protected (fixture.path,
+      "new-token", 9, &leftover), ==, WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN);
+  g_assert_null (leftover);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  assert_protected_file (fixture.path, "new-token");
+  g_assert_cmpuint (count_replace_temporaries (fixture.dir, NULL), ==, 0);
+  fault_fixture_clear (&fixture);
+}
+
+/* A skipped protected write also skips the faults of a replace. */
+static void
+test_fault_skip_covers_replace (void)
+{
+  FaultFixture fixture;
+  replace_fixture_init (&fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_RENAME);
+  wyctl_token_file_fault_skip_protected_writes (1);
+  g_assert_cmpint (wyctl_token_file_replace_protected (fixture.path,
+      "new-token", 9, NULL), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==,
+      WYCTL_TOKEN_FILE_FAULT_RENAME);
+  g_assert_cmpint (wyctl_token_file_replace_protected (fixture.path,
+      "newer-token", 11, NULL), ==, WYCTL_TOKEN_FILE_IO);
+  assert_protected_file (fixture.path, "new-token");
+  fault_fixture_clear (&fixture);
+}
+
 /* The pair writer passes INCOMPLETE_REMAINS through with the failing path.
  * Skip 0 aims the faults at the refresh write, so nothing else is written;
  * skip 1 aims them at the access write, and the refresh file is rolled
@@ -1054,6 +1269,18 @@ main (int argc, char **argv)
       test_cleanup_enoent_is_io);
   g_test_add_func ("/wyctl/token-file/cleanup-unlink-wins-over-enoent",
       test_cleanup_unlink_wins_over_enoent);
+  g_test_add_func ("/wyctl/token-file/replace-fault-is-io",
+      test_replace_fault_is_io);
+  g_test_add_func ("/wyctl/token-file/replace-incomplete-remains",
+      test_replace_incomplete_remains);
+  g_test_add_func ("/wyctl/token-file/replace-cleanup-enoent-is-io",
+      test_replace_cleanup_enoent_is_io);
+  g_test_add_func ("/wyctl/token-file/replace-leftover-resolves-parent-"
+      "symlink", test_replace_leftover_resolves_parent_symlink);
+  g_test_add_func ("/wyctl/token-file/replace-dir-sync-fault-is-durability-"
+      "uncertain", test_replace_dir_sync_fault_is_durability_uncertain);
+  g_test_add_func ("/wyctl/token-file/fault-skip-covers-replace",
+      test_fault_skip_covers_replace);
   g_test_add_func ("/wyctl/token-file/pair-incomplete-remains",
       test_pair_incomplete_remains);
   g_test_add_func ("/wyctl/token-file/dir-close-fault-keeps-file",

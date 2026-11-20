@@ -540,14 +540,14 @@
   },
   {
     "path": "tests/test-wyctl-token-file.c",
-    "line": 467,
+    "line": 481,
     "api": "_exit",
     "expression": "2",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-wyctl-token-file.c",
-    "line": 470,
+    "line": 484,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"

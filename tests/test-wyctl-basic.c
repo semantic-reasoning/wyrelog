@@ -7705,9 +7705,10 @@ test_service_token_output_incomplete_remains (void)
 }
 
 /* #1546: refresh recreating a missing access file. The refresh file is
- * replaced first (not a protected create, so the faults pass it by), then the
- * access create fails and leaves its file: the next refresh would read that
- * file as present, so wyctl says to delete it first. */
+ * replaced first, and a replace counts as a protected write, so skip 1 lets
+ * it pass unfaulted; then the access create fails and leaves its file: the
+ * next refresh would read that file as present, so wyctl says to delete it
+ * first. */
 static void
 test_refresh_access_incomplete_remains (void)
 {
@@ -7723,7 +7724,7 @@ test_refresh_access_incomplete_remains (void)
     access_path, "--refresh-token-file", refresh_path, NULL,
   };
   g_auto (FactForgetRun) run = { 0 };
-  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, NULL, FALSE, args, &run);
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, "1", FALSE, args, &run);
   assert_tokens_absent (&run);
   assert_fact_forget_exit (&run, 1);
   g_assert_cmpstr (run.out, ==, "");

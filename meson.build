@@ -140,15 +140,15 @@ endif
 
 # Test-only, single-shot fault-injection seams: the service-credential
 # publication seam (#754) with its daemon flag, and the wyctl token-file write
-# hook (#1546) with its hidden wyctl flags --fault-inject-token-file and
-# --fault-inject-token-file-skip (POSIX only). Compile-gated OFF by default:
-# when the option is not enabled the WYL_ENABLE_FAULT_INJECTION macro is
-# undefined project-wide, so the seams, their flags, and the focused unit
-# subtests are not compiled at all -- a release daemon and wyctl are
-# byte-identical to today and can never be armed. A project argument (not a
-# per-target c_arg) is used so libwyrelog, wyrelogd, wyctl, and every test
-# that compiles the affected translation units see the same definition
-# uniformly.
+# and replace hook (#1546, #1551) with its hidden wyctl flags
+# --fault-inject-token-file and --fault-inject-token-file-skip (POSIX only).
+# Compile-gated OFF by default: when the option is not enabled the
+# WYL_ENABLE_FAULT_INJECTION macro is undefined project-wide, so the seams,
+# their flags, and the focused unit subtests are not compiled at all -- a
+# release daemon and wyctl are byte-identical to today and can never be armed.
+# A project argument (not a per-target c_arg) is used so libwyrelog, wyrelogd,
+# wyctl, and every test that compiles the affected translation units see the
+# same definition uniformly.
 enable_fault_injection_opt = get_option('enable_fault_injection')
 if enable_fault_injection_opt.allowed()
   add_project_arguments('-DWYL_ENABLE_FAULT_INJECTION', language : 'c')

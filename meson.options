@@ -56,7 +56,7 @@ option('enable_fault_injection',
               + 'seams and their arming flags: the service-credential '
               + 'publication seam with the daemon flag '
               + '--fault-inject-sc-publication-once, and the wyctl token-file '
-              + 'write hook with the hidden wyctl flags '
+              + 'write and replace hook with the hidden wyctl flags '
               + '--fault-inject-token-file and --fault-inject-token-file-skip '
               + '(POSIX only). Disabled by default so release builds do not '
               + 'contain the seams or the flags at all: with this off the '
