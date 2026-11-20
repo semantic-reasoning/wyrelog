@@ -1259,7 +1259,7 @@ test_physical_recompute_transaction_refusals (gconstpointer data)
   physical_fixture_clear (&fx);
 }
 
-#if !defined(G_OS_WIN32) || defined(WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
+#ifndef G_OS_WIN32
 static void
 test_physical_recompute_shutdown_health_failure (void)
 {
@@ -1286,6 +1286,9 @@ test_physical_recompute_shutdown_health_failure (void)
   physical_fixture_clear (&fx);
 }
 
+#endif
+
+#if !defined(G_OS_WIN32) || defined(WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
 static void
 test_physical_recompute_unstable_and_audit_rollback (void)
 {
@@ -1707,8 +1710,10 @@ main (int argc, char *argv[])
   }
   g_test_add_func ("/fact/store-provisioned/physical-quota/recompute/reset-growth", test_physical_recompute_reset_and_growth);
   g_test_add_func ("/fact/store-provisioned/physical-quota/recompute/zero-holds", test_physical_recompute_refuses_holds);
-#if !defined(G_OS_WIN32) || defined(WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact/store-provisioned/physical-quota/recompute/shutdown-health-failure", test_physical_recompute_shutdown_health_failure);
+#endif
+#if !defined(G_OS_WIN32) || defined(WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
   g_test_add_func ("/fact/store-provisioned/physical-quota/recompute/unstable-audit-rollback", test_physical_recompute_unstable_and_audit_rollback);
 #endif
   g_test_add_func (
