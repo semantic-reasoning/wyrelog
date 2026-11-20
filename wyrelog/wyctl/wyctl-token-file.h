@@ -38,8 +38,9 @@ typedef enum
   WYCTL_TOKEN_FILE_ALREADY_EXISTS,
   WYCTL_TOKEN_FILE_UNSAFE_PARENT,
   WYCTL_TOKEN_FILE_PERMISSION_DENIED,
-  /* A protected create failed and its cleanup could not remove the new,
-   * owner-only file, which may hold part or all of the token. */
+  /* A protected create or replace failed and its cleanup could not remove
+   * the new, owner-only file (for a replace, its temporary file), which may
+   * hold part or all of the token. */
   WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS,
 } WyctlTokenFileStatus;
 
@@ -79,9 +80,19 @@ WyctlTokenFileStatus wyctl_token_file_write_pair_protected (
 /* Replace a previously validated protected token file atomically. A
  * durability-uncertain result means the namespace replacement happened but
  * the parent-directory flush failed; callers must not replay a consumed
- * refresh token automatically. */
+ * refresh token automatically.
+ *
+ * The new token is written to a temporary file beside path and renamed over
+ * it. A failure after that temporary file is created removes it and reports
+ * IO; on POSIX, when it cannot be removed, the result is INCOMPLETE_REMAINS
+ * and the target keeps its old token. On Windows the cleanup is not yet
+ * checked, so a temporary it fails to remove is still reported as IO with
+ * no leftover (#1551). out_leftover may be NULL. Otherwise it is set to NULL
+ * on entry and, only on INCOMPLETE_REMAINS, to a newly allocated full path
+ * of the temporary file inside the symlink-resolved parent directory, which
+ * the caller frees with g_free(). */
 WyctlTokenFileStatus wyctl_token_file_replace_protected (const gchar * path,
-    const gchar * token, gsize token_len);
+    const gchar * token, gsize token_len, gchar ** out_leftover);
 WyctlTokenFileStatus wyctl_token_file_remove_protected (const gchar * path);
 
 typedef struct _WyctlTokenFileLock WyctlTokenFileLock;
@@ -92,8 +103,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WyctlTokenFileLock,
     wyctl_token_file_unlock_refresh)
 
 #if defined (WYL_ENABLE_FAULT_INJECTION) && !defined (G_OS_WIN32)
-/* Test-only fault points on the POSIX path of
- * wyctl_token_file_write_protected (#1546). Compiled in only when the
+/* Test-only fault points on the POSIX paths of
+ * wyctl_token_file_write_protected (#1546) and
+ * wyctl_token_file_replace_protected (#1551), together the protected
+ * writes. Compiled in only when the
  * enable_fault_injection build option is set; otherwise none of these
  * symbols exist and the writer makes the plain system calls.
  *
@@ -101,16 +114,16 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WyctlTokenFileLock,
  * it, and then disarms itself; points armed together fire independently,
  * except at the cleanup unlink, where an armed CLEANUP_UNLINK fires and
  * leaves CLEANUP_ENOENT armed.
- * WRITE, FILE_SYNC, DIR_SYNC and CLEANUP_UNLINK skip the real call and
- * fail with EIO. FILE_CLOSE and DIR_CLOSE make the real close, so no
- * descriptor leaks, and then report EIO. CLEANUP_ENOENT removes the new
- * file's name first, so the real cleanup unlink fails with a genuine
- * ENOENT. DIR_SYNC covers two call sites, the success path and the cleanup
- * flush, and no single write reaches both; CLEANUP_UNLINK and
- * CLEANUP_ENOENT share one, in the cleanup every failed write, file sync
- * or file close goes through. A fault point either makes a step fail or,
- * for CLEANUP_ENOENT, removes the new file as a concurrent process could;
- * it never bypasses a check. */
+ * WRITE, FILE_SYNC, DIR_SYNC, CLEANUP_UNLINK and RENAME (replace only)
+ * skip the real call and fail with EIO. FILE_CLOSE and DIR_CLOSE make the
+ * real close, so no descriptor leaks, and then report EIO. CLEANUP_ENOENT
+ * removes the new file's name first, so the real cleanup unlink fails with
+ * a genuine ENOENT. DIR_SYNC covers two call sites, the success path and
+ * the cleanup flush, and no single write reaches both; CLEANUP_UNLINK and
+ * CLEANUP_ENOENT share one, in the cleanup every failed write, file sync,
+ * file close or rename goes through. A fault point either makes a step
+ * fail or, for CLEANUP_ENOENT, removes the new file as a concurrent process
+ * could; it never bypasses a check. */
 typedef enum
 {
   WYCTL_TOKEN_FILE_FAULT_WRITE = 1u << 0,
@@ -120,6 +133,7 @@ typedef enum
   WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE = 1u << 4,
   WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK = 1u << 5,
   WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT = 1u << 6,
+  WYCTL_TOKEN_FILE_FAULT_RENAME = 1u << 7,
 } WyctlTokenFileFault;
 
 /* Replace the armed set with mask; 0 disarms every point. Also resets the
@@ -135,14 +149,15 @@ guint wyctl_token_file_armed_faults (void);
 guint wyctl_token_file_fault_cleanup_enoent_seen (void);
 
 /* Parse a comma-separated list of fault point names (write, file-sync,
- * file-close, dir-sync, dir-close, cleanup-unlink, cleanup-enoent) into a
- * mask. Returns FALSE, leaving *out unchanged, for NULL, empty, unknown or
- * empty-element input. */
+ * file-close, dir-sync, dir-close, cleanup-unlink, cleanup-enoent, rename)
+ * into a mask. Returns FALSE, leaving *out unchanged, for NULL, empty,
+ * unknown or empty-element input. */
 gboolean wyctl_token_file_parse_faults (const gchar * spec, guint * out);
 
-/* Test only: the next count protected writes run with every fault point
- * suspended, so a fault can be aimed at a later write, such as the pair
- * writer's access file. wyctl reaches it through the hidden
+/* Test only: the next count protected writes (creates and replaces) run
+ * with every fault point suspended, so a fault can be aimed at a later
+ * write, such as the pair writer's access file or the access-file replace
+ * that follows a refresh-file replace. wyctl reaches it through the hidden
  * --fault-inject-token-file-skip=N flag. A later call replaces the count;
  * it does not add to it.
  *

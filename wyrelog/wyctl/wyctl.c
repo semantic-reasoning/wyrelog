@@ -6351,7 +6351,7 @@ run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
   if (new_access == NULL || new_refresh == NULL)
     return 1;
   WyctlTokenFileStatus status = wyctl_token_file_replace_protected
-        (opts.refresh_token_file, new_refresh, strlen (new_refresh));
+        (opts.refresh_token_file, new_refresh, strlen (new_refresh), NULL);
   sodium_memzero (new_refresh, strlen (new_refresh));
   if (status != WYCTL_TOKEN_FILE_OK) {
     sodium_memzero (new_access, strlen (new_access));
@@ -6363,7 +6363,7 @@ run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
       ? wyctl_token_file_write_protected (opts.access_token_file,
           new_access, strlen (new_access))
       : wyctl_token_file_replace_protected (opts.access_token_file,
-          new_access, strlen (new_access));
+          new_access, strlen (new_access), NULL);
   sodium_memzero (new_access, strlen (new_access));
   if (status != WYCTL_TOKEN_FILE_OK) {
     /* A leftover would be read as a present access file next time, so it

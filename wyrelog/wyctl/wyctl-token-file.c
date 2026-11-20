@@ -52,6 +52,7 @@ static const struct
   { "dir-close", WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE },
   { "cleanup-unlink", WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK },
   { "cleanup-enoent", WYCTL_TOKEN_FILE_FAULT_CLEANUP_ENOENT },
+  { "rename", WYCTL_TOKEN_FILE_FAULT_RENAME },
 };
 
 void
@@ -99,8 +100,8 @@ wyctl_token_file_parse_faults (const gchar *spec, guint *out)
   return TRUE;
 }
 
-/* Called once per protected write: consume one skip, if any, and suspend
- * every fault point for this write. */
+/* Called once per protected write, create or replace: consume one skip, if
+ * any, and suspend every fault point for this write. */
 static void
 wyctl_token_file_fault_begin_write (void)
 {
@@ -173,6 +174,17 @@ wyctl_token_file_fault_unlinkat (int dirfd, const char *name, int flags)
   return result;
 }
 
+static int
+wyctl_token_file_fault_renameat (int olddirfd, const char *oldname,
+    int newdirfd, const char *newname)
+{
+  if (wyctl_token_file_fault_take (WYCTL_TOKEN_FILE_FAULT_RENAME)) {
+    errno = EIO;
+    return -1;
+  }
+  return renameat (olddirfd, oldname, newdirfd, newname);
+}
+
 #define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() \
   wyctl_token_file_fault_begin_write ()
 #define WYCTL_TOKEN_FILE_WRITE(fd, buf, count) \
@@ -187,6 +199,8 @@ wyctl_token_file_fault_unlinkat (int dirfd, const char *name, int flags)
   wyctl_token_file_fault_close (fd, WYCTL_TOKEN_FILE_FAULT_DIR_CLOSE)
 #define WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT(dirfd, name, flags) \
   wyctl_token_file_fault_unlinkat (dirfd, name, flags)
+#define WYCTL_TOKEN_FILE_RENAMEAT(olddirfd, oldname, newdirfd, newname) \
+  wyctl_token_file_fault_renameat (olddirfd, oldname, newdirfd, newname)
 #else
 #define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() ((void) 0)
 #define WYCTL_TOKEN_FILE_WRITE(fd, buf, count) write (fd, buf, count)
@@ -196,6 +210,8 @@ wyctl_token_file_fault_unlinkat (int dirfd, const char *name, int flags)
 #define WYCTL_TOKEN_FILE_CLOSE_DIR(fd) close (fd)
 #define WYCTL_TOKEN_FILE_CLEANUP_UNLINKAT(dirfd, name, flags) \
   unlinkat (dirfd, name, flags)
+#define WYCTL_TOKEN_FILE_RENAMEAT(olddirfd, oldname, newdirfd, newname) \
+  renameat (olddirfd, oldname, newdirfd, newname)
 #endif
 
 struct _WyctlTokenFileLock
@@ -554,6 +570,19 @@ wyctl_token_file_discard_new (int dirfd, const gchar *basename)
     (void) WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd);
   return wyctl_token_file_cleanup_status (name_gone, WYCTL_TOKEN_FILE_IO);
 }
+
+/* The cleanup of a failed replace: discard its temporary file TMP, close
+ * DIRFD, and on INCOMPLETE_REMAINS name the temporary in *out_leftover. */
+static WyctlTokenFileStatus
+wyctl_token_file_replace_discard (int dirfd, const gchar *resolved_parent,
+    const gchar *tmp, gchar **out_leftover)
+{
+  WyctlTokenFileStatus status = wyctl_token_file_discard_new (dirfd, tmp);
+  close (dirfd);
+  if (status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS && out_leftover != NULL)
+    *out_leftover = g_build_filename (resolved_parent, tmp, NULL);
+  return status;
+}
 #endif
 
 WyctlTokenFileStatus
@@ -784,8 +813,10 @@ wyctl_token_file_unlock_refresh (WyctlTokenFileLock *lock)
 
 WyctlTokenFileStatus
 wyctl_token_file_replace_protected (const gchar *path, const gchar *token,
-    gsize token_len)
+    gsize token_len, gchar **out_leftover)
 {
+  if (out_leftover != NULL)
+    *out_leftover = NULL;
   if (path == NULL || path[0] == '\0')
     return WYCTL_TOKEN_FILE_MISSING_PATH;
   if (token == NULL || token_len == 0 || token_len > WYCTL_TOKEN_FILE_MAX_BYTES)
@@ -890,14 +921,17 @@ wyctl_token_file_replace_protected (const gchar *path, const gchar *token,
    * directory flush guarantee is not available on all supported filesystems. */
   return WYCTL_TOKEN_FILE_OK;
 #else
+  WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE ();
   g_autofree gchar *parent = g_path_get_dirname (path);
   g_autofree gchar *basename = g_path_get_basename (path);
-  gchar *resolved_parent = realpath (parent, NULL);
-  if (resolved_parent == NULL)
+  gchar *resolved = realpath (parent, NULL);
+  if (resolved == NULL)
     return WYCTL_TOKEN_FILE_IO;
+  /* Kept to name a leftover temporary: it is the directory dirfd opens. */
+  g_autofree gchar *resolved_parent = g_strdup (resolved);
+  free (resolved);
   int dirfd = open (resolved_parent,
           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  free (resolved_parent);
   if (dirfd < 0)
     return WYCTL_TOKEN_FILE_IO;
   struct stat before;
@@ -932,34 +966,33 @@ wyctl_token_file_replace_protected (const gchar *path, const gchar *token,
   }
   gsize written = 0;
   while (written < token_len) {
-    ssize_t n = write (fd, token + written, token_len - written);
+    ssize_t n = WYCTL_TOKEN_FILE_WRITE (fd, token + written,
+            token_len - written);
     if (n < 0 && errno == EINTR)
       continue;
     if (n <= 0) {
       close (fd);
-      (void) unlinkat (dirfd, tmp, 0);
-      close (dirfd);
-      return WYCTL_TOKEN_FILE_IO;
+      return wyctl_token_file_replace_discard (dirfd, resolved_parent, tmp,
+                 out_leftover);
     }
     written += (gsize) n;
   }
-  gboolean file_sync_ok = fsync (fd) == 0;
-  gboolean file_close_ok = close (fd) == 0;
-  if (!file_sync_ok || !file_close_ok) {
-    (void) unlinkat (dirfd, tmp, 0);
-    close (dirfd);
-    return WYCTL_TOKEN_FILE_IO;
-  }
+  gboolean file_sync_ok = WYCTL_TOKEN_FILE_FSYNC_FILE (fd) == 0;
+  gboolean file_close_ok = WYCTL_TOKEN_FILE_CLOSE_FILE (fd) == 0;
+  if (!file_sync_ok || !file_close_ok)
+    return wyctl_token_file_replace_discard (dirfd, resolved_parent, tmp,
+               out_leftover);
+  /* The target must still be the file validated above, or the rename would
+   * replace something else; that and a failed rename both discard the
+   * temporary. */
   struct stat current;
   gboolean same = fstatat (dirfd, basename, &current,
           AT_SYMLINK_NOFOLLOW) == 0 && current.st_dev == before.st_dev
       && current.st_ino == before.st_ino;
-  if (!same || renameat (dirfd, tmp, dirfd, basename) != 0) {
-    (void) unlinkat (dirfd, tmp, 0);
-    close (dirfd);
-    return WYCTL_TOKEN_FILE_IO;
-  }
-  gboolean durable = fsync (dirfd) == 0;
+  if (!same || WYCTL_TOKEN_FILE_RENAMEAT (dirfd, tmp, dirfd, basename) != 0)
+    return wyctl_token_file_replace_discard (dirfd, resolved_parent, tmp,
+               out_leftover);
+  gboolean durable = WYCTL_TOKEN_FILE_FSYNC_DIR (dirfd) == 0;
   close (dirfd);
   return durable ? WYCTL_TOKEN_FILE_OK : WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN;
 #endif
