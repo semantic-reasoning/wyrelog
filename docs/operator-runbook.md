@@ -787,19 +787,27 @@ recreating a missing access file and cannot remove an incomplete one it left
 behind, it prints `an incomplete file remains at <path>; delete it, then
 refresh again`: the next refresh would otherwise read that file as a present
 access token. Each replacement writes the new token to a temporary file
-beside the target and renames it into place. On POSIX hosts, if a
-replacement fails and that temporary file cannot be removed, refresh adds a
-second line, `a temporary file holding the new refresh token remains at
-<path>; delete it` (or `new access token` for the access file); the file is
-owner-only and may hold the whole new token, so delete it rather than rename
-it into place, and `<path>` is printed with its directory resolved, so it
-can differ from the path you passed when that path runs through a symlink.
-On Windows, a temporary file named `<token-file>.tmp.<id>` may remain beside
-the token file after a failed replacement, with no second line naming it;
-it may also hold the new token, so delete it. A durability-uncertain
-refresh-file replacement requires a new login rather than an automatic retry.
-On Windows, `MOVEFILE_WRITE_THROUGH` is used for replacement; the filesystem
-may provide weaker parent-directory metadata durability than POSIX `fsync`.
+beside the target and renames it into place. If a replacement fails and that
+temporary file cannot be removed, refresh adds a second line: `a temporary
+file holding the new refresh token remains at <path>; delete it`, or `new
+access token` for the access file. The file is owner-only and may hold the
+whole new token, so delete it rather than rename it into place. On POSIX
+hosts `<path>` is the temporary's name in the token file's directory, with
+that directory resolved, so it can differ from the path you passed when that
+path runs through a symlink. On Windows `<path>` is the token file's path as
+you passed it, followed by `.tmp.<id>`. A durability-uncertain refresh-file
+replacement requires a new login rather than an automatic retry. On Windows,
+`MOVEFILE_WRITE_THROUGH` is used for replacement; the filesystem may provide
+weaker parent-directory metadata durability than POSIX `fsync`.
+
+On Windows, every leftover file wyctl names has an owner-only ACL and may
+still be read-only, as wyctl created it: the token files of `an incomplete
+file remains` (login, `auth service-token`, refresh), the credential file of
+`an incomplete copy could not be removed`, and the temporary of `a temporary
+file holding the new ... token remains`. A plain `del` refuses a read-only
+file, so clear the attribute first and then delete it, with `attrib -r
+<file>` followed by `del <file>`, or in PowerShell with `Remove-Item -Force
+-LiteralPath <file>`.
 
 Logout removes both files only after the daemon confirms it. When it fails,
 wyctl prints `wyctl: logout failed: <code>; local token files were retained`
