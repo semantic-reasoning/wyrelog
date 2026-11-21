@@ -1020,41 +1020,46 @@ test_replace_cleanup_enoent_is_io (void)
 
 /* Unlike the protected writer, replace accepts a target reached through a
  * symlinked parent: it resolves the parent first. A leftover is then named
- * inside the resolved directory, not through the link. */
+ * inside the resolved directory, not through the link, at every cleanup
+ * site. */
 static void
 test_replace_leftover_resolves_parent_symlink (void)
 {
-  FaultFixture fixture;
-  fault_fixture_init (&fixture);
-  g_autofree gchar *real = g_build_filename (fixture.dir, "real", NULL);
-  g_assert_cmpint (g_mkdir (real, 0700), ==, 0);
-  g_autofree gchar *link = g_build_filename (fixture.dir, "link", NULL);
-  g_assert_cmpint (symlink ("real", link), ==, 0);
-  g_autofree gchar *real_token = g_build_filename (real, "token", NULL);
-  g_autofree gchar *link_token = g_build_filename (link, "token", NULL);
-  g_assert_cmpint (wyctl_token_file_write_protected (real_token, "old-token",
-      9), ==, WYCTL_TOKEN_FILE_OK);
-  g_assert_cmpint (wyctl_token_file_write_protected (link_token, "x", 1), ==,
-      WYCTL_TOKEN_FILE_UNSAFE_PARENT);
-  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_WRITE
-      | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
-  g_autofree gchar *leftover = NULL;
-  g_assert_cmpint (wyctl_token_file_replace_protected (link_token,
-      "new-token", 9, &leftover), ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
-  g_autofree gchar *temporary = NULL;
-  g_assert_cmpuint (count_replace_temporaries (real, &temporary), ==, 1);
-  gchar *resolved = realpath (real, NULL);
-  g_assert_nonnull (resolved);
-  g_autofree gchar *expected = g_build_filename (resolved, temporary, NULL);
-  free (resolved);
-  g_assert_cmpstr (leftover, ==, expected);
-  g_assert_false (g_str_has_prefix (leftover, link));
-  assert_protected_file (real_token, "old-token");
-  g_assert_cmpint (g_unlink (leftover), ==, 0);
-  g_assert_cmpint (g_unlink (real_token), ==, 0);
-  g_assert_cmpint (g_unlink (link), ==, 0);
-  g_assert_cmpint (g_rmdir (real), ==, 0);
-  fault_fixture_clear (&fixture);
+  for (gsize i = 0; i < G_N_ELEMENTS (replace_faults); i++) {
+    FaultFixture fixture;
+    fault_fixture_init (&fixture);
+    g_autofree gchar *real = g_build_filename (fixture.dir, "real", NULL);
+    g_assert_cmpint (g_mkdir (real, 0700), ==, 0);
+    g_autofree gchar *link = g_build_filename (fixture.dir, "link", NULL);
+    g_assert_cmpint (symlink ("real", link), ==, 0);
+    g_autofree gchar *real_token = g_build_filename (real, "token", NULL);
+    g_autofree gchar *link_token = g_build_filename (link, "token", NULL);
+    g_assert_cmpint (wyctl_token_file_write_protected (real_token, "old-token",
+        9), ==, WYCTL_TOKEN_FILE_OK);
+    g_assert_cmpint (wyctl_token_file_write_protected (link_token, "x", 1), ==,
+        WYCTL_TOKEN_FILE_UNSAFE_PARENT);
+    wyctl_token_file_arm_faults_once (replace_faults[i]
+        | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+    g_autofree gchar *leftover = NULL;
+    g_assert_cmpint (wyctl_token_file_replace_protected (link_token,
+        "new-token", 9, &leftover), ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+    g_autofree gchar *temporary = NULL;
+    g_assert_cmpuint (count_replace_temporaries (real, &temporary), ==, 1);
+    gchar *resolved = realpath (real, NULL);
+    g_assert_nonnull (resolved);
+    g_autofree gchar *expected = g_build_filename (resolved, temporary, NULL);
+    free (resolved);
+    g_assert_cmpstr (leftover, ==, expected);
+    g_assert_false (g_str_has_prefix (leftover, link));
+    assert_protected_file (leftover,
+        replace_faults[i] == WYCTL_TOKEN_FILE_FAULT_WRITE ? "" : "new-token");
+    assert_protected_file (real_token, "old-token");
+    g_assert_cmpint (g_unlink (leftover), ==, 0);
+    g_assert_cmpint (g_unlink (real_token), ==, 0);
+    g_assert_cmpint (g_unlink (link), ==, 0);
+    g_assert_cmpint (g_rmdir (real), ==, 0);
+    fault_fixture_clear (&fixture);
+  }
 }
 
 /* The rename happened but the directory flush failed. */

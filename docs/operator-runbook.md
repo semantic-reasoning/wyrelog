@@ -786,7 +786,17 @@ remains usable and another refresh can recover the pair. When refresh is
 recreating a missing access file and cannot remove an incomplete one it left
 behind, it prints `an incomplete file remains at <path>; delete it, then
 refresh again`: the next refresh would otherwise read that file as a present
-access token. A durability-uncertain
+access token. Each replacement writes the new token to a temporary file
+beside the target and renames it into place. On POSIX hosts, if a
+replacement fails and that temporary file cannot be removed, refresh adds a
+second line, `a temporary file holding the new refresh token remains at
+<path>; delete it` (or `new access token` for the access file); the file is
+owner-only and may hold the whole new token, so delete it rather than rename
+it into place, and `<path>` is printed with its directory resolved, so it
+can differ from the path you passed when that path runs through a symlink.
+On Windows, a temporary file named `<token-file>.tmp.<id>` may remain beside
+the token file after a failed replacement, with no second line naming it;
+it may also hold the new token, so delete it. A durability-uncertain
 refresh-file replacement requires a new login rather than an automatic retry.
 On Windows, `MOVEFILE_WRITE_THROUGH` is used for replacement; the filesystem
 may provide weaker parent-directory metadata durability than POSIX `fsync`.
