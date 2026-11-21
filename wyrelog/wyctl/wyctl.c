@@ -6350,20 +6350,29 @@ run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_autofree gchar *new_refresh = wyl_client_dup_refresh_token (client);
   if (new_access == NULL || new_refresh == NULL)
     return 1;
+  /* A replace that cannot remove its temporary names it: that file may hold
+   * part or all of the new token. */
+  g_autofree gchar *refresh_leftover = NULL;
   WyctlTokenFileStatus status = wyctl_token_file_replace_protected
-        (opts.refresh_token_file, new_refresh, strlen (new_refresh), NULL);
+        (opts.refresh_token_file, new_refresh, strlen (new_refresh),
+          &refresh_leftover);
   sodium_memzero (new_refresh, strlen (new_refresh));
   if (status != WYCTL_TOKEN_FILE_OK) {
     sodium_memzero (new_access, strlen (new_access));
     g_printerr ("wyctl: refresh rotated at daemon but local refresh-token "
         "publication failed; do not retry; login may be required\n");
+    if (status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS
+        && refresh_leftover != NULL)
+      g_printerr ("wyctl: a temporary file holding the new refresh token "
+          "remains at %s; delete it\n", refresh_leftover);
     return 1;
   }
+  g_autofree gchar *access_leftover = NULL;
   status = access_missing
       ? wyctl_token_file_write_protected (opts.access_token_file,
           new_access, strlen (new_access))
       : wyctl_token_file_replace_protected (opts.access_token_file,
-          new_access, strlen (new_access), NULL);
+          new_access, strlen (new_access), &access_leftover);
   sodium_memzero (new_access, strlen (new_access));
   if (status != WYCTL_TOKEN_FILE_OK) {
     /* A leftover would be read as a present access file next time, so it
@@ -6375,9 +6384,14 @@ run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
     else if (access_missing)
       g_printerr ("wyctl: refresh token was saved; access-file creation "
           "failed, so another refresh can recover the missing access file\n");
-    else
+    else {
       g_printerr ("wyctl: refresh token was saved; old access token remains "
           "usable and another refresh can recover the access file\n");
+      if (status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS
+          && access_leftover != NULL)
+        g_printerr ("wyctl: a temporary file holding the new access token "
+            "remains at %s; delete it\n", access_leftover);
+    }
     return 1;
   }
   return 0;

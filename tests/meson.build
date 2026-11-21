@@ -1334,6 +1334,8 @@ if build_client and host_machine.system() != 'windows'
         '/wyctl/login-publication-skip-aims-access',
         '/wyctl/service-token-output-incomplete-remains',
         '/wyctl/refresh-access-incomplete-remains',
+        '/wyctl/refresh-file-replace-incomplete-remains',
+        '/wyctl/refresh-access-replace-incomplete-remains',
         '/wyctl/fault-inject-token-file-flag',
       ]
       wyctl_token_file_fault_args = [

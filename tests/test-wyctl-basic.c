@@ -1,15 +1,20 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Expose POSIX.1-2008 chmod-mode-t and the write(2)/symlink(2) syscalls
- * the resolver / token-file fan-out tests use under strict c_std=c17.
- * Must precede every system header. */
+ * the resolver / token-file fan-out tests use under strict c_std=c17, and
+ * realpath, which glibc declares only with _XOPEN_SOURCE (or the default
+ * feature set). Must precede every system header. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
 #endif
 #include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -7667,6 +7672,111 @@ test_login_publication_skip_aims_access (void)
   }
 }
 
+/* The full path wyctl prints for the one replace temporary (.wyctl-token-*)
+ * left in DIR: the symlink-resolved directory plus the entry's name. */
+static gchar *
+replace_leftover_path (const gchar *dir)
+{
+  GDir *entries = g_dir_open (dir, 0, NULL);
+  g_assert_nonnull (entries);
+  gchar *found = NULL;
+  const gchar *name;
+  while ((name = g_dir_read_name (entries)) != NULL) {
+    if (!g_str_has_prefix (name, ".wyctl-token-"))
+      continue;
+    g_assert_null (found);
+    found = g_strdup (name);
+  }
+  g_dir_close (entries);
+  g_assert_nonnull (found);
+  gchar *resolved = realpath (dir, NULL);
+  g_assert_nonnull (resolved);
+  gchar *path = g_build_filename (resolved, found, NULL);
+  free (resolved);
+  g_free (found);
+  return path;
+}
+
+/* Writes an owner-only token file holding CONTENTS. */
+static void
+write_owner_only_token (const gchar *path, const gchar *contents)
+{
+  g_assert_true (g_file_set_contents (path, contents, -1, NULL));
+  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+}
+
+/* #1551: auth refresh whose refresh-file replace fails and cannot remove its
+ * temporary names that file, which holds the new refresh token; both token
+ * files keep their old contents. */
+static void
+test_refresh_file_replace_incomplete_remains (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-refresh-replace-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  write_owner_only_token (access_path, "access-1");
+  write_owner_only_token (refresh_path, "refresh-1");
+  const gchar *const args[] = {
+    "auth", "refresh", "--tenant", "__wr_default", "--token-file",
+    access_path, "--refresh-token-file", refresh_path, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, NULL, FALSE, args, &run);
+  assert_tokens_absent (&run);
+  assert_fact_forget_exit (&run, 1);
+  g_assert_cmpstr (run.out, ==, "");
+  g_autofree gchar *leftover = replace_leftover_path (dir);
+  g_autofree gchar *expected = g_strdup_printf (DC_FAULT_ARMED "wyctl: "
+          "refresh rotated at daemon but local refresh-token publication "
+          "failed; do not retry; login may be required\n"
+          "wyctl: a temporary file holding the new refresh token remains at "
+          "%s; delete it\n", leftover);
+  g_assert_cmpstr (run.err, ==, expected);
+  g_assert_nonnull (run.request);
+  assert_token_leftover (leftover, "new-refresh");
+  assert_token_leftover (refresh_path, "refresh-1");
+  assert_token_leftover (access_path, "access-1");
+  remove_dir_recursive (dir);
+}
+
+/* #1551: skip 1 lets the refresh-file replace through, so the access-file
+ * replace fails and leaves the temporary holding the new access token; the
+ * old access file stays usable. */
+static void
+test_refresh_access_replace_incomplete_remains (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-access-replace-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  write_owner_only_token (access_path, "access-1");
+  write_owner_only_token (refresh_path, "refresh-1");
+  const gchar *const args[] = {
+    "auth", "refresh", "--tenant", "__wr_default", "--token-file",
+    access_path, "--refresh-token-file", refresh_path, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_auth_incomplete_case (AUTH_FAULT_LOGIN_BODY, "1", FALSE, args, &run);
+  assert_tokens_absent (&run);
+  assert_fact_forget_exit (&run, 1);
+  g_assert_cmpstr (run.out, ==, "");
+  g_autofree gchar *leftover = replace_leftover_path (dir);
+  g_autofree gchar *expected = g_strdup_printf (DC_FAULT_ARMED "wyctl: "
+          "refresh token was saved; old access token remains usable and "
+          "another refresh can recover the access file\n"
+          "wyctl: a temporary file holding the new access token remains at "
+          "%s; delete it\n", leftover);
+  g_assert_cmpstr (run.err, ==, expected);
+  g_assert_nonnull (run.request);
+  assert_token_leftover (leftover, "new-access");
+  assert_token_leftover (refresh_path, "new-refresh");
+  assert_token_leftover (access_path, "access-1");
+  remove_dir_recursive (dir);
+}
+
 /* #1546: auth service-token names the incomplete access-token file. */
 static void
 test_service_token_output_incomplete_remains (void)
@@ -8260,6 +8370,10 @@ main (int argc, char **argv)
       test_login_publication_incomplete_remains);
   g_test_add_func ("/wyctl/login-publication-skip-aims-access",
       test_login_publication_skip_aims_access);
+  g_test_add_func ("/wyctl/refresh-file-replace-incomplete-remains",
+      test_refresh_file_replace_incomplete_remains);
+  g_test_add_func ("/wyctl/refresh-access-replace-incomplete-remains",
+      test_refresh_access_replace_incomplete_remains);
   g_test_add_func ("/wyctl/service-token-output-incomplete-remains",
       test_service_token_output_incomplete_remains);
   g_test_add_func ("/wyctl/refresh-access-incomplete-remains",
