@@ -84,13 +84,13 @@ WyctlTokenFileStatus wyctl_token_file_write_pair_protected (
  *
  * The new token is written to a temporary file beside path and renamed over
  * it. A failure after that temporary file is created removes it and reports
- * IO; on POSIX, when it cannot be removed, the result is INCOMPLETE_REMAINS
- * and the target keeps its old token. On Windows the cleanup is not yet
- * checked, so a temporary it fails to remove is still reported as IO with
- * no leftover (#1551). out_leftover may be NULL. Otherwise it is set to NULL
- * on entry and, only on INCOMPLETE_REMAINS, to a newly allocated full path
- * of the temporary file inside the symlink-resolved parent directory, which
- * the caller frees with g_free(). */
+ * IO; when it cannot be removed, the result is INCOMPLETE_REMAINS and the
+ * target keeps its old token. out_leftover may be NULL. Otherwise it is set
+ * to NULL on entry and, only on INCOMPLETE_REMAINS, to a newly allocated
+ * path of the temporary file, which the caller frees with g_free(). On
+ * POSIX that is the temporary's name inside the symlink-resolved parent
+ * directory; on Windows it is path, as the caller spelled it, followed by
+ * ".tmp." and a random id. */
 WyctlTokenFileStatus wyctl_token_file_replace_protected (const gchar * path,
     const gchar * token, gsize token_len, gchar ** out_leftover);
 WyctlTokenFileStatus wyctl_token_file_remove_protected (const gchar * path);

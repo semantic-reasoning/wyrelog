@@ -542,10 +542,10 @@ wyctl_token_file_check_available (const gchar *path)
 #endif
 }
 
-#ifndef G_OS_WIN32
 /* The status of a failed operation after its cleanup tried to remove the new
- * file: `failed` when the file's name is gone, INCOMPLETE_REMAINS when it is
- * still there. */
+ * file: `failed` (IO, or SYMLINK for a Windows create that met a reparse
+ * point) when the file's name is gone, INCOMPLETE_REMAINS when it is still
+ * there. Shared by the POSIX and Windows cleanups. */
 static WyctlTokenFileStatus
 wyctl_token_file_cleanup_status (gboolean name_gone,
     WyctlTokenFileStatus failed)
@@ -553,6 +553,65 @@ wyctl_token_file_cleanup_status (gboolean name_gone,
   return name_gone ? failed : WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS;
 }
 
+#ifdef G_OS_WIN32
+/* Remove a protected file this process just created through H and failed to
+ * finish, then close H. The file was created read-only, so that attribute
+ * is cleared first (zeroed times leave them unchanged; H has GENERIC_WRITE,
+ * which includes FILE_WRITE_ATTRIBUTES). The delete disposition is attempted
+ * even if that fails, since some filesystems ignore the attribute, and its
+ * result decides. */
+static WyctlTokenFileStatus
+wyctl_token_file_windows_discard_handle (HANDLE h,
+    WyctlTokenFileStatus failed)
+{
+  FILE_BASIC_INFO basic;
+  memset (&basic, 0, sizeof basic);
+  basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+  (void) SetFileInformationByHandle (h, FileBasicInfo, &basic, sizeof basic);
+  FILE_DISPOSITION_INFO disposition = { TRUE };
+  /* A successful disposition means the name goes when the last handle to the
+   * file closes, not that it is already removed: a handle another process of
+   * the same owner opened meanwhile (H shares only FILE_SHARE_DELETE) keeps
+   * the name visible until it closes, and no new open can succeed once the
+   * delete is pending. */
+  gboolean name_gone = SetFileInformationByHandle (h, FileDispositionInfo,
+          &disposition, sizeof disposition) != 0;
+  CloseHandle (h);
+  return wyctl_token_file_cleanup_status (name_gone, failed);
+}
+
+/* Remove a closed temporary file of a failed replace. It was created
+ * read-only, so the attribute is cleared first. A name that is already gone
+ * counts as removed. If another process holds it open with FILE_SHARE_DELETE,
+ * DeleteFileW succeeds but only marks it for deletion: the name goes when the
+ * last handle closes, and no new open can succeed meanwhile. Without that
+ * share mode DeleteFileW fails and the name remains. */
+static WyctlTokenFileStatus
+wyctl_token_file_windows_discard_path (const wchar_t *tmp_path,
+    WyctlTokenFileStatus failed)
+{
+  (void) SetFileAttributesW (tmp_path, FILE_ATTRIBUTE_NORMAL);
+  gboolean deleted = DeleteFileW (tmp_path) != 0;
+  /* Read before any other call can change it. */
+  DWORD error = deleted ? ERROR_SUCCESS : GetLastError ();
+  gboolean name_gone = deleted || error == ERROR_FILE_NOT_FOUND;
+  return wyctl_token_file_cleanup_status (name_gone, failed);
+}
+
+/* The cleanup of a failed Windows replace: discard TMP_PATH and, on
+ * INCOMPLETE_REMAINS, name it in *out_leftover as the caller spells PATH,
+ * with the same ".tmp." and NONCE suffix tmp_path carries. */
+static WyctlTokenFileStatus
+wyctl_token_file_windows_replace_discard (const wchar_t *tmp_path,
+    const gchar *path, const gchar *nonce, gchar **out_leftover)
+{
+  WyctlTokenFileStatus status = wyctl_token_file_windows_discard_path
+        (tmp_path, WYCTL_TOKEN_FILE_IO);
+  if (status == WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS && out_leftover != NULL)
+    *out_leftover = g_strconcat (path, ".tmp.", nonce, NULL);
+  return status;
+}
+#else
 /* Remove a protected file this process just created and failed to finish.
  * IO when it is gone; INCOMPLETE_REMAINS when it is still there. */
 static WyctlTokenFileStatus
@@ -620,23 +679,19 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
                                         : WYCTL_TOKEN_FILE_IO;
   }
   if (wyctl_token_file_windows_handle_is_reparse (h)) {
-    FILE_DISPOSITION_INFO disposition = { TRUE };
-    (void) SetFileInformationByHandle (h, FileDispositionInfo, &disposition,
-        sizeof disposition);
-    CloseHandle (h);
+    WyctlTokenFileStatus status = wyctl_token_file_windows_discard_handle (h,
+            WYCTL_TOKEN_FILE_SYMLINK);
     wyctl_token_file_windows_parent_anchor_clear (&anchor);
-    return WYCTL_TOKEN_FILE_SYMLINK;
+    return status;
   }
   DWORD written = 0;
   gboolean ok = WriteFile (h, token, (DWORD) token_len, &written, NULL)
       && written == token_len && FlushFileBuffers (h);
   if (!ok) {
-    FILE_DISPOSITION_INFO disposition = { TRUE };
-    (void) SetFileInformationByHandle (h, FileDispositionInfo, &disposition,
-        sizeof disposition);
-    CloseHandle (h);
+    WyctlTokenFileStatus status = wyctl_token_file_windows_discard_handle (h,
+            WYCTL_TOKEN_FILE_IO);
     wyctl_token_file_windows_parent_anchor_clear (&anchor);
-    return WYCTL_TOKEN_FILE_IO;
+    return status;
   }
   CloseHandle (h);
   wyctl_token_file_windows_parent_anchor_clear (&anchor);
@@ -886,33 +941,33 @@ wyctl_token_file_replace_protected (const gchar *path, const gchar *token,
   gboolean flush_ok = write_ok && FlushFileBuffers (temporary);
   gboolean close_ok = CloseHandle (temporary);
   if (!flush_ok || !close_ok) {
-    (void) SetFileAttributesW (tmp_path, FILE_ATTRIBUTE_NORMAL);
-    (void) DeleteFileW (tmp_path);
+    WyctlTokenFileStatus status = wyctl_token_file_windows_replace_discard
+          (tmp_path, path, nonce, out_leftover);
     g_free (tmp_path);
     wyctl_token_file_windows_parent_anchor_clear (&anchor);
-    return WYCTL_TOKEN_FILE_IO;
+    return status;
   }
   DWORD old_attrs = GetFileAttributesW (anchor.child_path);
   gboolean cleared_readonly = old_attrs != INVALID_FILE_ATTRIBUTES
       && (old_attrs & FILE_ATTRIBUTE_READONLY) != 0;
   if (cleared_readonly && !SetFileAttributesW (anchor.child_path,
       old_attrs & ~FILE_ATTRIBUTE_READONLY)) {
-    (void) SetFileAttributesW (tmp_path, FILE_ATTRIBUTE_NORMAL);
-    (void) DeleteFileW (tmp_path);
+    WyctlTokenFileStatus status = wyctl_token_file_windows_replace_discard
+          (tmp_path, path, nonce, out_leftover);
     g_free (tmp_path);
     wyctl_token_file_windows_parent_anchor_clear (&anchor);
-    return WYCTL_TOKEN_FILE_IO;
+    return status;
   }
   BOOL moved = MoveFileExW (tmp_path, anchor.child_path,
           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
   if (!moved && cleared_readonly)
     (void) SetFileAttributesW (anchor.child_path, old_attrs);
   if (!moved) {
-    (void) SetFileAttributesW (tmp_path, FILE_ATTRIBUTE_NORMAL);
-    (void) DeleteFileW (tmp_path);
+    WyctlTokenFileStatus status = wyctl_token_file_windows_replace_discard
+          (tmp_path, path, nonce, out_leftover);
     g_free (tmp_path);
     wyctl_token_file_windows_parent_anchor_clear (&anchor);
-    return WYCTL_TOKEN_FILE_IO;
+    return status;
   }
   g_free (tmp_path);
   wyctl_token_file_windows_parent_anchor_clear (&anchor);
