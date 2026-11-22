@@ -165,6 +165,18 @@ gboolean wyctl_token_file_parse_faults (const gchar * spec, guint * out);
  * per-write suspension are process-wide, so concurrent protected writes
  * would race for the armed points. */
 void wyctl_token_file_fault_skip_protected_writes (guint count);
+
+typedef void (*WyctlTokenFileFaultHook) (gpointer user_data);
+
+/* Test only: call hook (user_data) once, in the next replace that reaches
+ * its target identity check -- after the temporary is written, flushed and
+ * closed, and before the target is checked again and the temporary renamed
+ * over it -- and then forget it. NULL clears it. It runs whatever the armed
+ * set and the skip count are, and wyctl has no flag for it. It lets a test
+ * change the target as a concurrent process could; it bypasses no check.
+ * Single-thread, like the fault points. */
+void wyctl_token_file_fault_set_identity_hook (WyctlTokenFileFaultHook hook,
+    gpointer user_data);
 #endif
 
 #ifndef G_OS_WIN32

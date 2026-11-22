@@ -185,6 +185,32 @@ wyctl_token_file_fault_renameat (int olddirfd, const char *oldname,
   return renameat (olddirfd, oldname, newdirfd, newname);
 }
 
+static WyctlTokenFileFaultHook wyctl_token_file_identity_hook;
+static gpointer wyctl_token_file_identity_hook_data;
+
+void
+wyctl_token_file_fault_set_identity_hook (WyctlTokenFileFaultHook hook,
+    gpointer user_data)
+{
+  wyctl_token_file_identity_hook = hook;
+  wyctl_token_file_identity_hook_data = user_data;
+}
+
+/* Clear the hook before calling it, so it runs once even if it replaces
+ * the target with another replace. */
+static void
+wyctl_token_file_fault_run_identity_hook (void)
+{
+  WyctlTokenFileFaultHook hook = wyctl_token_file_identity_hook;
+  gpointer user_data = wyctl_token_file_identity_hook_data;
+  if (hook == NULL)
+    return;
+  wyctl_token_file_fault_set_identity_hook (NULL, NULL);
+  hook (user_data);
+}
+
+#define WYCTL_TOKEN_FILE_BEFORE_IDENTITY_CHECK() \
+  wyctl_token_file_fault_run_identity_hook ()
 #define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() \
   wyctl_token_file_fault_begin_write ()
 #define WYCTL_TOKEN_FILE_WRITE(fd, buf, count) \
@@ -202,6 +228,7 @@ wyctl_token_file_fault_renameat (int olddirfd, const char *oldname,
 #define WYCTL_TOKEN_FILE_RENAMEAT(olddirfd, oldname, newdirfd, newname) \
   wyctl_token_file_fault_renameat (olddirfd, oldname, newdirfd, newname)
 #else
+#define WYCTL_TOKEN_FILE_BEFORE_IDENTITY_CHECK() ((void) 0)
 #define WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE() ((void) 0)
 #define WYCTL_TOKEN_FILE_WRITE(fd, buf, count) write (fd, buf, count)
 #define WYCTL_TOKEN_FILE_FSYNC_FILE(fd) fsync (fd)
@@ -1037,6 +1064,7 @@ wyctl_token_file_replace_protected (const gchar *path, const gchar *token,
   if (!file_sync_ok || !file_close_ok)
     return wyctl_token_file_replace_discard (dirfd, resolved_parent, tmp,
                out_leftover);
+  WYCTL_TOKEN_FILE_BEFORE_IDENTITY_CHECK ();
   /* The target must still be the file validated above, or the rename would
    * replace something else; that and a failed rename both discard the
    * temporary. */

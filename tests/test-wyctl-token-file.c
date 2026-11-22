@@ -632,6 +632,7 @@ fault_fixture_init (FaultFixture *fixture)
 {
   wyctl_token_file_arm_faults_once (0);
   wyctl_token_file_fault_skip_protected_writes (0);
+  wyctl_token_file_fault_set_identity_hook (NULL, NULL);
   fixture->dir = g_dir_make_tmp ("wyctl-fault-XXXXXX", NULL);
   g_assert_nonnull (fixture->dir);
   fixture->path = g_build_filename (fixture->dir, "token", NULL);
@@ -663,6 +664,7 @@ fault_fixture_clear (FaultFixture *fixture)
 {
   wyctl_token_file_arm_faults_once (0);
   wyctl_token_file_fault_skip_protected_writes (0);
+  wyctl_token_file_fault_set_identity_hook (NULL, NULL);
   gchar *temporary = NULL;
   while (count_replace_temporaries (fixture->dir, &temporary) > 0) {
     g_autofree gchar *temporary_path = g_build_filename (fixture->dir,
@@ -1097,6 +1099,123 @@ test_fault_skip_covers_replace (void)
   fault_fixture_clear (&fixture);
 }
 
+/* A file a test puts in place of the replace target while the replace is
+ * between validating the target and renaming over it. It is written under
+ * another name and renamed over the target, so the old target, the
+ * temporary and this file are distinct inodes and the identity check cannot
+ * see a reused one. */
+typedef struct
+{
+  const gchar *target;
+  gchar *swap_path;
+  guint calls;
+  dev_t dev;
+  ino_t ino;
+} TargetSwap;
+
+static void
+swap_target (gpointer user_data)
+{
+  TargetSwap *swap = user_data;
+  swap->calls++;
+  g_assert_true (g_file_set_contents (swap->swap_path, "swapped-token", -1,
+      NULL));
+  g_assert_cmpint (g_chmod (swap->swap_path, 0600), ==, 0);
+  struct stat st;
+  g_assert_cmpint (lstat (swap->swap_path, &st), ==, 0);
+  swap->dev = st.st_dev;
+  swap->ino = st.st_ino;
+  g_assert_cmpint (g_rename (swap->swap_path, swap->target), ==, 0);
+}
+
+static void
+target_swap_init (TargetSwap *swap, const FaultFixture *fixture)
+{
+  *swap = (TargetSwap) {
+    0
+  };
+  swap->target = fixture->path;
+  swap->swap_path = g_build_filename (fixture->dir, "swap", NULL);
+  wyctl_token_file_fault_set_identity_hook (swap_target, swap);
+}
+
+static void
+target_swap_clear (TargetSwap *swap)
+{
+  wyctl_token_file_fault_set_identity_hook (NULL, NULL);
+  /* Gone already when the swap ran; removed here when it did not. */
+  (void) g_unlink (swap->swap_path);
+  g_free (swap->swap_path);
+}
+
+/* The target is still the file the swap put there, untouched. */
+static void
+assert_swapped_target (const TargetSwap *swap)
+{
+  struct stat st;
+  g_assert_cmpint (lstat (swap->target, &st), ==, 0);
+  g_assert_cmpuint (st.st_ino, ==, swap->ino);
+  g_assert_cmpuint (st.st_dev, ==, swap->dev);
+  assert_protected_file (swap->target, "swapped-token");
+}
+
+/* A target replaced after validation is not renamed over: the replace
+ * discards its temporary and reports IO, and the new file stays. */
+static void
+test_replace_identity_mismatch_is_io (void)
+{
+  FaultFixture fixture;
+  replace_fixture_init (&fixture);
+  TargetSwap swap;
+  target_swap_init (&swap, &fixture);
+  gint fds_before = count_open_fds ();
+  gchar *leftover = NULL;
+  WyctlTokenFileStatus status = wyctl_token_file_replace_protected
+        (fixture.path, "new-token", 9, &leftover);
+  g_assert_cmpuint (swap.calls, ==, 1);
+  assert_swapped_target (&swap);
+  g_assert_cmpint (status, ==, WYCTL_TOKEN_FILE_IO);
+  g_assert_null (leftover);
+  g_assert_cmpint (count_open_fds (), ==, fds_before);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  g_assert_cmpuint (count_replace_temporaries (fixture.dir, NULL), ==, 0);
+  target_swap_clear (&swap);
+  fault_fixture_clear (&fixture);
+}
+
+/* As above, with a cleanup that cannot remove the temporary: it holds the
+ * new token and is named by its resolved path. */
+static void
+test_replace_identity_mismatch_incomplete_remains (void)
+{
+  FaultFixture fixture;
+  replace_fixture_init (&fixture);
+  TargetSwap swap;
+  target_swap_init (&swap, &fixture);
+  wyctl_token_file_arm_faults_once (WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
+  gint fds_before = count_open_fds ();
+  g_autofree gchar *leftover = NULL;
+  WyctlTokenFileStatus status = wyctl_token_file_replace_protected
+        (fixture.path, "new-token", 9, &leftover);
+  g_assert_cmpuint (swap.calls, ==, 1);
+  assert_swapped_target (&swap);
+  g_assert_cmpint (status, ==, WYCTL_TOKEN_FILE_INCOMPLETE_REMAINS);
+  g_assert_nonnull (leftover);
+  g_autofree gchar *temporary = NULL;
+  g_assert_cmpuint (count_replace_temporaries (fixture.dir, &temporary), ==,
+      1);
+  gchar *resolved = realpath (fixture.dir, NULL);
+  g_assert_nonnull (resolved);
+  g_autofree gchar *expected = g_build_filename (resolved, temporary, NULL);
+  free (resolved);
+  g_assert_cmpstr (leftover, ==, expected);
+  assert_protected_file (leftover, "new-token");
+  g_assert_cmpint (count_open_fds (), ==, fds_before);
+  g_assert_cmpuint (wyctl_token_file_armed_faults (), ==, 0);
+  target_swap_clear (&swap);
+  fault_fixture_clear (&fixture);
+}
+
 /* The pair writer passes INCOMPLETE_REMAINS through with the failing path.
  * Skip 0 aims the faults at the refresh write, so nothing else is written;
  * skip 1 aims them at the access write, and the refresh file is rolled
@@ -1286,6 +1405,10 @@ main (int argc, char **argv)
       "uncertain", test_replace_dir_sync_fault_is_durability_uncertain);
   g_test_add_func ("/wyctl/token-file/fault-skip-covers-replace",
       test_fault_skip_covers_replace);
+  g_test_add_func ("/wyctl/token-file/replace-identity-mismatch-is-io",
+      test_replace_identity_mismatch_is_io);
+  g_test_add_func ("/wyctl/token-file/replace-identity-mismatch-incomplete-"
+      "remains", test_replace_identity_mismatch_incomplete_remains);
   g_test_add_func ("/wyctl/token-file/pair-incomplete-remains",
       test_pair_incomplete_remains);
   g_test_add_func ("/wyctl/token-file/dir-close-fault-keeps-file",
