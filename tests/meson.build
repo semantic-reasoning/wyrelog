@@ -1083,7 +1083,8 @@ if build_client
     )
 
     # Keep production-linked credential tests intact; this additional target
-    # observes actual fact-engine entry through the existing test-only archive.
+    # observes actual fact-engine entry and ambiguous-commit credential repair
+    # through the existing test-only archive.
     if get_option('enable_audit').allowed()
       test_recursive_credentials = executable('test-daemon-http-recursive-credentials',
         'test-daemon-http-decide.c',

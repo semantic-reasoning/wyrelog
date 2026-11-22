@@ -27183,6 +27183,291 @@ check_data_credential_lifecycle_transfer (void)
   service_denial_env_clear (&env);
 }
 
+#ifdef WYL_TEST_RECURSIVE_CREDENTIALS
+/* #1490: this checkpoint runs only after a confirmed commit, before normal
+ * publication. An applied-error commit bypasses it and poisons the pair;
+ * successful repair must restore readiness without reaching this checkpoint. */
+static void
+count_confirmed_credential_publication (gpointer data)
+{
+  (*(guint *) data)++;
+}
+
+static void
+arm_credential_commit_ambiguity (ServiceDenialEnv *env, guint *confirmed)
+{
+  *confirmed = 0;
+  wyl_handle_set_committed_publication_checkpoint_for_test (env->handle,
+      count_confirmed_credential_publication, confirmed);
+  wyl_handle_set_committed_publication_fault_once_for_test (env->handle,
+      WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR);
+}
+
+static void
+assert_credential_publication_repaired (ServiceDenialEnv *env,
+    guint confirmed)
+{
+  /* The ambiguity path leaves the one-shot normal-publication checkpoint
+   * unconsumed. Clear it before another request can use its stack data. */
+  wyl_handle_set_committed_publication_checkpoint_for_test (env->handle,
+      NULL, NULL);
+  g_assert_cmpuint (confirmed, ==, 0);
+  g_assert_true (wyl_handle_engine_pair_is_ready (env->handle));
+  g_assert_false (wyl_handle_engine_pair_is_poisoned (env->handle));
+}
+
+/* Match each retained audit to its own completed intention, including every
+ * payload field. Global completion counts could hide a missing revocation. */
+static void
+assert_credential_audit_completed (ServiceDenialEnv *env,
+    const gchar *action, const gchar *credential)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "SELECT count(*) FROM audit_events e JOIN audit_intentions i "
+    "ON i.audit_id=e.id WHERE e.action='%s' AND e.deny_origin='%s' "
+    "AND i.state='committed' AND i.created_at_us=e.created_at_us "
+    "AND i.subject_id=e.subject_id AND i.action=e.action "
+    "AND i.resource_id=e.resource_id AND i.deny_reason IS e.deny_reason "
+    "AND i.deny_origin IS e.deny_origin AND i.request_id IS e.request_id "
+    "AND i.decision=e.decision", action, credential);
+  gint64 count = -1;
+  g_assert_true (policy_count_rows (env->handle, sql, &count));
+  g_assert_cmpint (count, ==, 1);
+}
+
+static void
+assert_lifecycle_repair_audit (ServiceDenialEnv *env,
+    const gchar *credential, const gchar *request, const gchar *event)
+{
+  g_assert_cmpuint (lifecycle_audit_count (env, credential, request, event),
+      ==, 1);
+  assert_credential_audit_completed (env, "data_credential_lifecycle_revoke",
+      credential);
+}
+
+static void
+check_data_credential_management_commit_repair (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  g_autofree gchar *alice = seed_data_credential_human (&env, "dc-alice", TRUE);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  data_credential_owned_tenant (store, "dc-1474", "dc-alice");
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  guint confirmed = 0;
+  /* Positive control: prove this fixture reaches the confirmed checkpoint. */
+  wyl_handle_set_committed_publication_checkpoint_for_test (env.handle,
+      count_confirmed_credential_publication, &confirmed);
+  g_autofree gchar *control_secret = NULL;
+  g_autofree gchar *control = data_credential_issue_for_use (&env, alice,
+          "dc-1474", "query", "*", "3600", &control_secret);
+  g_assert_cmpuint (confirmed, ==, 1);
+
+  arm_credential_commit_ambiguity (&env, &confirmed);
+  g_autofree gchar *secret = NULL;
+  g_autofree gchar *id = data_credential_issue_for_use (&env, alice,
+          "dc-1474", "query", "*", "3600", &secret);
+  assert_credential_publication_repaired (&env, confirmed);
+  assert_credential_audit_completed (&env, "data_credential_issue", id);
+  WylDataCredentialInfo issued = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, id,
+      &issued), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (issued.state, ==, "active");
+  g_assert_cmpuint (issued.generation, ==, 1);
+  g_autofree gchar *old_bearer = data_credential_bearer (&env, id, secret);
+
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_autofree gchar *rotate = g_strdup_printf (
+    "{\"credential_id\":\"%s\",\"request_id\":\"%s\"}", id,
+    new_test_request (request));
+  arm_credential_commit_ambiguity (&env, &confirmed);
+  g_autofree gchar *rotated = data_credential_request (&env, alice, "POST",
+          "rotate", "dc-1474", rotate, 200);
+  assert_credential_publication_repaired (&env, confirmed);
+  g_autofree gchar *successor_id = extract_json_string (rotated,
+          "credential_id");
+  g_autofree gchar *successor_secret = extract_json_string (rotated,
+          "secret");
+  g_assert_nonnull (successor_id);
+  g_assert_nonnull (successor_secret);
+  g_assert_cmpstr (successor_id, !=, id);
+  WylDataCredentialInfo successor = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      successor_id, &successor), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (successor.state, ==, "active");
+  g_assert_cmpstr (successor.rotated_from_id, ==, id);
+  g_assert_cmpuint (successor.generation, ==, issued.generation + 1);
+  assert_credential_audit_completed (&env, "data_credential_rotate",
+      successor_id);
+  data_credential_assert_state (store, id, "revoked");
+  data_credential_bearer_resolves (&env, old_bearer, FALSE);
+  g_free (data_credential_exchange (&env, id, secret, 401));
+  g_autofree gchar *bearer = data_credential_bearer (&env, successor_id,
+          successor_secret);
+
+  arm_credential_commit_ambiguity (&env, &confirmed);
+  g_free (data_credential_revoke (&env, alice, "dc-1474", successor_id,
+      200));
+  assert_credential_publication_repaired (&env, confirmed);
+  data_credential_assert_state (store, successor_id, "revoked");
+  assert_credential_audit_completed (&env, "data_credential_revoke",
+      successor_id);
+  data_credential_bearer_resolves (&env, bearer, FALSE);
+  g_free (data_credential_exchange (&env, successor_id, successor_secret,
+      401));
+  g_free (data_credential_bearer (&env, control, control_secret));
+  /* A repeated revoke writes no new audit. Secrets occur only in the
+   * responses that returned them, never in list/audit payloads. */
+  g_free (data_credential_revoke (&env, alice, "dc-1474", successor_id,
+      200));
+  assert_credential_audit_completed (&env, "data_credential_revoke",
+      successor_id);
+  g_autoptr (GPtrArray) secrets = g_ptr_array_new ();
+  g_ptr_array_add (secrets, control_secret);
+  g_ptr_array_add (secrets, secret);
+  g_ptr_array_add (secrets, successor_secret);
+  g_assert_cmpuint (data_credential_audit_rows (store, secrets, NULL, NULL),
+      ==, 4);
+  g_autofree gchar *listed = data_credential_request (&env, alice, "GET",
+          NULL, "dc-1474", NULL, 200);
+  for (guint i = 0; i < secrets->len; i++)
+    g_assert_null (strstr (listed, g_ptr_array_index (secrets, i)));
+  wyl_data_credential_info_clear (&issued);
+  wyl_data_credential_info_clear (&successor);
+  service_denial_env_clear (&env);
+}
+
+static void
+check_data_credential_lifecycle_commit_repair (void)
+{
+  const gchar *events[] = { "tenant_transfer_owner", "tenant_delete",
+                            "user_disable", "user_delete" };
+  for (guint event = 0; event < G_N_ELEMENTS (events); event++) {
+    ServiceDenialEnv env = { 0 };
+    g_autofree gchar *alice = data_credential_use_fixture (&env);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+    g_autofree gchar *bob = seed_data_credential_human (&env, "dc-bob", TRUE);
+    g_autofree gchar *root = seed_data_credential_human (&env, "dc-root", TRUE);
+    g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
+        "dc-root", "wr.system_admin", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
+    data_credential_owned_tenant (store, "dc-other", "dc-alice");
+    data_credential_owned_tenant (store, "dc-bobs", "dc-bob");
+    g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *s1 = NULL, *s2 = NULL, *s3 = NULL, *s4 = NULL;
+    g_autofree gchar *c1 = data_credential_issue_for_use (&env, alice,
+            "dc-1475", "query", "*", "3600", &s1);
+    g_autofree gchar *c2 = data_credential_issue_for_use (&env, alice,
+            "dc-1475", "query", "*", "3600", &s2);
+    g_autofree gchar *c3 = data_credential_issue_for_use (&env, alice,
+            "dc-other", "query", "*", "3600", &s3);
+    g_autofree gchar *c4 = data_credential_issue_for_use (&env, bob,
+            "dc-bobs", "query", "*", "3600", &s4);
+    g_autofree gchar *bearer = data_credential_bearer (&env, c1, s1);
+    g_autofree gchar *foreign_id = NULL, *foreign_secret = NULL;
+    if (event == 3) {
+      /* The user's own credentials revoke under user_delete. This foreign
+       * issuer survives until its child tenant is deleted in the same commit. */
+      g_autofree gchar *carol = seed_data_credential_human (&env, "dc-carol", TRUE);
+      data_credential_owned_tenant (store, "dc-child", "dc-carol");
+      g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+          WYRELOG_E_OK);
+      foreign_id = data_credential_issue_for_use (&env, carol,
+              "dc-child", "query", "*", "3600", &foreign_secret);
+      policy_exec (store, "DELETE FROM permission_states WHERE "
+          "subject_id='dc-carol' AND scope='dc-child';DELETE FROM "
+          "direct_permissions WHERE subject_id='dc-carol' AND scope='dc-child'");
+      raw_owner_change (store, "dc-child", "dc-carol", "dc-alice");
+      g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==,
+          WYRELOG_E_OK);
+      tenant_ownership_request_named (&env, alice, "dc-child", "seal",
+          NULL, NULL, 200, NULL);
+      tenant_ownership_request_named (&env, alice, "dc-other", "seal",
+          NULL, NULL, 200, NULL);
+    }
+    if (event == 1 || event == 3)
+      tenant_ownership_request_named (&env, alice, "dc-1475", "seal",
+          NULL, NULL, 200, NULL);
+    gchar request[WYL_REQUEST_ID_STRING_BUF];
+    new_test_request (request);
+    guint confirmed = 0;
+    arm_credential_commit_ambiguity (&env, &confirmed);
+    if (event == 0)
+      g_free (data_credential_transfer (&env, alice, "dc-1475", "dc-bob",
+          request, 200));
+    else if (event == 1)
+      tenant_ownership_request_named (&env, alice, "dc-1475", "delete",
+          NULL, request, 200, NULL);
+    else
+      g_assert_cmpint (lifecycle_user_mutate (&env, "dc-alice",
+          event == 2 ? "disable" : "delete", request), ==, WYRELOG_E_OK);
+    assert_credential_publication_repaired (&env, confirmed);
+    assert_lifecycle_repair_audit (&env, c1, request, events[event]);
+    assert_lifecycle_repair_audit (&env, c2, request, events[event]);
+    data_credential_bearer_resolves (&env, bearer, FALSE);
+    g_free (data_credential_exchange (&env, c1, s1, 401));
+    g_free (data_credential_exchange (&env, c2, s2, 401));
+    if (event == 0 || event == 2) {
+      data_credential_assert_state (store, c1, "revoked");
+      data_credential_assert_state (store, c2, "revoked");
+      WylDataCredentialInfo revoked = { 0 };
+      g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, c1,
+          &revoked), ==, WYRELOG_E_OK);
+      g_assert_cmpstr (revoked.revoked_reason, ==, event == 0
+          ? "ownership_transfer" : "issuer_disabled");
+      wyl_data_credential_info_clear (&revoked);
+    } else {
+      gboolean exists = TRUE;
+      g_assert_cmpint (wyl_policy_store_tenant_exists (store, "dc-1475",
+          &exists), ==, WYRELOG_E_OK);
+      g_assert_false (exists);
+      WylDataCredentialInfo purged = { 0 };
+      g_assert_cmpint (wyl_policy_store_data_credential_lookup (store, c1,
+          &purged), ==, WYRELOG_E_NOT_FOUND);
+      wyl_data_credential_info_clear (&purged);
+    }
+    if (event >= 2) {
+      assert_lifecycle_repair_audit (&env, c3, request, events[event]);
+      g_free (data_credential_exchange (&env, c3, s3, 401));
+      g_assert_cmpint (wyl_policy_store_user_require (store, "dc-alice", TRUE),
+          !=, WYRELOG_E_OK);
+    } else {
+      data_credential_assert_state (store, c3, "active");
+      g_free (data_credential_bearer (&env, c3, s3));
+    }
+    if (event == 0) {
+      WylPolicyTenantAuthorityRecord *record = NULL;
+      g_assert_cmpint (wyl_policy_store_read_tenant_authority (store,
+          "dc-1475", &record), ==, WYRELOG_E_OK);
+      g_assert_cmpstr (record->owner_subject_id, ==, "dc-bob");
+      wyl_policy_tenant_authority_record_free (record);
+      g_free (data_credential_transfer (&env, alice, "dc-1475", "dc-bob",
+          request, 200));
+      assert_lifecycle_repair_audit (&env, c1, request, events[event]);
+    }
+    if (event == 3) {
+      g_auto (WylTenantDeleteRecord) child = { 0 };
+      g_assert_cmpint (wyl_policy_store_tenant_delete_read (store,
+          "dc-child", &child), ==, WYRELOG_E_OK);
+      g_assert_cmpstr (child.request_id, !=, request);
+      assert_lifecycle_repair_audit (&env, foreign_id, child.request_id,
+          "tenant_delete");
+      g_assert_cmpuint (lifecycle_audit_count (&env, foreign_id, request,
+          "*"), ==, 0);
+      g_free (data_credential_exchange (&env, foreign_id, foreign_secret, 401));
+      g_assert_cmpint (wyl_policy_store_user_require (store, "dc-carol", TRUE),
+          ==, WYRELOG_E_OK);
+    }
+    data_credential_assert_state (store, c4, "active");
+    g_free (data_credential_bearer (&env, c4, s4));
+    g_assert_cmpuint (lifecycle_audit_count (&env, c4, "*", "*"), ==, 0);
+    g_assert_cmpuint (lifecycle_completed_count (&env), ==,
+        event < 2 ? 2 : event == 2 ? 3 : 4);
+    service_denial_env_clear (&env);
+  }
+}
+#endif
+
 #endif
 
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
@@ -28914,6 +29199,8 @@ int
 main (void)
 {
 #ifdef WYL_TEST_RECURSIVE_CREDENTIALS
+  check_data_credential_management_commit_repair ();
+  check_data_credential_lifecycle_commit_repair ();
   check_data_credential_read_contract ();
   gint rc = 0;
 #else
