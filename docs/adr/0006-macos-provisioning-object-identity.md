@@ -366,11 +366,13 @@ transition model rather than by evidence. Once the companion step persists
 the replacement evidence, its compare form names that object too. The
 evidence execute stops at `PUBLISHED_DURABLE` with `FINALIZE` next. The
 companion step (see "Restore replacement evidence") then binds the replacement
-evidence and advances the replacement row; `FINALIZE`, `RETIRE_STAGE`,
-selection, promotion and the resume dispatcher's selection still refuse, so
-a macOS graph restore stops there. None of it is reachable while macOS
-commit admission refuses; these steps are proved by tests that reach the
-decision directly, and the companion step by tests that call it directly.
+evidence and advances the replacement row, and selection (see "Restore
+replacement evidence") then takes the restore to `selected_pending_cleanup`;
+`FINALIZE`, `RETIRE_STAGE`, promotion and the resume dispatcher still
+refuse, so a macOS graph restore stops there. None of it is reachable while
+macOS commit admission refuses; these steps are proved by tests that reach
+the decision directly, and the companion step and selection by tests that
+call them directly.
 
 ## Restore replacement evidence
 
@@ -446,11 +448,47 @@ discriminator Linux takes from its companion link. Every locator refusal
 after `SYNC_PUBLISH_DIR`, absence and busy included, is a policy refusal:
 an operator wedge, never a retry.
 
+The macOS selection step takes a `companion_synced` replacement row to
+`selected_pending_cleanup`. Under the root writer lease and quiescence it
+refuses a row without evidence before it reads the old evidence, the
+namespace or the main. It then loads the old `ACTIVE` record's evidence,
+proves the published namespace as the companion step does, compares the
+stored replacement evidence through a fresh descriptor and selects in one
+policy transaction. The transaction's effect proves the namespace again,
+including the old main at the rollback name by the old evidence, and
+requires the row's evidence to be the bytes it compared. The store copies
+that evidence into the `restore_selected` record, deletes the old `ACTIVE`
+record and advances the row. The old evidence is write-once, by the
+provisioning immutable trigger, so the copy the step loads under the lease
+is the record's value when the transaction commits. Every locator refusal is
+a policy refusal.
+
+Selection deletes the only record that holds the old main's evidence, yet
+`FINALIZE` still has to prove that object before it unlinks the rollback
+name. The old evidence is a function of values that outlive the record: the
+journal's old provisioning operation and old main file ID, and the volume
+UUID and graph directory file ID, which the replacement evidence shares
+because both were taken from the same held graph directory. macOS
+`FINALIZE` still refuses. When it is ported it must rebuild the old evidence
+from those values, with the replacement evidence taken from the
+`restore_selected` record, and prove the old main at the rollback name
+through the same `RETAINED_ROLLBACK` evidence witness, under the same
+capability gate, as every step before it. No step proves the rollback object
+by its device and inode alone. Selection checks the premise while it still
+can: it rebuilds the old evidence in the same way and refuses unless the
+result equals the stored bytes of the record it is about to delete. A
+remount or reboot between selection and `FINALIZE` changes the device number
+that the witness also compares, so `FINALIZE` then refuses as an operator
+wedge, the same liveness every step after `RETAIN` already has.
+
 | Durable observation | Required recovery result |
 | --- | --- |
 | Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed (capture, write-once, re-read, compare, advance). |
 | `reserved`, evidence present | Re-read exactly and advance; never recapture. |
 | `companion_synced`, evidence absent (macOS) | Fail closed at the companion step, at mark and at selection; no recapture; operator wedge. |
+| `companion_synced`, evidence present, the old evidence rebuilds from it, the namespace and compare hold (macOS) | Select: copy the evidence into `restore_selected`, delete the old `ACTIVE` record and advance the row, in one transaction. |
+| `companion_synced`, the old `ACTIVE` evidence does not rebuild from the replacement evidence and the journal (macOS) | Fail closed at selection before the namespace is read; the old record stays; operator wedge. |
+| `selected_pending_cleanup` (macOS) | No step runs yet; `FINALIZE`, when ported, proves the old main by the old evidence rebuilt from the `restore_selected` evidence and the journal, and a mismatch or a changed device is an operator wedge. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
 | `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |

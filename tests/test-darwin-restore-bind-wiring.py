@@ -66,6 +66,24 @@ Companion rules (check_companion_rules), for the macOS companion step
   and check_persisted appears exactly twice; and the setter and the sync
   take ``row`` as the expected record.
 
+Select rules (check_select_rules), for the macOS selection step (#1303
+U5-8):
+
+- wyl_fact_offline_restore_graph_commit_select_replacement_run has exactly
+  one ``#ifdef __APPLE__`` arm, which calls darwin_select_replacement
+  exactly once and none of the replacement capture or compare, the store
+  selection or open_shape itself; its ``#else`` arm calls neither
+  darwin_select_replacement, the compare nor the evidence rebind;
+- darwin_select_replacement calls the evidence rebind, the post-publish
+  shape, the compare and the store selection exactly once each, and none of
+  the capture, the setter, the sync, the mark or open_shape; the provenance
+  load, the rebind, the shape, the compare and the selection appear in that
+  order; and the selection takes ``row`` as the expected record and
+  darwin_companion_effect as its effect.
+
+The selection step also has a route row: it calls each authority helper of
+the Linux prologue it copies, the provenance load and the shape.
+
 function_body counts braces without regard to string or character literals;
 none of the pinned functions holds a brace literal today.
 
@@ -126,6 +144,13 @@ RELOAD_PATTERN = re.compile(
     r"\brow\s*=\s*g_steal_pointer\s*\(\s*&stored\s*\)"
 )
 PERSISTED_PATTERN = re.compile(r"(?<![\w])check_persisted\s*\(")
+SELECT_RUN = "wyl_fact_offline_restore_graph_commit_select_replacement_run"
+DARWIN_SELECT = "darwin_select_replacement"
+SELECT_CALL = "wyl_policy_store_graph_restore_select_with_effect"
+REBIND_CALL = "wyl_fact_graph_darwin_evidence_rebind"
+SHAPE_CALL = "darwin_post_publish_shape"
+SELECT_EFFECT = "darwin_companion_effect"
+LINUX_SHAPE_CALL = "open_shape"
 
 
 @dataclass(frozen=True)
@@ -190,6 +215,13 @@ ROUTE_RULES = (
                "wyl_fact_root_writer_lease_authorizes_resolver",
                "graph_commit_quiesce", "check_persisted", "check_runtime",
                "wyl_policy_store_offline_restore_load",
+               "graph_provenance_load", "darwin_post_publish_shape")),
+    RouteRule("darwin_select_replacement",
+              ("wyl_fact_root_writer_lease_acquire",
+               "wyl_policy_store_bind_fact_root_authorized",
+               "commit_snapshot_valid", "check_policy",
+               "wyl_fact_root_writer_lease_authorizes_resolver",
+               "graph_commit_quiesce", "check_persisted", "check_runtime",
                "graph_provenance_load", "darwin_post_publish_shape")),
 )
 
@@ -430,6 +462,65 @@ def check_companion_rules(source: str) -> None:
         )
 
 
+def check_select_rules(source: str) -> None:
+    body = function_body(source, SELECT_RUN)
+    arms = apple_arms(body)
+    if len(arms) != 1:
+        raise ContractError(
+            f"E_SELECT_ARMS: {SELECT_RUN} has {len(arms)}"
+            " #ifdef __APPLE__ arms, expected 1"
+        )
+    apple, other = arms[0]
+    if count_calls(apple, DARWIN_SELECT) != 1:
+        raise ContractError(
+            f"E_SELECT_ROUTE: the Darwin arm of {SELECT_RUN} must call"
+            f" {DARWIN_SELECT} exactly once"
+        )
+    for call in (COMPARE_CALL, CAPTURE_CALL, SELECT_CALL, LINUX_SHAPE_CALL):
+        if count_calls(apple, call) != 0:
+            raise ContractError(
+                f"E_SELECT_DIRECT: the Darwin arm of {SELECT_RUN} calls"
+                f" {call} instead of {DARWIN_SELECT}"
+            )
+    for call in (DARWIN_SELECT, COMPARE_CALL, REBIND_CALL):
+        if count_calls(other, call) != 0:
+            raise ContractError(
+                f"E_SELECT_LEAK: the #else arm of {SELECT_RUN} calls {call}"
+            )
+    body = function_body(source, DARWIN_SELECT)
+    for call in (REBIND_CALL, SHAPE_CALL, COMPARE_CALL, SELECT_CALL):
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_SELECT_CALLS: {DARWIN_SELECT} must call {call}"
+                " exactly once"
+            )
+    for call in (CAPTURE_CALL, SETTER_CALL, SYNC_CALL, MARK_CALL,
+                 LINUX_SHAPE_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_SELECT_CALLS: {DARWIN_SELECT} calls {call}"
+            )
+    order = [first_call(body, call) for call in (
+        "graph_provenance_load", REBIND_CALL, SHAPE_CALL, COMPARE_CALL,
+        SELECT_CALL)]
+    if not all(at >= 0 for at in order) or order != sorted(order):
+        raise ContractError(
+            f"E_SELECT_ORDER: {DARWIN_SELECT} must load the provenance,"
+            " rebuild the old evidence, prove the shape, compare and select"
+            " in that order"
+        )
+    match = re.search(
+        r"select_with_effect\s*\(\s*policy\s*,\s*row\s*,([^;]*);", body
+    )
+    if match is None or re.search(
+            r"(?<![\w])" + SELECT_EFFECT + r"(?![\w])", match.group(1)
+    ) is None:
+        raise ContractError(
+            f"E_SELECT_EFFECT: {DARWIN_SELECT} must pass row as the expected"
+            f" record and {SELECT_EFFECT} as the effect to {SELECT_CALL}"
+        )
+
+
 def check_source(source: str) -> None:
     source = strip_comments(source)
     for rule in ARM_RULES:
@@ -437,6 +528,7 @@ def check_source(source: str) -> None:
     for route in ROUTE_RULES:
         check_route_rule(source, route)
     check_companion_rules(source)
+    check_select_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -859,6 +951,83 @@ darwin_companion_effect
 }
 """
 
+SELECT_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_select_replacement_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (policy == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_select_replacement (policy, fact_root, runtime,
+             operation_uuid, expected_revision, drain_timeout_us,
+             out_committed);
+#else
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  if (rc == WYRELOG_E_OK)
+    rc = open_shape (&resolver, &directory, lease, &journal, row, &layout,
+            NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_select_with_effect (policy, row,
+            &before, &after, select_replacement_effect, &effect, &result);
+  return rc;
+#endif
+#endif
+}
+"""
+
+DARWIN_SELECT_FIXTURE = """\
+static wyrelog_error_t
+darwin_select_replacement (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactOfflineRestoreJournal *out_committed)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK
+      && (!commit_snapshot_valid (&journal, row, expected_revision)
+      || !g_str_equal (row->phase, "companion_synced")))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = check_policy (policy, &journal, row);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
+  if (rc == WYRELOG_E_OK)
+    rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK
+      && (wyl_fact_graph_darwin_evidence_rebind (&expected,
+      row->replacement_uuid, graph->old_provisioning_uuid,
+      graph->expected_main_identity.object, &rebuilt) != WYRELOG_E_OK
+      || !wyl_fact_graph_darwin_evidence_equal (&rebuilt,
+      &provenance.evidence)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_shape (&resolver, &directory, lease, &journal,
+            row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &expected));
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_select_with_effect (policy, row,
+            &before, &after, darwin_companion_effect, &effect, &result);
+  return rc;
+}
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -880,6 +1049,9 @@ POSITIVE = {
         COMPANION_FIXTURE,
     "darwin_companion_recover": DARWIN_RECOVER_FIXTURE,
     "darwin_companion_effect": DARWIN_EFFECT_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_select_replacement_run":
+        SELECT_RUN_FIXTURE,
+    "darwin_select_replacement": DARWIN_SELECT_FIXTURE,
 }
 
 
@@ -911,6 +1083,37 @@ H = "publish_effect"
 Y = "wyl_fact_offline_restore_graph_commit_companion_recover"
 Z = "darwin_companion_recover"
 G = "darwin_companion_effect"
+S = "wyl_fact_offline_restore_graph_commit_select_replacement_run"
+D = "darwin_select_replacement"
+SELECT_SHAPE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_shape (&resolver, &directory, lease,"
+    " &journal,\n"
+    "            row, &provenance);\n"
+)
+SELECT_COMPARE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_directory_compare_darwin_replacement_evidence\n"
+    "              (&directory, row->replacement_uuid,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, graph->checksum, &expected));\n"
+)
+SELECT_CALL_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_policy_store_graph_restore_select_with_effect (policy, row,\n"
+    "            &before, &after, darwin_companion_effect, &effect,"
+    " &result);\n"
+)
+SELECT_REBIND_LINES = (
+    "  if (rc == WYRELOG_E_OK\n"
+    "      && (wyl_fact_graph_darwin_evidence_rebind (&expected,\n"
+    "      row->replacement_uuid, graph->old_provisioning_uuid,\n"
+    "      graph->expected_main_identity.object, &rebuilt) != WYRELOG_E_OK\n"
+    "      || !wyl_fact_graph_darwin_evidence_equal (&rebuilt,\n"
+    "      &provenance.evidence)))\n"
+    "    rc = WYRELOG_E_POLICY;\n"
+)
 SETTER_LINES = (
     "    if (rc == WYRELOG_E_OK)\n"
     "      rc = wyl_policy_store_graph_restore_replacement_set_darwin"
@@ -1231,6 +1434,67 @@ MUTANTS = (
         "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
     ("darwin effect: runtime check dropped", G, replace(
         "    rc = check_runtime (effect->runtime, effect->key);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("select: Apple arm dropped", S, drop_apple_arm, "E_SELECT_ARMS"),
+    ("select: Darwin step called twice", S, replace(
+        "             out_committed);\n#else",
+        "             out_committed);\n"
+        "  rc = darwin_select_replacement (policy, fact_root, runtime,"
+        " operation_uuid, expected_revision, drain_timeout_us,"
+        " out_committed);\n#else"), "E_SELECT_ROUTE"),
+    ("select: Apple arm compares directly", S, replace(
+        "             out_committed);\n#else",
+        "             out_committed);\n"
+        "  rc = wyl_fact_graph_directory_compare_darwin_replacement_evidence"
+        " (&directory, uuid, staged, size, checksum, &expected);\n#else"),
+     "E_SELECT_DIRECT"),
+    ("select: Linux arm calls the Darwin step", S, replace(
+        "  return rc;\n#endif",
+        "  rc = darwin_select_replacement (policy, fact_root, runtime,"
+        " operation_uuid, expected_revision, drain_timeout_us,"
+        " out_committed);\n"
+        "  return rc;\n#endif"), "E_SELECT_LEAK"),
+    ("darwin select: compare removed", D, replace(SELECT_COMPARE_LINES, ""),
+     "E_SELECT_CALLS"),
+    ("darwin select: rebind removed", D, replace(SELECT_REBIND_LINES, ""),
+     "E_SELECT_CALLS"),
+    ("darwin select: capture added", D, replace(
+        SELECT_CALL_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_directory_capture_darwin_replacement"
+        "_evidence (&directory, uuid, staged, size, checksum, &captured);\n"
+        + SELECT_CALL_LINES), "E_SELECT_CALLS"),
+    ("darwin select: open_shape beside the Darwin shape", D, replace(
+        SELECT_SHAPE_LINES,
+        SELECT_SHAPE_LINES
+        + "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = open_shape (&resolver, &directory, lease, &journal, row,"
+        " &layout, NULL);\n"), "E_SELECT_CALLS"),
+    ("darwin select: compare after the selection", D,
+     move_before(SELECT_CALL_LINES, SELECT_COMPARE_LINES), "E_SELECT_ORDER"),
+    ("darwin select: shape after the compare", D,
+     move_before(SELECT_COMPARE_LINES, SELECT_SHAPE_LINES), "E_SELECT_ORDER"),
+    ("darwin select: rebind after the shape", D,
+     move_before(SELECT_SHAPE_LINES, SELECT_REBIND_LINES), "E_SELECT_ORDER"),
+    ("darwin select: Linux effect", D, replace(
+        "&before, &after, darwin_companion_effect,",
+        "&before, &after, select_replacement_effect,"), "E_SELECT_EFFECT"),
+    ("darwin select: another expected row", D, replace(
+        "select_with_effect (policy, row,",
+        "select_with_effect (policy, journal_row,"), "E_SELECT_EFFECT"),
+    ("darwin select: provenance load dropped", D, replace(
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin select: check_persisted dropped", D, replace(
+        "    rc = check_persisted (policy, operation_uuid, encoded, row,"
+        " &journal);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin select: graph_commit_quiesce dropped", D, replace(
+        "    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,\n"
+        "            operation_uuid, encoded, row, FALSE, &key,"
+        " drain_timeout_us,\n"
+        "            &quiescence);\n",
         "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
     ("darwin effect: shape dropped", G, replace(
         "    rc = darwin_post_publish_shape (effect->resolver,"

@@ -17482,8 +17482,8 @@ test_graph_commit_publish_macos (gconstpointer data)
     const guint64 durable = committed.revision;
     wyl_fact_offline_restore_journal_clear (&committed);
     /* Where a macOS graph restore stops: after PUBLISHED_DURABLE only the
-     * companion step runs there, by direct call; selection, finalize and
-     * promotion refuse. */
+     * companion step runs there, by direct call; selection refuses a
+     * reserved row, and finalize and promotion refuse. */
     wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
         const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
         gint64, WylFactOfflineRestoreJournal *) = {
@@ -17997,6 +17997,19 @@ companion_foreign_evidence (BackupFixture *fixture,
   return g_bytes_new (bytes, sizeof bytes);
 }
 
+/* No API reaches companion_synced without evidence on macOS: a raw update
+ * of the reserved row, the state a row that advanced before the evidence
+ * column existed would be in.  The one raw-SQL site for both steps. */
+static void
+darwin_force_companion_synced (BackupFixture *fixture)
+{
+  sqlite3 *db = wyl_policy_store_get_db (fixture->policy);
+  g_assert_cmpint (sqlite3_exec (db, "UPDATE fact_graph_restore_replacements "
+      "SET phase='companion_synced' WHERE phase='reserved';", NULL, NULL,
+      NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+}
+
 /* Parks the object at path outside the graph directory and puts a
  * same-bytes, same-mode object on a new inode in its place. */
 static void
@@ -18029,7 +18042,8 @@ companion_unsubstitute (const gchar *path, const gchar *parked)
  * reserved row has none, persists it write-once, re-reads it, compares it on
  * a fresh descriptor and then advances the row to companion_synced.  Every
  * refusal leaves the journal, the files and the row as stated, and is never
- * a retry code.  Selection, finalize and promotion still refuse. */
+ * a retry code.  The resume dispatcher, finalize and promotion still
+ * refuse. */
 static void
 test_graph_commit_companion_macos (gconstpointer data)
 {
@@ -18127,11 +18141,12 @@ test_graph_commit_companion_macos (gconstpointer data)
           (replayed, out));
     wyl_policy_graph_restore_replacement_record_free (replayed);
     g_clear_pointer (&out, wyl_policy_graph_restore_replacement_record_free);
-    /* The U5-8 boundary: nothing after the companion step runs yet. */
+    /* The U5-9 boundary: selection runs by direct call (see
+     * test_graph_commit_select_macos); the resume dispatcher, finalize and
+     * promotion still refuse. */
     wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
         const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
         gint64, WylFactOfflineRestoreJournal *) = {
-      wyl_fact_offline_restore_graph_commit_select_replacement_run,
       wyl_fact_offline_restore_graph_commit_select_resume_run,
       wyl_fact_offline_restore_graph_commit_finalize_run,
       wyl_fact_offline_restore_graph_commit_promote_run,
@@ -18298,10 +18313,7 @@ test_graph_commit_companion_macos (gconstpointer data)
     stored = assert_companion_synced (&fixture, operation, out, main_path);
   } else if (g_str_equal (mode, "synced-without-evidence")) {
     /* ADR 0006: no recapture, and nothing touches the main. */
-    sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
-    g_assert_cmpint (sqlite3_exec (db, "UPDATE fact_graph_restore_replacements "
-        "SET phase='companion_synced';", NULL, NULL, NULL), ==, SQLITE_OK);
-    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    darwin_force_companion_synced (&fixture);
     rc = companion_run (&fixture, &probe, durable, &out);
     assert_companion_points (&probe, none);
     assert_companion_refused (&fixture, operation, rc, WYRELOG_E_POLICY, out,
@@ -18312,6 +18324,578 @@ test_graph_commit_companion_macos (gconstpointer data)
   }
   g_clear_pointer (&out, wyl_policy_graph_restore_replacement_record_free);
   wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
+    (NULL, NULL);
+  g_ptr_array_unref (probe.seen);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+typedef enum
+{
+  SELECT_PROBE_NONE,
+  SELECT_PROBE_FAIL,
+  SELECT_PROBE_RETURN,
+  SELECT_PROBE_SUBSTITUTE,
+  SELECT_PROBE_PARK,
+  SELECT_PROBE_STRAY,
+} SelectProbeAction;
+
+/* Records the commit authority's select-darwin-* points, in order, and
+ * performs one action at act_at, which may also name one of the locator's
+ * own points: the directory's checkpoint reaches both.  hits counts the
+ * passes through act_at, acted on or not. */
+typedef struct
+{
+  const gchar *target_path;
+  const gchar *parked_path;
+  const gchar *stray_path;
+  const gchar *act_at;
+  SelectProbeAction action;
+  wyrelog_error_t returned_rc;
+  guint hits;
+  GPtrArray *seen;
+} SelectProbe;
+
+#define SELECT_BEFORE_COMPARE "select-darwin-before-compare"
+#define SELECT_BEFORE_COMMIT "select-darwin-before-commit"
+#define SELECT_WITNESS_POINT "darwin-restore-witness-rollback-bound"
+#define SELECT_MAIN_READ_POINT "darwin-replacement-main-read"
+
+static wyrelog_error_t
+select_probe_checkpoint (const gchar *point, gpointer user_data)
+{
+  SelectProbe *probe = user_data;
+  if (g_str_has_prefix (point, "select-darwin-"))
+    g_ptr_array_add (probe->seen, g_strdup (point));
+  if (g_strcmp0 (point, probe->act_at) != 0)
+    return WYRELOG_E_OK;
+  if (probe->hits++ > 0)
+    return WYRELOG_E_OK;
+  if (probe->action == SELECT_PROBE_FAIL)
+    return WYRELOG_E_IO;
+  if (probe->action == SELECT_PROBE_RETURN)
+    return probe->returned_rc;
+  if (probe->action == SELECT_PROBE_SUBSTITUTE) {
+    companion_substitute (probe->target_path, probe->parked_path);
+  } else if (probe->action == SELECT_PROBE_PARK) {
+    g_assert_cmpint (g_rename (probe->target_path, probe->parked_path), ==,
+        0);
+  } else if (probe->action == SELECT_PROBE_STRAY) {
+    g_autoptr (GError) error = NULL;
+    g_assert_true (g_file_set_contents (probe->stray_path, "x", 1, &error));
+    g_assert_no_error (error);
+    g_assert_true (wyl_test_secure_regular_file (probe->stray_path, &error));
+    g_assert_no_error (error);
+  }
+  return WYRELOG_E_OK;
+}
+
+/* One direct call of the selection step, recording its points afresh. */
+static wyrelog_error_t
+select_run (BackupFixture *fixture, SelectProbe *probe,
+    const gchar *operation, guint64 revision,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_ptr_array_set_size (probe->seen, 0);
+  probe->hits = 0;
+  return wyl_fact_offline_restore_graph_commit_select_replacement_run
+           (fixture->policy, fixture->root, fixture->runtime, operation,
+             revision, 0, out_committed);
+}
+
+/* The exact ordered point list, NULL-terminated. */
+static void
+assert_select_points (const SelectProbe *probe, const gchar *const *expected)
+{
+  guint count = 0;
+  while (expected[count] != NULL)
+    count++;
+  for (guint i = 0; i < probe->seen->len; i++)
+    g_test_message ("select point %u: %s", i,
+        (const gchar *) g_ptr_array_index (probe->seen, i));
+  g_assert_cmpuint (probe->seen->len, ==, count);
+  for (guint i = 0; i < count; i++)
+    g_assert_cmpstr (g_ptr_array_index (probe->seen, i), ==, expected[i]);
+}
+
+/* A graph's provisioning records, one line each: operation, phase and
+ * evidence, so another graph can be compared byte for byte. */
+static gchar *
+select_provisioning_snapshot (BackupFixture *fixture, const gchar *graph)
+{
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture->policy, "tenant-a", graph, &records), ==, WYRELOG_E_OK);
+  GString *out = g_string_new (NULL);
+  for (guint i = 0; i < records->len; i++) {
+    const WylPolicyGraphProvisioningRecord *record =
+        g_ptr_array_index (records, i);
+    g_string_append_printf (out, "%s %d %s ", record->op_uuid,
+        (gint) record->phase, record->store_uuid);
+    gsize length = 0;
+    const guint8 *bytes = record->darwin_operation_evidence == NULL ? NULL
+      : g_bytes_get_data (record->darwin_operation_evidence, &length);
+    for (gsize j = 0; j < length; j++)
+      g_string_append_printf (out, "%02x", bytes[j]);
+    g_string_append_c (out, '\n');
+  }
+  return g_string_free (out, FALSE);
+}
+
+/* zeta's single provisioning record: its operation, phase and evidence. */
+static void
+assert_select_zeta_record (BackupFixture *fixture, const gchar *op_uuid,
+    WylPolicyGraphProvisioningPhase phase, GBytes *evidence)
+{
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture->policy, "tenant-a", "zeta", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  const WylPolicyGraphProvisioningRecord *record =
+      g_ptr_array_index (records, 0);
+  g_assert_cmpstr (record->op_uuid, ==, op_uuid);
+  g_assert_cmpint (record->phase, ==, phase);
+  assert_optional_evidence (record->darwin_operation_evidence, evidence);
+}
+
+typedef struct
+{
+  const gchar *operation;
+  GBytes *durable_journal;
+  guint64 durable;
+  const gchar *old_uuid;
+  GBytes *old_evidence;
+  const gchar *replacement_uuid;
+  const gchar *legacy_path;
+  const gchar *main_path;
+  const gchar *rollback_path;
+  const WylFactArtifactInventoryIdentity *old_main;
+  const WylFactArtifactInventoryIdentity *new_main;
+  const gchar *alpha;
+} SelectExpect;
+
+/* A refusal of the selection step: the exact code, no output, the journal
+ * unchanged, the row companion_synced with the evidence given, the old
+ * ACTIVE record and its evidence intact, no restore_selected record, alpha
+ * untouched, no legacy name, the object at rollback_path the old main and,
+ * when given, the main name holding main. */
+static void
+assert_select_refused (BackupFixture *fixture, const SelectExpect *expect,
+    wyrelog_error_t rc, wyrelog_error_t expected,
+    const WylFactOfflineRestoreJournal *committed, GBytes *row_evidence,
+    const WylFactArtifactInventoryIdentity *main, const gchar *rollback_path)
+{
+  g_assert_cmpint (rc, ==, expected);
+  g_assert_null (committed->operation_uuid);
+  g_assert_null (committed->graphs);
+  assert_restore_journal_unchanged (fixture->policy, expect->operation,
+      expect->durable_journal, expect->durable);
+  wyl_policy_graph_restore_replacement_record_free (companion_row (fixture,
+      expect->operation, "companion_synced", row_evidence));
+  assert_select_zeta_record (fixture, expect->old_uuid,
+      WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, expect->old_evidence);
+  g_autofree gchar *alpha = select_provisioning_snapshot (fixture, "alpha");
+  g_assert_cmpstr (alpha, ==, expect->alpha);
+  g_assert_false (g_file_test (expect->legacy_path, G_FILE_TEST_EXISTS));
+  if (main != NULL) {
+    const WylFactArtifactInventoryIdentity at_main =
+        darwin_file_identity (expect->main_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (main,
+        &at_main));
+  }
+  const WylFactArtifactInventoryIdentity at_rollback =
+      darwin_file_identity (rollback_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (expect->old_main,
+      &at_rollback));
+}
+
+/* The durable selected state: the journal SELECTED at durable + 1 with the
+ * replacement selected pending cleanup, the row selected_pending_cleanup
+ * with the stored evidence, zeta's only record the restore_selected
+ * replacement carrying the same bytes, alpha untouched, and the files where
+ * PUBLISH left them.  committed, when given, must equal the stored
+ * journal. */
+static void
+assert_select_applied (BackupFixture *fixture, const SelectExpect *expect,
+    const WylFactOfflineRestoreJournal *committed, GBytes *stored)
+{
+  g_auto (WylFactOfflineRestoreJournal) loaded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture->policy, expect->operation, &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (loaded.revision, ==, expect->durable + 1);
+  g_assert_cmpuint (loaded.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
+  g_assert_true (loaded.replacement_selected_pending_cleanup);
+  if (committed != NULL) {
+    g_autoptr (GBytes) a = NULL;
+    g_autoptr (GBytes) b = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (committed, &a),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&loaded, &b),
+        ==, WYRELOG_E_OK);
+    g_assert_true (g_bytes_equal (a, b));
+  }
+  wyl_policy_graph_restore_replacement_record_free (companion_row (fixture,
+      expect->operation, "selected_pending_cleanup", stored));
+  assert_select_zeta_record (fixture, expect->replacement_uuid,
+      WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED, stored);
+  g_autofree gchar *alpha = select_provisioning_snapshot (fixture, "alpha");
+  g_assert_cmpstr (alpha, ==, expect->alpha);
+  g_assert_false (g_file_test (expect->legacy_path, G_FILE_TEST_EXISTS));
+  const WylFactArtifactInventoryIdentity at_main =
+      darwin_file_identity (expect->main_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (expect->new_main,
+      &at_main));
+  const WylFactArtifactInventoryIdentity at_rollback =
+      darwin_file_identity (expect->rollback_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (expect->old_main,
+      &at_rollback));
+}
+
+/* Once selected, a macOS restore waits for FINALIZE (U5-9): selection at
+ * either revision, the resume dispatcher, finalize and promotion all refuse
+ * and change nothing. */
+static void
+assert_select_stopped (BackupFixture *fixture, SelectProbe *probe,
+    const SelectExpect *expect, GBytes *stored)
+{
+  const gchar *const none[] = { NULL };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  for (guint64 revision = expect->durable; revision <= expect->durable + 1;
+      revision++) {
+    g_assert_cmpint (select_run (fixture, probe, expect->operation,
+        revision, &committed), ==, WYRELOG_E_POLICY);
+    assert_select_points (probe, none);
+    g_assert_null (committed.operation_uuid);
+    assert_select_applied (fixture, expect, NULL, stored);
+  }
+  wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
+      const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
+      gint64, WylFactOfflineRestoreJournal *) = {
+    wyl_fact_offline_restore_graph_commit_select_resume_run,
+    wyl_fact_offline_restore_graph_commit_finalize_run,
+    wyl_fact_offline_restore_graph_commit_promote_run,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (refused); i++)
+    for (guint64 revision = expect->durable;
+        revision <= expect->durable + 1; revision++) {
+      g_assert_cmpint (refused[i] (fixture->policy, fixture->root,
+          fixture->runtime, expect->operation, revision, 0, &committed), ==,
+          WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_select_applied (fixture, expect, NULL, stored);
+    }
+}
+
+static void
+select_reopen_policy (BackupFixture *fixture)
+{
+  g_autofree gchar *policy_path = g_build_filename (fixture->root,
+          "policy.db", NULL);
+  g_clear_pointer (&fixture->policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture->policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==,
+      WYRELOG_E_OK);
+}
+#endif
+
+/* macOS (#1303 U5-8): selection, called directly on a companion_synced
+ * graph restore, refuses a row without evidence before reading anything,
+ * rebuilds the old ACTIVE evidence from the replacement evidence, the old
+ * operation and the journal's old main and requires it to be the stored
+ * bytes, proves the published namespace, compares the replacement evidence
+ * on a fresh descriptor and selects in one policy transaction whose effect
+ * proves the namespace and the old main by evidence again.  Every refusal
+ * leaves the journal, the provisioning records and the files unchanged and
+ * is never a retry code.  Once selected the restore waits for FINALIZE. */
+static void
+test_graph_commit_select_macos (gconstpointer data)
+{
+#if !defined(__APPLE__) || !defined(WYL_TEST_HANDLE_SEAMS)
+  (void) data;
+  g_test_skip ("macOS graph restore selection by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0057";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-select-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          operation);
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "zeta",
+          stage_name);
+  g_autofree gchar *parked_path = graph_file_path (&fixture, "zeta",
+          "../parked-main.duckdb");
+  g_autofree gchar *stray_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb.wal");
+  const WylFactArtifactInventoryIdentity old_main =
+      darwin_file_identity (main_path);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, decided,
+      0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, decided + 12);
+  assert_darwin_published_durable (&committed, main_path, stage_path,
+      rollback_path, &old_main);
+  g_autoptr (GBytes) durable_journal = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+      &durable_journal), ==, WYRELOG_E_OK);
+  const guint64 durable = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  const WylFactArtifactInventoryIdentity new_main =
+      darwin_file_identity (main_path);
+  WylPolicyGraphRestoreReplacementRecord *reserved = companion_row (&fixture,
+          operation, "reserved", NULL);
+  g_autofree gchar *legacy_name = g_strdup_printf ("provision-%s.sqlite",
+          reserved->replacement_uuid);
+  g_autofree gchar *legacy_path = graph_file_path (&fixture, "zeta",
+          legacy_name);
+  g_autofree gchar *replacement_uuid = g_strdup (reserved->replacement_uuid);
+  g_autofree gchar *old_uuid = g_strdup (reserved->old_provisioning_uuid);
+  wyl_policy_graph_restore_replacement_record_free (reserved);
+  g_autoptr (GBytes) old_evidence = NULL;
+  {
+    g_autoptr (GPtrArray) records = NULL;
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+          (fixture.policy, "tenant-a", "zeta", &records), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (records->len, ==, 1);
+    const WylPolicyGraphProvisioningRecord *record =
+        g_ptr_array_index (records, 0);
+    g_assert_cmpstr (record->op_uuid, ==, old_uuid);
+    g_assert_nonnull (record->darwin_operation_evidence);
+    old_evidence = g_bytes_ref (record->darwin_operation_evidence);
+  }
+  g_autofree gchar *alpha = select_provisioning_snapshot (&fixture, "alpha");
+
+  /* The companion step, except where the row must advance without
+   * evidence. */
+  g_autoptr (GBytes) stored = NULL;
+  if (g_str_equal (mode, "synced-without-evidence")) {
+    darwin_force_companion_synced (&fixture);
+  } else {
+    WylPolicyGraphRestoreReplacementRecord *synced = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+          (fixture.policy, fixture.root, fixture.runtime, operation, durable,
+        0, &synced), ==, WYRELOG_E_OK);
+    stored = assert_companion_synced (&fixture, operation, synced,
+            main_path);
+    wyl_policy_graph_restore_replacement_record_free (synced);
+  }
+  assert_restore_journal_unchanged (fixture.policy, operation,
+      durable_journal, durable);
+
+  SelectProbe probe = {
+    .parked_path = parked_path, .stray_path = stray_path,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  wyl_fact_offline_restore_graph_commit_select_set_checkpoint_for_test
+    (select_probe_checkpoint, &probe);
+  const SelectExpect expect = {
+    .operation = operation, .durable_journal = durable_journal,
+    .durable = durable, .old_uuid = old_uuid, .old_evidence = old_evidence,
+    .replacement_uuid = replacement_uuid, .legacy_path = legacy_path,
+    .main_path = main_path, .rollback_path = rollback_path,
+    .old_main = &old_main, .new_main = &new_main, .alpha = alpha,
+  };
+  const gchar *const full[] = {
+    SELECT_BEFORE_COMPARE, SELECT_BEFORE_COMMIT, NULL,
+  };
+  const gchar *const compare_only[] = { SELECT_BEFORE_COMPARE, NULL };
+  const gchar *const none[] = { NULL };
+  wyrelog_error_t rc;
+  /* Whether the refusal leaves a state the next call can select from. */
+  gboolean rerun = TRUE;
+
+  if (g_str_equal (mode, "selected")) {
+    rerun = FALSE;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    assert_select_points (&probe, full);
+    g_assert_cmpuint (committed.revision, ==, durable + 1);
+    assert_select_applied (&fixture, &expect, &committed, stored);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    assert_select_stopped (&fixture, &probe, &expect, stored);
+    /* Store open accepts the Darwin selected state. */
+    select_reopen_policy (&fixture);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+    assert_select_stopped (&fixture, &probe, &expect, stored);
+  } else if (g_str_equal (mode, "lost-response")) {
+    /* The transaction commits and the caller sees IO: the next open finds
+     * the restore selected, and nothing on macOS re-enters selection. */
+    rerun = FALSE;
+    wyl_policy_store_offline_restore_fail_once (fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_select_points (&probe, full);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    select_reopen_policy (&fixture);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+    assert_select_stopped (&fixture, &probe, &expect, stored);
+  } else if (g_str_equal (mode, "crash-before-compare")
+      || g_str_equal (mode, "crash-before-commit")) {
+    /* Nothing durable is written before the policy transaction, so a step
+     * that stops here with IO leaves what a crash here would; the
+     * lost-response mode covers a crash after the commit. */
+    gboolean at_compare = g_str_equal (mode, "crash-before-compare");
+    probe.act_at = at_compare ? SELECT_BEFORE_COMPARE : SELECT_BEFORE_COMMIT;
+    probe.action = SELECT_PROBE_FAIL;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    assert_select_points (&probe, at_compare ? compare_only : full);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_IO, &committed,
+        stored, &new_main, rollback_path);
+  } else if (g_str_equal (mode, "compare-busy")
+      || g_str_equal (mode, "shape-busy")) {
+    /* A locator BUSY after SYNC_PUBLISH_DIR is a refusal, never a retry:
+     * from the shape's witness, before the compare, or from the compare's
+     * read. */
+    gboolean at_shape = g_str_equal (mode, "shape-busy");
+    probe.act_at = at_shape ? SELECT_WITNESS_POINT : SELECT_MAIN_READ_POINT;
+    probe.action = SELECT_PROBE_RETURN;
+    probe.returned_rc = WYRELOG_E_BUSY;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    g_assert_cmpuint (probe.hits, ==, 1);
+    assert_select_points (&probe, at_shape ? none : compare_only);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, stored, &new_main, rollback_path);
+  } else if (g_str_equal (mode, "missing-rollback")) {
+    g_assert_cmpint (g_rename (rollback_path, parked_path), ==, 0);
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    assert_select_points (&probe, none);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, stored, &new_main, parked_path);
+    g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (g_rename (parked_path, rollback_path), ==, 0);
+  } else if (g_str_equal (mode, "missing-rollback-before-commit")
+      || g_str_equal (mode, "substituted-rollback-before-commit")) {
+    /* The proof inside the transaction is the last evidence proof of the
+     * old main before its record is deleted; it must see this. */
+    gboolean substitute =
+        g_str_equal (mode, "substituted-rollback-before-commit");
+    probe.act_at = SELECT_BEFORE_COMMIT;
+    probe.action = substitute ? SELECT_PROBE_SUBSTITUTE : SELECT_PROBE_PARK;
+    probe.target_path = rollback_path;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    assert_select_points (&probe, full);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, stored, &new_main, parked_path);
+    if (substitute)
+      companion_unsubstitute (rollback_path, parked_path);
+    else
+      g_assert_cmpint (g_rename (parked_path, rollback_path), ==, 0);
+  } else if (g_str_equal (mode, "substituted-main")) {
+    companion_substitute (main_path, parked_path);
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    assert_select_points (&probe, none);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, stored, NULL, rollback_path);
+    companion_unsubstitute (main_path, parked_path);
+  } else if (g_str_equal (mode, "substituted-main-before-commit")) {
+    probe.act_at = SELECT_BEFORE_COMMIT;
+    probe.action = SELECT_PROBE_SUBSTITUTE;
+    probe.target_path = main_path;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    assert_select_points (&probe, full);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, stored, NULL, rollback_path);
+    companion_unsubstitute (main_path, parked_path);
+  } else if (g_str_equal (mode, "stray-name")
+      || g_str_equal (mode, "stray-before-commit")) {
+    gboolean before = g_str_equal (mode, "stray-name");
+    if (before) {
+      g_autoptr (GError) error = NULL;
+      g_assert_true (g_file_set_contents (stray_path, "x", 1, &error));
+      g_assert_no_error (error);
+      g_assert_true (wyl_test_secure_regular_file (stray_path, &error));
+      g_assert_no_error (error);
+    } else {
+      probe.act_at = SELECT_BEFORE_COMMIT;
+      probe.action = SELECT_PROBE_STRAY;
+    }
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    assert_select_points (&probe, before ? none : full);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, stored, &new_main, rollback_path);
+    g_assert_cmpint (g_remove (stray_path), ==, 0);
+  } else if (g_str_equal (mode, "old-evidence-missing")
+      || g_str_has_prefix (mode, "old-evidence-other-")) {
+    /* The old ACTIVE evidence is the one selection is about to delete: a
+     * missing envelope, or one the replacement evidence does not rebuild,
+     * refuses before the namespace is read. */
+    rerun = FALSE;
+    g_autoptr (GBytes) rewritten = NULL;
+    if (g_str_has_prefix (mode, "old-evidence-other-")) {
+      /* One field of the envelope at a time: the volume UUID, the graph
+       * directory file ID, and the old main's file ID that FINALIZE will
+       * rebuild from the journal. */
+      gsize offset = g_str_equal (mode, "old-evidence-other-volume") ? 24
+          : g_str_equal (mode, "old-evidence-other-graph") ? 40 : 48;
+      g_assert_true (g_str_equal (mode, "old-evidence-other-volume")
+          || g_str_equal (mode, "old-evidence-other-graph")
+          || g_str_equal (mode, "old-evidence-other-artifact"));
+      guint8 bytes[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE];
+      memcpy (bytes, g_bytes_get_data (old_evidence, NULL), sizeof bytes);
+      bytes[offset] ^= 0x01;
+      WylFactGraphDarwinOperationEvidence decoded = { 0 };
+      g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes,
+          sizeof bytes, old_uuid, &decoded), ==, WYRELOG_E_OK);
+      rewritten = g_bytes_new (bytes, sizeof bytes);
+    }
+    darwin_rewrite_graph_evidence (&fixture, rewritten);
+    probe.act_at = SELECT_WITNESS_POINT;
+    probe.action = SELECT_PROBE_FAIL;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    g_assert_cmpuint (probe.hits, ==, 0);
+    assert_select_points (&probe, none);
+    SelectExpect rewritten_expect = expect;
+    rewritten_expect.old_evidence = rewritten;
+    assert_select_refused (&fixture, &rewritten_expect, rc,
+        WYRELOG_E_POLICY, &committed, stored, &new_main, rollback_path);
+  } else if (g_str_equal (mode, "synced-without-evidence")) {
+    /* ADR 0006: refused before the old evidence, the namespace or the main
+     * is read, and never recaptured. */
+    rerun = FALSE;
+    probe.act_at = SELECT_WITNESS_POINT;
+    probe.action = SELECT_PROBE_FAIL;
+    rc = select_run (&fixture, &probe, operation, durable, &committed);
+    g_assert_cmpuint (probe.hits, ==, 0);
+    assert_select_points (&probe, none);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, NULL, &new_main, rollback_path);
+  } else {
+    g_assert_not_reached ();
+  }
+  if (rerun) {
+    /* The refusal changed nothing: with the namespace restored the next
+     * call selects. */
+    probe.act_at = NULL;
+    probe.action = SELECT_PROBE_NONE;
+    g_assert_cmpint (select_run (&fixture, &probe, operation, durable,
+        &committed), ==, WYRELOG_E_OK);
+    assert_select_points (&probe, full);
+    assert_select_applied (&fixture, &expect, &committed, stored);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  }
+  wyl_fact_offline_restore_graph_commit_select_set_checkpoint_for_test
     (NULL, NULL);
   g_ptr_array_unref (probe.seen);
   g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
@@ -19457,6 +20041,59 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-companion-wrong-evidence",
       "wrong-evidence", test_graph_commit_companion_macos);
+  g_test_add_data_func ("/fact-offline-backup-source/macos/commit-select",
+      "selected", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-compare-busy",
+      "compare-busy", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-crash-before-commit",
+      "crash-before-commit", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-crash-before-compare",
+      "crash-before-compare", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-lost-response",
+      "lost-response", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-missing-rollback",
+      "missing-rollback", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-missing-rollback-before-commit",
+      "missing-rollback-before-commit", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-old-evidence-missing",
+      "old-evidence-missing", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-old-evidence-other-artifact",
+      "old-evidence-other-artifact", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-old-evidence-other-graph",
+      "old-evidence-other-graph", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-old-evidence-other-volume",
+      "old-evidence-other-volume", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-shape-busy",
+      "shape-busy", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-stray-before-commit",
+      "stray-before-commit", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-stray-name",
+      "stray-name", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-substituted-main",
+      "substituted-main", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-substituted-main-before-commit",
+      "substituted-main-before-commit", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-substituted-rollback-before-commit",
+      "substituted-rollback-before-commit", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-synced-without-evidence",
+      "synced-without-evidence", test_graph_commit_select_macos);
   g_test_add_data_func ("/fact-offline-backup-source/macos/commit-publish",
       "published", test_graph_commit_publish_macos);
   g_test_add_data_func

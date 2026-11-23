@@ -62,6 +62,15 @@ wyrelog_error_t wyl_fact_graph_darwin_evidence_decode
 gboolean wyl_fact_graph_darwin_evidence_equal
   (const WylFactGraphDarwinOperationEvidence * left,
     const WylFactGraphDarwinOperationEvidence * right);
+/* The evidence another operation on the same graph directory would carry
+ * for another artifact: the volume and graph file IDs of SOURCE, which must
+ * decode against SOURCE_OPERATION_UUID, with OPERATION_UUID and
+ * ARTIFACT_FILE_ID in place of its own.  No I/O. */
+wyrelog_error_t wyl_fact_graph_darwin_evidence_rebind
+  (const WylFactGraphDarwinOperationEvidence * source,
+    const gchar * source_operation_uuid, const gchar * operation_uuid,
+    guint64 artifact_file_id,
+    WylFactGraphDarwinOperationEvidence * out_evidence);
 
 #ifdef __APPLE__
 /* Native capture and comparison query only held descriptors. */
