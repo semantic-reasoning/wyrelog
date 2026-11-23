@@ -2994,16 +2994,18 @@ darwin_post_publish_authority (WylFactGraphResolver *resolver,
 }
 
 /* Enumerate the complete published namespace: the new main, the rollback
- * name and at most the lock, each one-link 0600 and owned.  No file is
- * opened; the witness holds the old main and the caller's capture or
- * compare reads the new one.  Names match byte for byte, so a case variant
- * of a listed name is refused as unlisted. */
+ * name when rollback_present and never otherwise, and at most the lock,
+ * each one-link 0600 and owned.  The lock is never the old main: renamed
+ * there it would keep one link.  No file is opened; the witness holds the
+ * old main and the caller's capture or compare reads the new one.  Names
+ * match byte for byte, so a case variant of a listed name is refused as
+ * unlisted. */
 static wyrelog_error_t
 darwin_post_publish_inventory (WylFactGraphDirectory *directory,
     const gchar *rollback,
     const WylFactArtifactInventoryIdentity *old_identity,
     const WylFactArtifactInventoryIdentity *new_identity,
-    guint64 logical_bytes)
+    guint64 logical_bytes, gboolean rollback_present)
 {
   const gchar *allowed[] = { WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
                              rollback,
@@ -3067,12 +3069,14 @@ darwin_post_publish_inventory (WylFactGraphDirectory *directory,
         || (expected != NULL
         && ((guint64) named.st_dev != expected->domain
         || (guint64) named.st_ino != expected->object))
+        || (slot == 2 && (guint64) named.st_dev == old_identity->domain
+        && (guint64) named.st_ino == old_identity->object)
         || (slot == 0 && (guint64) named.st_size != logical_bytes)) {
       rc = WYRELOG_E_POLICY;
       break;
     }
   }
-  if (rc == WYRELOG_E_OK && (!seen[0] || !seen[1]))
+  if (rc == WYRELOG_E_OK && (!seen[0] || seen[1] != rollback_present))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && fstat (directory->graph_fd, &after) != 0)
     rc = WYRELOG_E_IO;
@@ -3131,12 +3135,159 @@ wyl_fact_graph_restore_darwin_post_publish_shape_open
             WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness);
   if (rc == WYRELOG_E_OK)
     rc = darwin_post_publish_inventory (directory, names.rollback,
-            expected_old_main, expected_new_main, logical_bytes);
+            expected_old_main, expected_new_main, logical_bytes, TRUE);
   if (rc == WYRELOG_E_OK)
     rc = darwin_post_publish_authority (resolver, directory, lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
             directory);
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    guint64 logical_bytes, WylFactGraphRestoreSelectedCleanupShape *out_shape)
+{
+  if (out_shape != NULL)
+    *out_shape = WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || old_evidence == NULL || expected_old_main == NULL
+      || expected_new_main == NULL || out_shape == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
+        (restore_uuid, &names);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_authority (resolver, directory, lease);
+  /* The rollback name decides the shape; DUAL then proves the old main
+   * there by evidence, and TERMINAL refuses the name if it reappears. */
+  gboolean dual = FALSE;
+  struct stat rollback;
+  if (rc == WYRELOG_E_OK
+      && fstatat (directory->graph_fd, names.rollback, &rollback,
+      AT_SYMLINK_NOFOLLOW) == 0)
+    dual = TRUE;
+  else if (rc == WYRELOG_E_OK && errno != ENOENT)
+    rc = errno_to_resolver_error (errno);
+  if (rc == WYRELOG_E_OK && dual)
+    rc = wyl_fact_graph_restore_darwin_post_publish_shape_open (resolver,
+            directory, lease, old_provisioning_uuid, old_evidence,
+            restore_uuid, replacement_uuid, expected_old_main,
+            expected_new_main, logical_bytes);
+  g_autofree gchar *old_legacy = NULL;
+  g_autofree gchar *new_legacy = NULL;
+  if (rc == WYRELOG_E_OK && !dual)
+    rc = provisioning_stage_name_from_operation (old_provisioning_uuid,
+            &old_legacy);
+  if (rc == WYRELOG_E_OK && !dual)
+    rc = provisioning_stage_name_from_operation (replacement_uuid,
+            &new_legacy);
+  if (rc == WYRELOG_E_OK && !dual
+      && (g_strcmp0 (old_legacy, new_legacy) == 0
+      || !restore_inventory_identity_valid (expected_old_main)
+      || !restore_inventory_identity_valid (expected_new_main)
+      || expected_old_main->domain == 0 || expected_old_main->object == 0
+      || expected_new_main->domain == 0 || expected_new_main->object == 0
+      || wyl_fact_artifact_inventory_identity_equal (expected_old_main,
+      expected_new_main)))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK && !dual && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("darwin-selected-cleanup-terminal",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK && !dual)
+    rc = darwin_post_publish_inventory (directory, names.rollback,
+            expected_old_main, expected_new_main, logical_bytes, FALSE);
+  if (rc == WYRELOG_E_OK && !dual)
+    rc = darwin_post_publish_authority (resolver, directory, lease);
+  if (rc == WYRELOG_E_OK)
+    *out_shape = dual ? WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL
+      : WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL;
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
+
+/* The witness descriptor is the evidence-proved old main.  After the final
+ * revalidation a same-user actor can still swap, link or remove the
+ * rollback name, so unlinkat may remove another object, find no name, or
+ * leave this one a link elsewhere.  A link count above zero on the held
+ * descriptor refuses this call as interfered with; it is not the acceptance
+ * criterion.  That is the final TERMINAL proof of the graph directory, on
+ * this call and on the retry from the TERMINAL any refusal after the unlink
+ * leaves, which may succeed with the old main alive outside the directory. */
+wyrelog_error_t
+wyl_fact_graph_restore_darwin_selected_cleanup_execute
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    guint64 logical_bytes)
+{
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  wyrelog_error_t rc =
+      wyl_fact_graph_restore_darwin_selected_cleanup_shape_open (resolver,
+          directory, lease, old_provisioning_uuid, old_evidence,
+          restore_uuid, replacement_uuid, expected_old_main,
+          expected_new_main, logical_bytes, &shape);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylFactArtifactTransitionNames names = { 0 };
+  rc = wyl_fact_artifact_transition_names_derive (restore_uuid, &names);
+  if (rc == WYRELOG_E_OK
+      && shape == WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL) {
+    g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+    rc = wyl_fact_graph_provisioned_restore_witness_open_with_evidence
+          (directory, old_provisioning_uuid, old_evidence, restore_uuid,
+            expected_old_main,
+            WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness);
+    if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+      rc = directory->checkpoint
+            ("restore-selected-darwin-before-rollback-unlink",
+              directory->checkpoint_data);
+    if (rc == WYRELOG_E_OK)
+      rc = darwin_post_publish_authority (resolver, directory, lease);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
+              directory);
+    if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+      rc = directory->checkpoint ("restore-selected-darwin-rollback-proved",
+              directory->checkpoint_data);
+    if (rc == WYRELOG_E_OK
+        && unlinkat (directory->graph_fd, names.rollback, 0) != 0)
+      rc = errno_to_resolver_error (errno);
+    struct stat held = { 0 };
+    if (rc == WYRELOG_E_OK && fstat (witness->companion_fd, &held) != 0)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && held.st_nlink != 0)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+      rc = directory->checkpoint
+            ("restore-selected-darwin-after-rollback-unlink",
+              directory->checkpoint_data);
+  }
+  if (rc == WYRELOG_E_OK
+      && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-selected-darwin-after-final-dir-sync",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_darwin_selected_cleanup_shape_open (resolver,
+            directory, lease, old_provisioning_uuid, old_evidence,
+            restore_uuid, replacement_uuid, expected_old_main,
+            expected_new_main, logical_bytes, &shape);
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
   wyl_fact_artifact_transition_names_clear (&names);
   return rc;
 }

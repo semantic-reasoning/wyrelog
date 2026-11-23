@@ -2068,6 +2068,530 @@ test_restore_darwin_post_publish_shape (void)
   shape_fixture_clear (&s);
 }
 
+/* ------------------------------------------------------------------ */
+/* Darwin selected cleanup (#1303 U5-9)                               */
+/* ------------------------------------------------------------------ */
+
+#define CLEANUP_TERMINAL_POINT "darwin-selected-cleanup-terminal"
+#define CLEANUP_BEFORE_UNLINK "restore-selected-darwin-before-rollback-unlink"
+#define CLEANUP_PROVED "restore-selected-darwin-rollback-proved"
+#define CLEANUP_AFTER_UNLINK "restore-selected-darwin-after-rollback-unlink"
+#define CLEANUP_AFTER_SYNC "restore-selected-darwin-after-final-dir-sync"
+
+typedef enum
+{
+  CLEANUP_NONE,
+  CLEANUP_FAIL,
+  CLEANUP_SUBSTITUTE_ROLLBACK,
+  CLEANUP_LINK_ROLLBACK,
+  CLEANUP_LINK_ROLLBACK_INSIDE,
+  CLEANUP_REMOVE_ROLLBACK,
+  CLEANUP_RESTORE_ROLLBACK,
+  CLEANUP_STRAY,
+} CleanupAction;
+
+/* Records the restore-selected-darwin-* points of one call, in order, and
+ * performs one action at act_at. */
+typedef struct
+{
+  ShapeFixture *shape;
+  GPtrArray *seen;
+  const gchar *act_at;
+  CleanupAction action;
+  guint hits;
+} CleanupProbe;
+
+static wyrelog_error_t
+cleanup_checkpoint (const gchar *point, gpointer user_data)
+{
+  CleanupProbe *probe = user_data;
+  ShapeFixture *s = probe->shape;
+  if (g_str_has_prefix (point, "restore-selected-darwin-"))
+    g_ptr_array_add (probe->seen, g_strdup (point));
+  if (g_strcmp0 (point, probe->act_at) != 0 || probe->hits++ > 0)
+    return WYRELOG_E_OK;
+  if (probe->action == CLEANUP_FAIL)
+    return WYRELOG_E_IO;
+  if (probe->action == CLEANUP_SUBSTITUTE_ROLLBACK) {
+    /* The original leaves the graph directory; a one-link 0600 object of
+     * the same bytes takes its name. */
+    shape_park (s, s->fixture.rollback);
+    shape_write (s, s->fixture.rollback, "provisioned", 11, 0600);
+  } else if (probe->action == CLEANUP_LINK_ROLLBACK) {
+    g_assert_cmpint (linkat (s->fixture.graph.graph_fd, s->fixture.rollback,
+        AT_FDCWD, s->outside, 0), ==, 0);
+  } else if (probe->action == CLEANUP_LINK_ROLLBACK_INSIDE) {
+    g_assert_cmpint (linkat (s->fixture.graph.graph_fd, s->fixture.rollback,
+        s->fixture.graph.graph_fd, "rollback-link", 0), ==, 0);
+  } else if (probe->action == CLEANUP_REMOVE_ROLLBACK) {
+    shape_park (s, s->fixture.rollback);
+  } else if (probe->action == CLEANUP_RESTORE_ROLLBACK) {
+    shape_unpark (s, s->fixture.rollback);
+  } else if (probe->action == CLEANUP_STRAY) {
+    shape_write (s, "facts.duckdb.wal", "x", 1, 0600);
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+cleanup_probe_start (CleanupProbe *probe, ShapeFixture *s,
+    const gchar *act_at, CleanupAction action)
+{
+  if (probe->seen == NULL)
+    probe->seen = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_set_size (probe->seen, 0);
+  probe->shape = s;
+  probe->act_at = act_at;
+  probe->action = action;
+  probe->hits = 0;
+  s->fixture.graph.checkpoint = cleanup_checkpoint;
+  s->fixture.graph.checkpoint_data = probe;
+}
+
+static void
+cleanup_probe_stop (CleanupProbe *probe, ShapeFixture *s)
+{
+  s->fixture.graph.checkpoint = replacement_checkpoint;
+  s->fixture.graph.checkpoint_data = &s->fixture;
+  g_clear_pointer (&probe->seen, g_ptr_array_unref);
+}
+
+/* The exact ordered point list, NULL-terminated. */
+static void
+assert_cleanup_points (const CleanupProbe *probe,
+    const gchar *const *expected)
+{
+  guint count = 0;
+  while (expected[count] != NULL)
+    count++;
+  for (guint i = 0; i < probe->seen->len; i++)
+    g_test_message ("cleanup point %u: %s", i,
+        (const gchar *) g_ptr_array_index (probe->seen, i));
+  g_assert_cmpuint (probe->seen->len, ==, count);
+  for (guint i = 0; i < count; i++)
+    g_assert_cmpstr (g_ptr_array_index (probe->seen, i), ==, expected[i]);
+}
+
+static wyrelog_error_t
+cleanup_shape_with (ShapeFixture *s,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const WylFactArtifactInventoryIdentity *old_main,
+    const WylFactArtifactInventoryIdentity *staged, guint64 logical_bytes,
+    WylFactGraphRestoreSelectedCleanupShape *out_shape)
+{
+  ReplacementFixture *f = &s->fixture;
+  return wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+           (&f->resolver, &f->graph, s->lease, operation_uuid, old_evidence,
+             witness_restore_uuid, replacement_uuid, old_main, staged,
+             logical_bytes, out_shape);
+}
+
+/* The expected code and shape, with no descriptor left behind. */
+static void
+assert_cleanup_shape (ShapeFixture *s, wyrelog_error_t expected,
+    WylFactGraphRestoreSelectedCleanupShape expected_shape)
+{
+  ReplacementFixture *f = &s->fixture;
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL;
+  guint fds = open_fd_count ();
+  g_assert_cmpint (cleanup_shape_with (s, &f->old_evidence, &f->old_main,
+      &f->staged, f->logical_bytes, &shape), ==, expected);
+  g_assert_cmpuint (open_fd_count (), ==, fds);
+  g_assert_cmpint (shape, ==, expected == WYRELOG_E_OK ? expected_shape
+      : WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID);
+}
+
+static wyrelog_error_t
+cleanup_execute_with (ShapeFixture *s,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const WylFactArtifactInventoryIdentity *old_main,
+    const WylFactArtifactInventoryIdentity *staged)
+{
+  ReplacementFixture *f = &s->fixture;
+  guint fds = open_fd_count ();
+  wyrelog_error_t rc = wyl_fact_graph_restore_darwin_selected_cleanup_execute
+        (&f->resolver, &f->graph, s->lease, operation_uuid, old_evidence,
+          witness_restore_uuid, replacement_uuid, old_main, staged,
+          f->logical_bytes);
+  g_assert_cmpuint (open_fd_count (), ==, fds);
+  return rc;
+}
+
+static wyrelog_error_t
+cleanup_execute (ShapeFixture *s)
+{
+  ReplacementFixture *f = &s->fixture;
+  return cleanup_execute_with (s, &f->old_evidence, &f->old_main, &f->staged);
+}
+
+/* The object at a path outside the graph directory: identity and links. */
+static void
+assert_outside_object (const gchar *path,
+    const WylFactArtifactInventoryIdentity *identity, nlink_t links)
+{
+  struct stat status;
+  g_assert_cmpint (lstat (path, &status), ==, 0);
+  g_assert_cmpuint ((guint64) status.st_dev, ==, identity->domain);
+  g_assert_cmpuint ((guint64) status.st_ino, ==, identity->object);
+  g_assert_cmpuint (status.st_nlink, ==, links);
+}
+
+static gboolean
+graph_name_exists (ShapeFixture *s, const gchar *name)
+{
+  struct stat status;
+  return fstatat (s->fixture.graph.graph_fd, name, &status,
+             AT_SYMLINK_NOFOLLOW) == 0;
+}
+
+static void
+test_restore_darwin_selected_cleanup_shape (void)
+{
+  const WylFactGraphRestoreSelectedCleanupShape dual =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL;
+  const WylFactGraphRestoreSelectedCleanupShape terminal =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL;
+  ShapeFixture s;
+  shape_fixture_init (&s);
+  ReplacementFixture *f = &s.fixture;
+  assert_cleanup_shape (&s, WYRELOG_E_OK, dual);
+  assert_cleanup_shape (&s, WYRELOG_E_OK, dual);
+
+  /* Argument shape. */
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL;
+  g_assert_cmpint (cleanup_shape_with (&s, &f->old_evidence, &f->old_main,
+      &f->staged, f->logical_bytes, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (cleanup_shape_with (&s, NULL, &f->old_main, &f->staged,
+      f->logical_bytes, &shape), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (shape, ==, WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID);
+  g_assert_cmpint (cleanup_shape_with (&s, &f->old_evidence, &f->old_main,
+      &f->old_main, f->logical_bytes, &shape), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+        (&f->resolver, &f->graph, NULL, operation_uuid, &f->old_evidence,
+      witness_restore_uuid, replacement_uuid, &f->old_main, &f->staged,
+      f->logical_bytes, &shape), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+        (&f->resolver, &f->graph, s.lease, operation_uuid, &f->old_evidence,
+      witness_restore_uuid, operation_uuid, &f->old_main, &f->staged,
+      f->logical_bytes, &shape), ==, WYRELOG_E_INVALID);
+
+  /* DUAL refuses what the post-publication proof refuses: an unlisted
+   * name, a provisioning legacy name, the stage, a substituted rollback
+   * object, evidence naming another volume and a changed device. */
+  g_autofree gchar *stage = g_strdup_printf ("restore-%s.duckdb",
+          witness_restore_uuid);
+  g_autofree gchar *old_legacy = g_strdup_printf ("provision-%s.sqlite",
+          operation_uuid);
+  const gchar *const unlisted[] = {
+    "facts.duckdb.wal", stage, f->legacy, old_legacy,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (unlisted); i++) {
+    g_test_message ("dual: unlisted name %s", unlisted[i]);
+    shape_write (&s, unlisted[i], "x", 1, 0600);
+    assert_cleanup_shape (&s, WYRELOG_E_POLICY, dual);
+    replacement_unlink (f, unlisted[i]);
+  }
+  assert_cleanup_shape (&s, WYRELOG_E_OK, dual);
+  shape_park (&s, f->rollback);
+  shape_write (&s, f->rollback, "provisioned", 11, 0600);
+  assert_cleanup_shape (&s, WYRELOG_E_POLICY, dual);
+  replacement_unlink (f, f->rollback);
+  shape_unpark (&s, f->rollback);
+  WylFactGraphDarwinOperationEvidence flipped = f->old_evidence;
+  flipped.bytes[24] ^= 0xffu;
+  g_assert_cmpint (cleanup_shape_with (&s, &flipped, &f->old_main,
+      &f->staged, f->logical_bytes, &shape), ==, WYRELOG_E_POLICY);
+  WylFactArtifactInventoryIdentity shifted_old = f->old_main;
+  shifted_old.domain ^= 1;
+  g_assert_cmpint (cleanup_shape_with (&s, &f->old_evidence, &shifted_old,
+      &f->staged, f->logical_bytes, &shape), ==, WYRELOG_E_POLICY);
+  WylFactArtifactInventoryIdentity shifted_new = f->staged;
+  shifted_new.domain ^= 1;
+  g_assert_cmpint (cleanup_shape_with (&s, &f->old_evidence, &f->old_main,
+      &shifted_new, f->logical_bytes, &shape), ==, WYRELOG_E_POLICY);
+  assert_cleanup_shape (&s, WYRELOG_E_OK, dual);
+
+  /* TERMINAL: the rollback name gone, the new main and at most a lock. */
+  shape_park (&s, f->rollback);
+  assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+  shape_write (&s, "facts.duckdb.lock", "", 0, 0600);
+  assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+  replacement_unlink (f, "facts.duckdb.lock");
+  for (guint i = 0; i < G_N_ELEMENTS (unlisted); i++) {
+    g_test_message ("terminal: unlisted name %s", unlisted[i]);
+    shape_write (&s, unlisted[i], "x", 1, 0600);
+    assert_cleanup_shape (&s, WYRELOG_E_POLICY, terminal);
+    replacement_unlink (f, unlisted[i]);
+  }
+  assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+
+  /* The old main renamed onto the lock name is a one-link 0600 file the
+   * inventory would otherwise admit there. */
+  shape_unpark (&s, "facts.duckdb.lock");
+  assert_cleanup_shape (&s, WYRELOG_E_POLICY, terminal);
+  shape_park (&s, "facts.duckdb.lock");
+  assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+
+  /* The new main pinned by device, inode and size. */
+  g_assert_cmpint (cleanup_shape_with (&s, &f->old_evidence, &f->old_main,
+      &shifted_new, f->logical_bytes, &shape), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (shape, ==, WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID);
+  g_assert_cmpint (cleanup_shape_with (&s, &f->old_evidence, &f->old_main,
+      &f->staged, f->logical_bytes + 1, &shape), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *parked_new = g_build_filename (f->root, "parked-new",
+          NULL);
+  g_assert_cmpint (renameat (f->graph.graph_fd, "facts.duckdb", AT_FDCWD,
+      parked_new), ==, 0);
+  assert_cleanup_shape (&s, WYRELOG_E_POLICY, terminal);
+  (void) replacement_write_file (f, "facts.duckdb");
+  assert_cleanup_shape (&s, WYRELOG_E_POLICY, terminal);
+  replacement_unlink (f, "facts.duckdb");
+  g_assert_cmpint (renameat (AT_FDCWD, parked_new, f->graph.graph_fd,
+      "facts.duckdb"), ==, 0);
+  assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+
+  /* A rollback name that appears once TERMINAL is classified is refused
+   * by the TERMINAL inventory itself. */
+  CleanupProbe probe = { 0 };
+  cleanup_probe_start (&probe, &s, CLEANUP_TERMINAL_POINT,
+      CLEANUP_RESTORE_ROLLBACK);
+  assert_cleanup_shape (&s, WYRELOG_E_POLICY, terminal);
+  g_assert_cmpuint (probe.hits, ==, 1);
+  cleanup_probe_stop (&probe, &s);
+  assert_cleanup_shape (&s, WYRELOG_E_OK, dual);
+
+  /* Read-only throughout. */
+  struct stat status;
+  g_assert_cmpint (fstatat (f->graph.graph_fd, "facts.duckdb", &status,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpuint ((guint64) status.st_ino, ==, f->staged.object);
+  g_assert_cmpint (fstatat (f->graph.graph_fd, f->rollback, &status,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpuint ((guint64) status.st_ino, ==, f->old_main.object);
+  shape_fixture_clear (&s);
+}
+
+static void
+test_restore_darwin_selected_cleanup_execute (void)
+{
+  const gchar *const dual_points[] = {
+    CLEANUP_BEFORE_UNLINK, CLEANUP_PROVED, CLEANUP_AFTER_UNLINK,
+    CLEANUP_AFTER_SYNC, NULL,
+  };
+  const gchar *const terminal_points[] = { CLEANUP_AFTER_SYNC, NULL };
+  const gchar *const none[] = { NULL };
+  const WylFactGraphRestoreSelectedCleanupShape terminal =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL;
+  CleanupProbe probe = { 0 };
+
+  /* DUAL to TERMINAL, then idempotent on TERMINAL; the new main keeps the
+   * evidence captured before the cleanup. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    WylFactGraphDarwinOperationEvidence stored = { 0 };
+    g_assert_cmpint (replacement_capture (f, &f->staged, f->logical_bytes,
+        f->checksum, &stored), ==, WYRELOG_E_OK);
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, dual_points);
+    g_assert_false (graph_name_exists (&s, f->rollback));
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, terminal_points);
+    cleanup_probe_stop (&probe, &s);
+    assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+    /* TERMINAL with the new main's device changed. */
+    WylFactArtifactInventoryIdentity shifted_new = f->staged;
+    shifted_new.domain ^= 1;
+    g_assert_cmpint (cleanup_execute_with (&s, &f->old_evidence,
+        &f->old_main, &shifted_new), ==, WYRELOG_E_POLICY);
+    WylFactGraphDarwinOperationEvidence evidence = { 0 };
+    g_assert_cmpint (replacement_capture (f, &f->staged, f->logical_bytes,
+        f->checksum, &evidence), ==, WYRELOG_E_OK);
+    g_assert_true (wyl_fact_graph_darwin_evidence_equal (&evidence, &stored));
+    shape_fixture_clear (&s);
+  }
+
+  /* Pins that refuse before anything is unlinked: either main's device,
+   * and rebuilt evidence naming another volume. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    WylFactArtifactInventoryIdentity shifted_old = f->old_main;
+    shifted_old.domain ^= 1;
+    WylFactArtifactInventoryIdentity shifted_new = f->staged;
+    shifted_new.domain ^= 1;
+    WylFactGraphDarwinOperationEvidence flipped = f->old_evidence;
+    flipped.bytes[24] ^= 0xffu;
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute_with (&s, &f->old_evidence,
+        &shifted_old, &f->staged), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (cleanup_execute_with (&s, &f->old_evidence,
+        &f->old_main, &shifted_new), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (cleanup_execute_with (&s, &flipped, &f->old_main,
+        &f->staged), ==, WYRELOG_E_POLICY);
+    assert_cleanup_points (&probe, none);
+    cleanup_probe_stop (&probe, &s);
+    assert_cleanup_shape (&s, WYRELOG_E_OK,
+        WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL);
+    shape_fixture_clear (&s);
+  }
+
+  /* A substitute put at the rollback name before the held revalidation is
+   * refused there, and nothing is unlinked. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    cleanup_probe_start (&probe, &s, CLEANUP_BEFORE_UNLINK,
+        CLEANUP_SUBSTITUTE_ROLLBACK);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_POLICY);
+    const gchar *const before[] = { CLEANUP_BEFORE_UNLINK, NULL };
+    assert_cleanup_points (&probe, before);
+    cleanup_probe_stop (&probe, &s);
+    g_assert_true (graph_name_exists (&s, f->rollback));
+    assert_outside_object (s.outside, &f->old_main, 1);
+    replacement_unlink (f, f->rollback);
+    shape_unpark (&s, f->rollback);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    shape_fixture_clear (&s);
+  }
+
+  /* A substitute swapped in after the last revalidation is what unlinkat
+   * removes; the held object keeps its link outside the directory, so the
+   * step refuses.  The namespace is TERMINAL and the next call proves it
+   * and succeeds: the evidence-proved object has no name in the graph
+   * directory. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    cleanup_probe_start (&probe, &s, CLEANUP_PROVED,
+        CLEANUP_SUBSTITUTE_ROLLBACK);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_POLICY);
+    const gchar *const proved[] = {
+      CLEANUP_BEFORE_UNLINK, CLEANUP_PROVED, NULL,
+    };
+    assert_cleanup_points (&probe, proved);
+    g_assert_false (graph_name_exists (&s, f->rollback));
+    assert_outside_object (s.outside, &f->old_main, 1);
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, terminal_points);
+    cleanup_probe_stop (&probe, &s);
+    assert_outside_object (s.outside, &f->old_main, 1);
+    shape_fixture_clear (&s);
+  }
+
+  /* A second link made after the last revalidation: unlinkat removes the
+   * evidence-proved object's rollback name, but the object keeps a link,
+   * so the step refuses; the retry finds TERMINAL and succeeds, and the
+   * object outside the directory is left alone. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    cleanup_probe_start (&probe, &s, CLEANUP_PROVED, CLEANUP_LINK_ROLLBACK);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_POLICY);
+    g_assert_false (graph_name_exists (&s, f->rollback));
+    assert_outside_object (s.outside, &f->old_main, 1);
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, terminal_points);
+    cleanup_probe_stop (&probe, &s);
+    assert_outside_object (s.outside, &f->old_main, 1);
+    shape_fixture_clear (&s);
+  }
+
+  /* The rollback name removed after the last revalidation: unlinkat finds
+   * no name, which the locator reports as NOT_FOUND.  The namespace is
+   * TERMINAL and the retry succeeds on that proof alone, with the old main
+   * alive outside the graph directory. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    cleanup_probe_start (&probe, &s, CLEANUP_PROVED, CLEANUP_REMOVE_ROLLBACK);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_NOT_FOUND);
+    const gchar *const proved[] = {
+      CLEANUP_BEFORE_UNLINK, CLEANUP_PROVED, NULL,
+    };
+    assert_cleanup_points (&probe, proved);
+    g_assert_false (graph_name_exists (&s, f->rollback));
+    assert_outside_object (s.outside, &f->old_main, 1);
+    cleanup_probe_stop (&probe, &s);
+    assert_cleanup_shape (&s, WYRELOG_E_OK, terminal);
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, terminal_points);
+    cleanup_probe_stop (&probe, &s);
+    assert_outside_object (s.outside, &f->old_main, 1);
+    shape_fixture_clear (&s);
+  }
+
+  /* A second link inside the graph directory after the last revalidation:
+   * the unlink leaves the held object that link, so the step refuses, and
+   * the retry's TERMINAL proof refuses the unlisted name, an operator wedge
+   * until the name is gone. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    cleanup_probe_start (&probe, &s, CLEANUP_PROVED,
+        CLEANUP_LINK_ROLLBACK_INSIDE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_POLICY);
+    const gchar *const proved[] = {
+      CLEANUP_BEFORE_UNLINK, CLEANUP_PROVED, NULL,
+    };
+    assert_cleanup_points (&probe, proved);
+    g_assert_false (graph_name_exists (&s, f->rollback));
+    struct stat status;
+    g_assert_cmpint (fstatat (f->graph.graph_fd, "rollback-link", &status,
+        AT_SYMLINK_NOFOLLOW), ==, 0);
+    g_assert_cmpuint ((guint64) status.st_ino, ==, f->old_main.object);
+    g_assert_cmpuint (status.st_nlink, ==, 1);
+    cleanup_probe_stop (&probe, &s);
+    assert_cleanup_shape (&s, WYRELOG_E_POLICY,
+        WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID);
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_POLICY);
+    assert_cleanup_points (&probe, none);
+    g_assert_true (graph_name_exists (&s, "rollback-link"));
+    replacement_unlink (f, "rollback-link");
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, terminal_points);
+    cleanup_probe_stop (&probe, &s);
+    shape_fixture_clear (&s);
+  }
+
+  /* A stray name after the unlink: the final TERMINAL proof refuses, and
+   * the next call succeeds once it is gone.  A seam failure passes
+   * through. */
+  {
+    ShapeFixture s;
+    shape_fixture_init (&s);
+    ReplacementFixture *f = &s.fixture;
+    cleanup_probe_start (&probe, &s, CLEANUP_AFTER_UNLINK, CLEANUP_STRAY);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_POLICY);
+    assert_cleanup_points (&probe, dual_points);
+    g_assert_false (graph_name_exists (&s, f->rollback));
+    replacement_unlink (f, "facts.duckdb.wal");
+    cleanup_probe_start (&probe, &s, CLEANUP_AFTER_SYNC, CLEANUP_FAIL);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_IO);
+    cleanup_probe_start (&probe, &s, NULL, CLEANUP_NONE);
+    g_assert_cmpint (cleanup_execute (&s), ==, WYRELOG_E_OK);
+    assert_cleanup_points (&probe, terminal_points);
+    cleanup_probe_stop (&probe, &s);
+    shape_fixture_clear (&s);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2113,5 +2637,11 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/restore-darwin-post-publish-shape",
     test_restore_darwin_post_publish_shape);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-darwin-selected-cleanup-shape",
+    test_restore_darwin_selected_cleanup_shape);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-darwin-selected-cleanup-execute",
+    test_restore_darwin_selected_cleanup_execute);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

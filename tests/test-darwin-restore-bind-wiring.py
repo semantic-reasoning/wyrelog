@@ -84,6 +84,37 @@ U5-8):
 The selection step also has a route row: it calls each authority helper of
 the Linux prologue it copies, the provenance load and the shape.
 
+Finalize rules (check_finalize_rules), for macOS FINALIZE (#1303 U5-9):
+
+- wyl_fact_offline_restore_graph_commit_finalize_run has exactly one
+  ``#ifdef __APPLE__`` arm, which calls darwin_finalize_selected exactly
+  once and none of the Darwin cleanup shape or execute, the compare, the
+  store begin or the store completion itself; its ``#else`` arm calls
+  neither darwin_finalize_selected, the Darwin cleanup shape or execute,
+  the compare nor the evidence rebind;
+- darwin_finalize_selected calls graph_selected_provenance_load, the Darwin
+  cleanup shape, the compare, the store begin and the store completion
+  exactly once each, in that order, and none of graph_provenance_load, the
+  rebind, the Darwin cleanup execute, the Linux cleanup shape or execute,
+  the dual witness, the capture, the setter, the sync, the mark or the
+  store selection; the completion takes ``row`` as the expected record and
+  darwin_finalize_effect as its effect; and a ``row->darwin_operation_evidence
+  == NULL`` test precedes its first wyl_fact_graph_resolver_open, so a row
+  without evidence is refused before the graph is opened;
+- darwin_finalize_effect calls the Darwin cleanup execute exactly once and
+  the Linux one never, and compares the row's evidence (evidence_equal);
+- graph_selected_provenance_load calls the rebind exactly once and
+  evidence_equal at least once, names
+  WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED and never
+  WYL_POLICY_GRAPH_PROVISIONING_ACTIVE.
+
+FINALIZE has two route rows: darwin_finalize_selected calls each authority
+helper of the Linux finalize prologue it copies (the lease acquisition, the
+policy bind, the journal and row loads, the lease authorization of the
+resolver, graph_commit_quiesce and check_runtime) and the selected
+provenance load; darwin_finalize_effect re-proves the lease's authority and
+the runtime state and calls the Darwin cleanup execute.
+
 function_body counts braces without regard to string or character literals;
 none of the pinned functions holds a brace literal today.
 
@@ -151,6 +182,19 @@ REBIND_CALL = "wyl_fact_graph_darwin_evidence_rebind"
 SHAPE_CALL = "darwin_post_publish_shape"
 SELECT_EFFECT = "darwin_companion_effect"
 LINUX_SHAPE_CALL = "open_shape"
+FINALIZE_RUN = "wyl_fact_offline_restore_graph_commit_finalize_run"
+DARWIN_FINALIZE = "darwin_finalize_selected"
+FINALIZE_EFFECT = "darwin_finalize_effect"
+SELECTED_PROVENANCE = "graph_selected_provenance_load"
+CLEANUP_SHAPE_CALL = (
+    "wyl_fact_graph_restore_darwin_selected_cleanup_shape_open"
+)
+CLEANUP_EXECUTE_CALL = "wyl_fact_graph_restore_darwin_selected_cleanup_execute"
+LINUX_CLEANUP_SHAPE_CALL = "wyl_fact_graph_restore_selected_cleanup_shape_open"
+LINUX_CLEANUP_EXECUTE_CALL = "wyl_fact_graph_restore_selected_cleanup_execute"
+DUAL_WITNESS_CALL = "wyl_fact_graph_provisioned_restore_dual_witness_open"
+BEGIN_CALL = "wyl_policy_store_graph_restore_selected_finalize_begin"
+COMPLETE_CALL = "wyl_policy_store_graph_restore_selected_finalize_with_effect"
 
 
 @dataclass(frozen=True)
@@ -223,6 +267,18 @@ ROUTE_RULES = (
                "wyl_fact_root_writer_lease_authorizes_resolver",
                "graph_commit_quiesce", "check_persisted", "check_runtime",
                "graph_provenance_load", "darwin_post_publish_shape")),
+    RouteRule("darwin_finalize_selected",
+              ("wyl_fact_root_writer_lease_acquire",
+               "wyl_policy_store_bind_fact_root_authorized",
+               "wyl_fact_offline_restore_journal_store_load",
+               "wyl_policy_store_graph_restore_replacement_load",
+               "wyl_fact_root_writer_lease_authorizes_resolver",
+               "graph_commit_quiesce", "check_runtime",
+               "graph_selected_provenance_load")),
+    RouteRule("darwin_finalize_effect",
+              ("wyl_fact_root_writer_lease_authorizes_resolver",
+               "check_runtime",
+               "wyl_fact_graph_restore_darwin_selected_cleanup_execute")),
 )
 
 
@@ -521,6 +577,106 @@ def check_select_rules(source: str) -> None:
         )
 
 
+def check_finalize_rules(source: str) -> None:
+    body = function_body(source, FINALIZE_RUN)
+    arms = apple_arms(body)
+    if len(arms) != 1:
+        raise ContractError(
+            f"E_FINALIZE_ARMS: {FINALIZE_RUN} has {len(arms)}"
+            " #ifdef __APPLE__ arms, expected 1"
+        )
+    apple, other = arms[0]
+    if count_calls(apple, DARWIN_FINALIZE) != 1:
+        raise ContractError(
+            f"E_FINALIZE_ROUTE: the Darwin arm of {FINALIZE_RUN} must call"
+            f" {DARWIN_FINALIZE} exactly once"
+        )
+    for call in (CLEANUP_SHAPE_CALL, CLEANUP_EXECUTE_CALL, COMPARE_CALL,
+                 BEGIN_CALL, COMPLETE_CALL):
+        if count_calls(apple, call) != 0:
+            raise ContractError(
+                f"E_FINALIZE_DIRECT: the Darwin arm of {FINALIZE_RUN} calls"
+                f" {call} instead of {DARWIN_FINALIZE}"
+            )
+    for call in (DARWIN_FINALIZE, CLEANUP_SHAPE_CALL, CLEANUP_EXECUTE_CALL,
+                 COMPARE_CALL, REBIND_CALL):
+        if count_calls(other, call) != 0:
+            raise ContractError(
+                f"E_FINALIZE_LEAK: the #else arm of {FINALIZE_RUN} calls"
+                f" {call}"
+            )
+    body = function_body(source, DARWIN_FINALIZE)
+    ordered = (SELECTED_PROVENANCE, CLEANUP_SHAPE_CALL, COMPARE_CALL,
+               BEGIN_CALL, COMPLETE_CALL)
+    for call in ordered:
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_FINALIZE_CALLS: {DARWIN_FINALIZE} must call {call}"
+                " exactly once"
+            )
+    for call in ("graph_provenance_load", REBIND_CALL, CLEANUP_EXECUTE_CALL,
+                 LINUX_CLEANUP_SHAPE_CALL, LINUX_CLEANUP_EXECUTE_CALL,
+                 DUAL_WITNESS_CALL, CAPTURE_CALL, SETTER_CALL, SYNC_CALL,
+                 MARK_CALL, SELECT_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_FINALIZE_CALLS: {DARWIN_FINALIZE} calls {call}"
+            )
+    order = [first_call(body, call) for call in ordered]
+    if order != sorted(order):
+        raise ContractError(
+            f"E_FINALIZE_ORDER: {DARWIN_FINALIZE} must load the selected"
+            " provenance, prove the cleanup shape, compare, begin and"
+            " complete in that order"
+        )
+    evidence = re.search(
+        r"\brow->darwin_operation_evidence\s*==\s*NULL", body
+    )
+    opened = first_call(body, "wyl_fact_graph_resolver_open")
+    if evidence is None or opened < 0 or evidence.start() > opened:
+        raise ContractError(
+            f"E_FINALIZE_EARLY_EVIDENCE: {DARWIN_FINALIZE} must refuse a row"
+            " without evidence before its first wyl_fact_graph_resolver_open"
+        )
+    match = re.search(
+        r"finalize_with_effect\s*\(\s*policy\s*,\s*row\s*,([^;]*);", body
+    )
+    if match is None or re.search(
+            r"(?<![\w])" + FINALIZE_EFFECT + r"(?![\w])", match.group(1)
+    ) is None:
+        raise ContractError(
+            f"E_FINALIZE_EFFECT: {DARWIN_FINALIZE} must pass row as the"
+            f" expected record and {FINALIZE_EFFECT} as the effect to"
+            f" {COMPLETE_CALL}"
+        )
+    body = function_body(source, FINALIZE_EFFECT)
+    if (count_calls(body, CLEANUP_EXECUTE_CALL) != 1
+            or count_calls(body, LINUX_CLEANUP_EXECUTE_CALL) != 0):
+        raise ContractError(
+            f"E_FINALIZE_EFFECT_EXECUTE: {FINALIZE_EFFECT} must call"
+            f" {CLEANUP_EXECUTE_CALL} exactly once and"
+            f" {LINUX_CLEANUP_EXECUTE_CALL} never"
+        )
+    if count_calls(body, "evidence_equal") == 0:
+        raise ContractError(
+            f"E_FINALIZE_EFFECT_EVIDENCE: {FINALIZE_EFFECT} must compare the"
+            " row's evidence with the bytes compared before it"
+        )
+    body = function_body(source, SELECTED_PROVENANCE)
+    if (count_calls(body, REBIND_CALL) != 1
+            or count_calls(body, "evidence_equal") == 0
+            or re.search(r"\bWYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED\b",
+                         body) is None
+            or re.search(r"\bWYL_POLICY_GRAPH_PROVISIONING_ACTIVE\b",
+                         body) is not None):
+        raise ContractError(
+            f"E_FINALIZE_PROVENANCE: {SELECTED_PROVENANCE} must rebuild the"
+            f" old evidence once with {REBIND_CALL} from the restore_selected"
+            " record, whose evidence must equal the row's, and never read"
+            " an ACTIVE record"
+        )
+
+
 def check_source(source: str) -> None:
     source = strip_comments(source)
     for rule in ARM_RULES:
@@ -529,6 +685,7 @@ def check_source(source: str) -> None:
         check_route_rule(source, route)
     check_companion_rules(source)
     check_select_rules(source)
+    check_finalize_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -1028,6 +1185,139 @@ darwin_select_replacement (wyl_policy_store_t *policy,
 }
 """
 
+FINALIZE_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_finalize_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (policy == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_finalize_selected (policy, fact_root, runtime,
+             operation_uuid, expected_revision, drain_timeout_us,
+             out_committed);
+#else
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_selected_cleanup_shape_open (&resolver,
+            &directory, lease, row->old_provisioning_uuid, operation_uuid,
+            row->replacement_uuid, &graph->expected_main_identity,
+            &graph->staged_main_identity, &shape);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_selected_finalize_with_effect
+          (policy, row, &before, &after, finalize_selected_effect,
+            &effect, &result);
+  return rc;
+#endif
+#endif
+}
+"""
+
+DARWIN_FINALIZE_FIXTURE = """\
+static wyrelog_error_t
+darwin_finalize_selected (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactOfflineRestoreJournal *out_committed)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            operation_uuid, &row);
+  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL
+      || g_bytes_get_size (row->darwin_operation_evidence)
+      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, TRUE, &key, drain_timeout_us,
+            &quiescence);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+            (&resolver, &directory, lease, provenance.uuid,
+            &provenance.evidence, operation_uuid, row->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &expected));
+  if (rc == WYRELOG_E_OK && fresh)
+    rc = wyl_policy_store_graph_restore_selected_finalize_begin (policy,
+            row, &before, &after, &result);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_selected_finalize_with_effect
+          (policy, row, &before, &after, darwin_finalize_effect, &effect,
+            &result);
+  return rc;
+}
+"""
+
+DARWIN_FINALIZE_EFFECT_FIXTURE = """\
+static wyrelog_error_t
+darwin_finalize_effect
+  (const WylPolicyGraphRestoreReplacementRecord *current,
+    gpointer user_data)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (effect->lease, effect->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (effect->runtime, effect->key);
+  if (rc == WYRELOG_E_OK && (current->darwin_operation_evidence == NULL
+      || !evidence_equal (current->darwin_operation_evidence,
+      effect->evidence)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_execute
+            (effect->resolver, effect->directory, effect->lease,
+            effect->provenance->uuid, &effect->provenance->evidence,
+            effect->journal->operation_uuid, current->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes));
+  return rc;
+}
+"""
+
+SELECTED_PROVENANCE_FIXTURE = """\
+static wyrelog_error_t
+graph_selected_provenance_load (wyl_policy_store_t *policy,
+    const WylFactOfflineRestoreJournal *journal,
+    GraphProvenance *out_provenance)
+{
+  wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list_for_graph
+        (policy, journal->tenant_id, journal->selected_graph_id, &records);
+  if (record->phase != WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED
+      || !evidence_equal (record->darwin_operation_evidence,
+      row->darwin_operation_evidence))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && wyl_fact_graph_darwin_evidence_rebind (&selected,
+      row->replacement_uuid, row->old_provisioning_uuid,
+      graph->expected_main_identity.object, &out_provenance->evidence)
+      != WYRELOG_E_OK)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -1052,6 +1342,11 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_select_replacement_run":
         SELECT_RUN_FIXTURE,
     "darwin_select_replacement": DARWIN_SELECT_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_finalize_run":
+        FINALIZE_RUN_FIXTURE,
+    "darwin_finalize_selected": DARWIN_FINALIZE_FIXTURE,
+    "darwin_finalize_effect": DARWIN_FINALIZE_EFFECT_FIXTURE,
+    "graph_selected_provenance_load": SELECTED_PROVENANCE_FIXTURE,
 }
 
 
@@ -1085,6 +1380,54 @@ Z = "darwin_companion_recover"
 G = "darwin_companion_effect"
 S = "wyl_fact_offline_restore_graph_commit_select_replacement_run"
 D = "darwin_select_replacement"
+N = "wyl_fact_offline_restore_graph_commit_finalize_run"
+J = "darwin_finalize_selected"
+A = "darwin_finalize_effect"
+L = "graph_selected_provenance_load"
+FINALIZE_SHAPE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open\n"
+    "            (&resolver, &directory, lease, provenance.uuid,\n"
+    "            &provenance.evidence, operation_uuid, row->replacement_uuid,\n"
+    "            &graph->expected_main_identity, &graph->staged_main_identity,"
+    "\n"
+    "            graph->logical_bytes, &shape));\n"
+)
+FINALIZE_COMPARE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_directory_compare_darwin_replacement_evidence\n"
+    "              (&directory, row->replacement_uuid,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, graph->checksum, &expected));\n"
+)
+FINALIZE_BEGIN_LINES = (
+    "  if (rc == WYRELOG_E_OK && fresh)\n"
+    "    rc = wyl_policy_store_graph_restore_selected_finalize_begin (policy,"
+    "\n"
+    "            row, &before, &after, &result);\n"
+)
+FINALIZE_COMPLETE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_policy_store_graph_restore_selected_finalize_with_effect\n"
+    "          (policy, row, &before, &after, darwin_finalize_effect, &effect,"
+    "\n"
+    "            &result);\n"
+)
+FINALIZE_EARLY_EVIDENCE_LINES = (
+    "  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL\n"
+    "      || g_bytes_get_size (row->darwin_operation_evidence)\n"
+    "      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))\n"
+    "    rc = WYRELOG_E_POLICY;\n"
+)
+FINALIZE_RESOLVER_OPEN_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);\n"
+)
+FINALIZE_EXECUTE_CALL_LINE = (
+    "          (wyl_fact_graph_restore_darwin_selected_cleanup_execute\n"
+)
 SELECT_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
     "    rc = darwin_post_publish_shape (&resolver, &directory, lease,"
@@ -1502,6 +1845,133 @@ MUTANTS = (
         "            effect->lease, effect->journal, current,"
         " effect->provenance);\n",
         "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("finalize: Apple arm dropped", N, drop_apple_arm, "E_FINALIZE_ARMS"),
+    ("finalize: Darwin step called twice", N, replace(
+        "             out_committed);\n#else",
+        "             out_committed);\n"
+        "  rc = darwin_finalize_selected (policy, fact_root, runtime,"
+        " operation_uuid, expected_revision, drain_timeout_us,"
+        " out_committed);\n#else"), "E_FINALIZE_ROUTE"),
+    ("finalize: Apple arm executes directly", N, replace(
+        "             out_committed);\n#else",
+        "             out_committed);\n"
+        "  rc = wyl_fact_graph_restore_darwin_selected_cleanup_execute"
+        " (&resolver, &directory, lease, uuid, &evidence, operation_uuid,"
+        " replacement, &old_main, &new_main, size);\n#else"),
+     "E_FINALIZE_DIRECT"),
+    ("finalize: Linux arm calls the Darwin step", N, replace(
+        "  return rc;\n#endif",
+        "  rc = darwin_finalize_selected (policy, fact_root, runtime,"
+        " operation_uuid, expected_revision, drain_timeout_us,"
+        " out_committed);\n"
+        "  return rc;\n#endif"), "E_FINALIZE_LEAK"),
+    ("finalize: Linux arm takes the Darwin shape", N, replace(
+        "    rc = wyl_fact_graph_restore_selected_cleanup_shape_open"
+        " (&resolver,",
+        "    rc = wyl_fact_graph_restore_darwin_selected_cleanup_shape_open"
+        " (&resolver,"), "E_FINALIZE_LEAK"),
+    ("darwin finalize: ACTIVE loader swapped in", J, replace(
+        "    rc = graph_selected_provenance_load (policy,",
+        "    rc = graph_provenance_load (policy,"), "E_ROUTE_HELPER"),
+    ("darwin finalize: ACTIVE loader beside", J, replace(
+        "    rc = graph_selected_provenance_load (policy, &journal, row,"
+        " &provenance);\n",
+        "    rc = graph_selected_provenance_load (policy, &journal, row,"
+        " &provenance);\n"
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n"), "E_FINALIZE_CALLS"),
+    ("darwin finalize: early row-evidence refusal dropped", J,
+     replace(FINALIZE_EARLY_EVIDENCE_LINES, ""),
+     "E_FINALIZE_EARLY_EVIDENCE"),
+    ("darwin finalize: row-evidence refusal after the resolver open", J,
+     move_before(FINALIZE_RESOLVER_OPEN_LINES, FINALIZE_EARLY_EVIDENCE_LINES),
+     "E_FINALIZE_EARLY_EVIDENCE"),
+    ("darwin finalize: compare dropped", J,
+     replace(FINALIZE_COMPARE_LINES, ""), "E_FINALIZE_CALLS"),
+    ("darwin finalize: shape dropped", J,
+     replace(FINALIZE_SHAPE_LINES, ""), "E_FINALIZE_CALLS"),
+    ("darwin finalize: begin dropped", J,
+     replace(FINALIZE_BEGIN_LINES, ""), "E_FINALIZE_CALLS"),
+    ("darwin finalize: rebind called directly", J, replace(
+        FINALIZE_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_darwin_evidence_rebind (&expected, uuid,"
+        " old_uuid, object, &rebuilt);\n" + FINALIZE_SHAPE_LINES),
+     "E_FINALIZE_CALLS"),
+    ("darwin finalize: execute outside the effect", J, replace(
+        FINALIZE_BEGIN_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_restore_darwin_selected_cleanup_execute"
+        " (&resolver, &directory, lease, uuid, &evidence, operation_uuid,"
+        " replacement, &old_main, &new_main, size);\n"
+        + FINALIZE_BEGIN_LINES), "E_FINALIZE_CALLS"),
+    ("darwin finalize: Linux shape beside the Darwin one", J, replace(
+        FINALIZE_SHAPE_LINES,
+        FINALIZE_SHAPE_LINES
+        + "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_restore_selected_cleanup_shape_open"
+        " (&resolver, &directory, lease, old, operation_uuid, replacement,"
+        " &old_main, &new_main, &shape);\n"), "E_FINALIZE_CALLS"),
+    ("darwin finalize: begin after the completion", J,
+     move_before(FINALIZE_COMPLETE_LINES, FINALIZE_BEGIN_LINES),
+     "E_FINALIZE_ORDER"),
+    ("darwin finalize: compare after begin", J,
+     move_before(FINALIZE_BEGIN_LINES, FINALIZE_COMPARE_LINES),
+     "E_FINALIZE_ORDER"),
+    ("darwin finalize: shape after the compare", J,
+     move_before(FINALIZE_COMPARE_LINES, FINALIZE_SHAPE_LINES),
+     "E_FINALIZE_ORDER"),
+    ("darwin finalize: Linux effect", J, replace(
+        "&before, &after, darwin_finalize_effect,",
+        "&before, &after, finalize_selected_effect,"), "E_FINALIZE_EFFECT"),
+    ("darwin finalize: another expected row", J, replace(
+        "          (policy, row, &before, &after, darwin_finalize_effect,",
+        "          (policy, journal_row, &before, &after,"
+        " darwin_finalize_effect,"), "E_FINALIZE_EFFECT"),
+    ("darwin finalize: graph_commit_quiesce dropped", J, replace(
+        "    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,\n"
+        "            operation_uuid, encoded, row, TRUE, &key,"
+        " drain_timeout_us,\n"
+        "            &quiescence);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin finalize: check_runtime dropped", J, replace(
+        "    rc = check_runtime (runtime, &key);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin finalize: bind dropped", J, replace(
+        "    rc = wyl_policy_store_bind_fact_root_authorized (policy,"
+        " fact_root, lease);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("finalize effect: Linux execute instead", A, replace(
+        FINALIZE_EXECUTE_CALL_LINE,
+        "          (wyl_fact_graph_restore_selected_cleanup_execute\n"),
+     "E_ROUTE_HELPER"),
+    ("finalize effect: Linux execute beside", A, replace(
+        "  return rc;\n}",
+        "  rc = wyl_fact_graph_restore_selected_cleanup_execute (resolver,"
+        " directory, lease, old, operation_uuid, replacement, &old_main,"
+        " &new_main);\n"
+        "  return rc;\n}"), "E_FINALIZE_EFFECT_EXECUTE"),
+    ("finalize effect: no row evidence check", A, replace(
+        "  if (rc == WYRELOG_E_OK && (current->darwin_operation_evidence =="
+        " NULL\n"
+        "      || !evidence_equal (current->darwin_operation_evidence,\n"
+        "      effect->evidence)))\n"
+        "    rc = WYRELOG_E_POLICY;\n", ""), "E_FINALIZE_EFFECT_EVIDENCE"),
+    ("finalize effect: runtime check dropped", A, replace(
+        "    rc = check_runtime (effect->runtime, effect->key);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("selected loader: rebind removed", L, replace(
+        "wyl_fact_graph_darwin_evidence_rebind (&selected,",
+        "wyl_fact_graph_darwin_evidence_decode (&selected,"),
+     "E_FINALIZE_PROVENANCE"),
+    ("selected loader: ACTIVE record read", L, replace(
+        "WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED",
+        "WYL_POLICY_GRAPH_PROVISIONING_ACTIVE"), "E_FINALIZE_PROVENANCE"),
+    ("selected loader: row equality dropped", L, replace(
+        "      || !evidence_equal (record->darwin_operation_evidence,\n"
+        "      row->darwin_operation_evidence))\n", "      )\n"),
+     "E_FINALIZE_PROVENANCE"),
 )
 
 
