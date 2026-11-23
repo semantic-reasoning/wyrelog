@@ -4043,6 +4043,64 @@ test_service_token_reports_remote_error (void)
       "redirected");
 }
 
+#ifndef G_OS_WIN32
+static void
+test_login_parent_symlink (void)
+{
+  g_autofree gchar *root = g_dir_make_tmp ("wyctl-login-alias-XXXXXX", NULL);
+  g_assert_nonnull (root);
+  g_autofree gchar *real = g_build_filename (root, "real", NULL);
+  g_autofree gchar *alias = g_build_filename (root, "alias", NULL);
+  g_assert_cmpint (g_mkdir (real, 0700), ==, 0);
+  g_assert_cmpint (symlink ("real", alias), ==, 0);
+  g_autofree gchar *access_path = g_build_filename (alias, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (alias, "refresh", NULL);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener, .cancel = cancel, .response_status = 200,
+    .response_body = "{\"session_token\":\"session\",\"access_token\":\"new-access\","
+        "\"refresh_token\":\"new-refresh\",\"username\":\"alice\","
+        "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+        "\"session_state\":\"active\"}",
+  };
+  GThread *thread = g_thread_new ("login-alias", policy_check_server_thread, &server);
+  gchar *argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url,
+                    "--timeout-ms", "1000", "auth", "login", "--subject", "alice", "--skip-mfa",
+                    "--tenant", "__wr_default", "--token-output", access_path,
+                    "--refresh-token-output", refresh_path, NULL };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint status = 0;
+  run_child (argv, &out, &err, &status);
+  stop_test_server (thread, cancel);
+  g_assert_true (WIFEXITED (status));
+  g_assert_cmpint (WEXITSTATUS (status), ==, 0);
+  g_assert_cmpstr (err, ==, "");
+  g_assert_nonnull (server.request);
+  g_assert_nonnull (strstr (server.request, "POST /auth/login?"));
+  const gchar *names[] = { "access", "refresh" };
+  const gchar *tokens[] = { "new-access", "new-refresh" };
+  for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
+    g_autofree gchar *path = g_build_filename (real, names[i], NULL);
+    g_autofree gchar *bytes = NULL;
+    g_assert_true (g_file_get_contents (path, &bytes, NULL, NULL));
+    g_assert_cmpstr (bytes, ==, tokens[i]);
+    struct stat st;
+    g_assert_cmpint (g_lstat (path, &st), ==, 0);
+    g_assert_true (S_ISREG (st.st_mode));
+    g_assert_cmpuint (st.st_uid, ==, geteuid ());
+    g_assert_cmpuint (st.st_mode & 0777, ==, 0600);
+    g_assert_null (strstr (out, tokens[i]));
+    g_assert_null (strstr (err, tokens[i]));
+  }
+  g_free (server.request);
+  g_assert_cmpint (g_unlink (alias), ==, 0);
+  remove_dir_recursive (root);
+}
+#endif
+
 static void
 test_login_reports_remote_error (void)
 {
@@ -8170,6 +8228,9 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/wyctl/fact/physical-recompute", test_fact_physical_recompute);
   g_test_add_func ("/wyctl/login-remote-error", test_login_reports_remote_error);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/wyctl/login-parent-symlink", test_login_parent_symlink);
+#endif
   g_test_add_data_func ("/wyctl/login-existing-access-preflight",
       GINT_TO_POINTER (1), test_login_existing_output_prevents_request);
   g_test_add_data_func ("/wyctl/login-existing-refresh-preflight",

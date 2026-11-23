@@ -779,9 +779,17 @@ wyctl --daemon-url "$BASE_URL" auth logout \
   --refresh-token-file "$REFRESH_TOKEN"
 ```
 
-The two output files must be different protected paths. Refresh serializes
-with logout through a persistent sidecar lock. It replaces the refresh file
-first; if access-token replacement fails afterward, the prior access token
+The two output files must be different protected paths. On POSIX, preflight,
+creation, replacement, removal, and paired publication accept symlinks in
+any parent-directory component by resolving the parent first. The terminal
+token name is never resolved through a symlink. Both the alias path and its
+resolved target must have trusted, stable ancestry; see the intermediate-path
+scope below. On Windows, parent reparse components are rejected.
+
+Refresh serializes with logout through a persistent sidecar lock. On POSIX,
+the lock uses the resolved parent, so real and symlink spellings of the same
+token path share one lock. Refresh replaces the refresh file first; if
+access-token replacement fails afterward, the prior access token
 remains usable and another refresh can recover the pair. When refresh is
 recreating a missing access file and cannot remove an incomplete one it left
 behind, it prints `an incomplete file remains at <path>; delete it, then
@@ -2969,9 +2977,9 @@ wyctl --daemon-url "$BASE_URL" tenant data-credential issue --tenant acme \
   `insert`, `delete` or `update`; beyond that the daemon answers
   `409 data_credential_cap_exceeded`. The 90-day maximum and both caps are
   fixed defaults; no route or command changes them.
-- `--output` names a new file. wyctl refuses an existing file, a symlink or an
-  unsafe parent directory before sending anything, and leaves an existing
-  file untouched. It creates the file exclusively, with mode `0600`.
+- `--output` names a new file. wyctl refuses an existing destination (including
+  a terminal symlink) or an unsafe parent before sending anything, and leaves
+  an existing file untouched. It creates the file exclusively, with mode `0600`.
 
 The file holds exactly the exchange request, on one line:
 
@@ -4690,18 +4698,25 @@ can be confident the daemon was never contacted.
 
 #### Intermediate-Path Symlinks (Scope Statement)
 
-`O_NOFOLLOW` only refuses a terminal symlink. Intermediate path
-components are still resolved normally, so a setup where a parent
-directory is itself a symlink — or where a non-owner can write to a
-parent directory and substitute one — falls outside the safety
-guarantee. **Every directory on the path to the token file must be
-owned by the invoking user and not group/world-writable.** A typical
-safe layout is `~/.config/wyrelog/access-token` where `~/.config` is
-already operator-owned with the standard `0700` mode.
+POSIX token reads follow parent-directory symlinks. Preflight, protected
+creation, replacement, removal, paired publication, and refresh locking also
+accept parent aliases by resolving the parent directory first. Terminal token
+symlinks retain the refusal or occupied-destination checks described above.
 
-Closing the intermediate-component window would require
-Linux-only `openat2(RESOLVE_BENEATH)`. That is explicitly out of scope
-for the GA hardening pass.
+**Operators must ensure trusted, stable ancestry for both the alias path and
+its resolved target.** Each controlling directory and symlink must be under
+the invoking user's or a trusted administrator's control, protected from
+replacement by untrusted users. A private, user-owned `0700` directory such
+as `~/.config/wyrelog/` is a typical safe token location. These ancestor
+conditions are the operator's responsibility; the token-file ownership and
+mode checks do not establish them.
+
+Resolving a parent with `realpath` and then opening it does not provide
+race-free containment against ancestor substitution. After opening the
+parent, mutations use that directory descriptor, but untrusted changes before
+the open or between operations remain outside this contract. Defending such
+mutable ancestry would require additional descriptor-based traversal or
+platform-specific containment, beyond this POSIX token-file guarantee.
 
 ### Token-File Permission Requirements (Windows)
 

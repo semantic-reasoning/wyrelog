@@ -455,17 +455,16 @@ test_protected_pair_identifies_refresh_collision (void)
 static void
 test_refresh_lock_serializes_processes (void)
 {
-  g_autofree gchar *path = NULL;
-  gint fd = g_file_open_tmp ("wyctl-lock-XXXXXX", &path, NULL);
-  g_assert_cmpint (fd, >=, 0);
-  g_assert_true (g_close (fd, NULL));
-  g_unlink (path);
+  g_autofree gchar *root = g_dir_make_tmp ("wyctl-lock-XXXXXX", NULL);
+  g_assert_nonnull (root);
+  g_autofree gchar *parent = g_build_filename (root, "real", NULL);
+  g_autofree gchar *alias = g_build_filename (root, "alias", NULL);
+  g_assert_cmpint (g_mkdir (parent, 0700), ==, 0);
+  g_assert_cmpint (symlink ("real", alias), ==, 0);
+  g_autofree gchar *path = g_build_filename (parent, "token", NULL);
   g_assert_cmpint (wyctl_token_file_write_protected (path, "token", 5), ==,
       WYCTL_TOKEN_FILE_OK);
-  g_autofree gchar *parent = g_path_get_dirname (path);
-  g_autofree gchar *basename = g_path_get_basename (path);
-  g_autofree gchar *path_alias = g_strdup_printf ("%s/./%s", parent,
-          basename);
+  g_autofree gchar *path_alias = g_strdup_printf ("%s/./token", alias);
   WyctlTokenFileLock *parent_lock = NULL;
   g_assert_cmpint (wyctl_token_file_lock_refresh (path, &parent_lock), ==,
       WYCTL_TOKEN_FILE_OK);
@@ -475,6 +474,7 @@ test_refresh_lock_serializes_processes (void)
   g_assert_cmpint (child, >=, 0);
   if (child == 0) {
     close (pipe_fds[0]);
+    (void) write (pipe_fds[1], "r", 1);
     WyctlTokenFileLock *child_lock = NULL;
     if (wyctl_token_file_lock_refresh (path_alias, &child_lock)
         != WYCTL_TOKEN_FILE_OK)
@@ -485,6 +485,10 @@ test_refresh_lock_serializes_processes (void)
   }
   close (pipe_fds[1]);
   struct pollfd probe = { .fd = pipe_fds[0], .events = POLLIN };
+  g_assert_cmpint (poll (&probe, 1, 2000), ==, 1);
+  gchar ready = 0;
+  g_assert_cmpint (read (pipe_fds[0], &ready, 1), ==, 1);
+  g_assert_cmpint (ready, ==, 'r');
   g_assert_cmpint (poll (&probe, 1, 100), ==, 0);
   wyctl_token_file_unlock_refresh (parent_lock);
   g_assert_cmpint (poll (&probe, 1, 2000), ==, 1);
@@ -497,27 +501,167 @@ test_refresh_lock_serializes_processes (void)
   g_assert_cmpint (WEXITSTATUS (child_status), ==, 0);
   close (pipe_fds[0]);
   g_autofree gchar *lock_path = g_strconcat (path, ".lock", NULL);
-  g_unlink (lock_path);
-  g_unlink (path);
+  g_assert_cmpint (g_unlink (lock_path), ==, 0);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_unlink (alias), ==, 0);
+  g_assert_cmpint (g_rmdir (parent), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
 }
 #endif
 
 #ifndef G_OS_WIN32
 static void
-test_protected_writer_rejects_parent_symlink (void)
+assert_parent_alias_token (const gchar *path, const gchar *expected)
 {
-  g_autofree gchar *real_dir = g_dir_make_tmp ("wyctl-parent-XXXXXX", NULL);
-  g_assert_nonnull (real_dir);
-  g_autofree gchar *link_dir = g_strdup_printf ("%s-link", real_dir);
-  g_assert_cmpint (symlink (real_dir, link_dir), ==, 0);
-  g_autofree gchar *path = g_build_filename (link_dir, "token", NULL);
-  g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
-      !=, WYCTL_TOKEN_FILE_OK);
-  g_autofree gchar *target_path = g_build_filename (real_dir, "token", NULL);
-  g_assert_false (g_file_test (target_path, G_FILE_TEST_EXISTS));
-  g_unlink (link_dir);
-  g_rmdir (real_dir);
+  g_autofree gchar *token = NULL;
+  g_assert_cmpint (wyctl_token_file_read (path, &token), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpstr (token, ==, expected);
+  struct stat st;
+  g_assert_cmpint (g_lstat (path, &st), ==, 0);
+  g_assert_true (S_ISREG (st.st_mode));
+  g_assert_cmpuint (st.st_uid, ==, geteuid ());
+  g_assert_cmpuint (st.st_mode & 0777, ==, 0600);
 }
+
+/* #1557: preflight, create, replace and remove agree on direct and earlier
+ * parent aliases; terminal links retain their existing refusal contracts. */
+static void
+test_protected_parent_symlink (gconstpointer data)
+{
+  gboolean ancestor = GPOINTER_TO_INT (data) != 0;
+  g_autofree gchar *root = g_dir_make_tmp ("wyctl-parent-XXXXXX", NULL);
+  g_assert_nonnull (root);
+  g_autofree gchar *real = g_build_filename (root, "real", NULL);
+  g_autofree gchar *alias = g_build_filename (root, "alias", NULL);
+  g_assert_cmpint (g_mkdir (real, 0700), ==, 0);
+  g_assert_cmpint (symlink ("real", alias), ==, 0);
+  g_autofree gchar *parent = ancestor ? g_build_filename (real, "inner", NULL)
+      : g_strdup (real);
+  if (ancestor)
+    g_assert_cmpint (g_mkdir (parent, 0700), ==, 0);
+  g_autofree gchar *alias_parent = ancestor ? g_build_filename (alias, "inner", NULL)
+      : g_strdup (alias);
+  g_autofree gchar *path = g_build_filename (alias_parent, "token", NULL);
+  g_autofree gchar *target = g_build_filename (parent, "token", NULL);
+  g_assert_cmpint (wyctl_token_file_check_available (path), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "old-token", 9), ==,
+      WYCTL_TOKEN_FILE_OK);
+  assert_parent_alias_token (target, "old-token");
+  g_assert_cmpint (wyctl_token_file_check_available (path), ==, WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "collision", 9), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  assert_parent_alias_token (target, "old-token");
+  gchar *leftover = (gchar *) "not cleared";
+  g_assert_cmpint (wyctl_token_file_replace_protected (path, "new-token", 9,
+      &leftover), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_null (leftover);
+  assert_parent_alias_token (target, "new-token");
+
+  g_autofree gchar *terminal = g_build_filename (alias_parent, "terminal", NULL);
+  g_assert_cmpint (symlink ("token", terminal), ==, 0);
+  g_assert_cmpint (wyctl_token_file_check_available (terminal), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpint (wyctl_token_file_write_protected (terminal, "collision", 9), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpint (wyctl_token_file_replace_protected (terminal, "collision", 9,
+      &leftover), ==, WYCTL_TOKEN_FILE_SYMLINK);
+  g_assert_null (leftover);
+  g_assert_cmpint (wyctl_token_file_remove_protected (terminal), ==, WYCTL_TOKEN_FILE_IO);
+  g_autofree gchar *token = NULL;
+  g_assert_cmpint (wyctl_token_file_read (terminal, &token), ==, WYCTL_TOKEN_FILE_SYMLINK);
+  g_assert_null (token);
+  assert_parent_alias_token (target, "new-token");
+  g_assert_cmpint (g_unlink (terminal), ==, 0);
+  g_assert_cmpint (wyctl_token_file_remove_protected (path), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_false (g_file_test (target, G_FILE_TEST_EXISTS));
+  if (ancestor)
+    g_assert_cmpint (g_rmdir (parent), ==, 0);
+  g_assert_cmpint (g_unlink (alias), ==, 0);
+  g_assert_cmpint (g_rmdir (real), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+}
+
+static void
+test_protected_pair_parent_symlink (void)
+{
+  g_autofree gchar *root = g_dir_make_tmp ("wyctl-pair-alias-XXXXXX", NULL);
+  g_assert_nonnull (root);
+  g_autofree gchar *real = g_build_filename (root, "real", NULL);
+  g_autofree gchar *alias = g_build_filename (root, "alias", NULL);
+  g_assert_cmpint (g_mkdir (real, 0700), ==, 0);
+  g_assert_cmpint (symlink ("real", alias), ==, 0);
+  g_autofree gchar *refresh = g_build_filename (alias, "refresh", NULL);
+  g_autofree gchar *access = g_build_filename (alias, "access", NULL);
+  g_autofree gchar *real_refresh = g_build_filename (real, "refresh", NULL);
+  g_autofree gchar *real_access = g_build_filename (real, "access", NULL);
+  const gchar *failed = (const gchar *) "not cleared";
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh, "refresh-new", 11,
+      access, "access-new", 10, &failed), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_null (failed);
+  assert_parent_alias_token (real_refresh, "refresh-new");
+  assert_parent_alias_token (real_access, "access-new");
+  g_assert_cmpint (wyctl_token_file_remove_protected (refresh), ==, WYCTL_TOKEN_FILE_OK);
+  /* The access collision rolls back only the newly created refresh file. */
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh, "refresh-new", 11,
+      access, "collision", 9, &failed), ==, WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpstr (failed, ==, access);
+  g_assert_false (g_file_test (real_refresh, G_FILE_TEST_EXISTS));
+  assert_parent_alias_token (real_access, "access-new");
+  g_assert_cmpint (wyctl_token_file_remove_protected (access), ==, WYCTL_TOKEN_FILE_OK);
+  /* Two spellings of one destination cannot publish a pair or leave its first file. */
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (real_refresh, "refresh-new", 11,
+      refresh, "access-new", 10, &failed), ==, WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpstr (failed, ==, refresh);
+  g_assert_false (g_file_test (real_refresh, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (g_unlink (alias), ==, 0);
+  g_assert_cmpint (g_rmdir (real), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+}
+
+static void
+test_parent_resolution_failures (void)
+{
+  g_autofree gchar *root = g_dir_make_tmp ("wyctl-parent-errors-XXXXXX", NULL);
+  g_assert_nonnull (root);
+  g_autofree gchar *loop = g_build_filename (root, "loop", NULL);
+  g_autofree gchar *dangling = g_build_filename (root, "dangling", NULL);
+  g_autofree gchar *file = g_build_filename (root, "file", NULL);
+  g_assert_cmpint (symlink ("loop", loop), ==, 0);
+  g_assert_cmpint (symlink ("absent", dangling), ==, 0);
+  g_assert_true (g_file_set_contents (file, "parent", -1, NULL));
+  const gchar *parents[] = { loop, dangling, file };
+  const WyctlTokenFileStatus expected[] = { WYCTL_TOKEN_FILE_UNSAFE_PARENT,
+                                            WYCTL_TOKEN_FILE_IO, WYCTL_TOKEN_FILE_UNSAFE_PARENT };
+  for (gsize i = 0; i < G_N_ELEMENTS (parents); i++) {
+    g_autofree gchar *path = g_build_filename (parents[i], "token", NULL);
+    g_assert_cmpint (wyctl_token_file_check_available (path), ==, expected[i]);
+    g_assert_cmpint (wyctl_token_file_write_protected (path, "token", 5), ==, expected[i]);
+  }
+  g_assert_cmpint (g_unlink (loop), ==, 0);
+  g_assert_cmpint (g_unlink (dangling), ==, 0);
+  g_assert_cmpint (g_unlink (file), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+}
+
+static void
+test_parent_resolution_permission_denied (void)
+{
+  if (geteuid () == 0) {
+    g_test_skip ("root bypasses directory permissions");
+    return;
+  }
+  g_autofree gchar *root = g_dir_make_tmp ("wyctl-parent-mode-XXXXXX", NULL);
+  g_assert_nonnull (root);
+  g_autofree gchar *path = g_build_filename (root, "token", NULL);
+  g_assert_cmpint (g_chmod (root, 0000), ==, 0);
+  WyctlTokenFileStatus check = wyctl_token_file_check_available (path);
+  WyctlTokenFileStatus write = wyctl_token_file_write_protected (path, "token", 5);
+  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+  g_assert_cmpint (check, ==, WYCTL_TOKEN_FILE_PERMISSION_DENIED);
+  g_assert_cmpint (write, ==, WYCTL_TOKEN_FILE_PERMISSION_DENIED);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+}
+
 #else
 static gboolean
 create_windows_directory_symlink (const gchar *target, const gchar *link)
@@ -1020,10 +1164,8 @@ test_replace_cleanup_enoent_is_io (void)
   }
 }
 
-/* Unlike the protected writer, replace accepts a target reached through a
- * symlinked parent: it resolves the parent first. A leftover is then named
- * inside the resolved directory, not through the link, at every cleanup
- * site. */
+/* #1557: both create and replace accept a symlinked parent. A leftover is
+ * named inside the resolved directory at every cleanup site. */
 static void
 test_replace_leftover_resolves_parent_symlink (void)
 {
@@ -1036,10 +1178,12 @@ test_replace_leftover_resolves_parent_symlink (void)
     g_assert_cmpint (symlink ("real", link), ==, 0);
     g_autofree gchar *real_token = g_build_filename (real, "token", NULL);
     g_autofree gchar *link_token = g_build_filename (link, "token", NULL);
-    g_assert_cmpint (wyctl_token_file_write_protected (real_token, "old-token",
+    g_assert_cmpint (wyctl_token_file_write_protected (link_token, "old-token",
         9), ==, WYCTL_TOKEN_FILE_OK);
+    g_assert_cmpint (wyctl_token_file_check_available (link_token), ==,
+        WYCTL_TOKEN_FILE_ALREADY_EXISTS);
     g_assert_cmpint (wyctl_token_file_write_protected (link_token, "x", 1), ==,
-        WYCTL_TOKEN_FILE_UNSAFE_PARENT);
+        WYCTL_TOKEN_FILE_ALREADY_EXISTS);
     wyctl_token_file_arm_faults_once (replace_faults[i]
         | WYCTL_TOKEN_FILE_FAULT_CLEANUP_UNLINK);
     g_autofree gchar *leftover = NULL;
@@ -1367,8 +1511,16 @@ main (int argc, char **argv)
       test_refresh_lock_serializes_processes);
 #endif
 #ifndef G_OS_WIN32
-  g_test_add_func ("/wyctl/token-file/protected-writer-rejects-parent-symlink",
-      test_protected_writer_rejects_parent_symlink);
+  g_test_add_data_func ("/wyctl/token-file/protected-direct-parent-symlink",
+      GINT_TO_POINTER (0), test_protected_parent_symlink);
+  g_test_add_data_func ("/wyctl/token-file/protected-ancestor-symlink",
+      GINT_TO_POINTER (1), test_protected_parent_symlink);
+  g_test_add_func ("/wyctl/token-file/protected-pair-parent-symlink",
+      test_protected_pair_parent_symlink);
+  g_test_add_func ("/wyctl/token-file/parent-resolution-failures",
+      test_parent_resolution_failures);
+  g_test_add_func ("/wyctl/token-file/parent-resolution-permission-denied",
+      test_parent_resolution_permission_denied);
 #else
   g_test_add_func ("/wyctl/token-file/windows-parent-reparse-rejected",
       test_windows_parent_reparse_is_rejected);

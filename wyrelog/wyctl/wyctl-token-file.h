@@ -64,7 +64,15 @@ WyctlTokenFileStatus wyctl_token_file_read (const gchar * path,
 /* Wipe and release bytes returned by wyctl_token_file_read. */
 void wyctl_token_file_free_sensitive (gchar * value, gsize capacity);
 
-/* Create a protected, no-replace bearer-token destination. */
+/* Protected destinations resolve the existing parent directory on POSIX,
+ * accepting symlinks in any parent component, as read/replace/remove and
+ * refresh locking already do. The terminal token name is not resolved:
+ * no-replace creates and replacement validation retain their no-follow
+ * checks. All alias and resolved ancestor names must be trusted and stable;
+ * resolving then opening a directory does not contain hostile ancestor swaps.
+ * Windows instead rejects parent reparse components.
+ *
+ * Create a protected, no-replace bearer-token destination. */
 /* Check the destination without following its final component. OK means it
  * was absent at the time of the check; the protected writer still enforces
  * no-replace when it creates the file. */

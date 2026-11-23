@@ -528,6 +528,24 @@ wyctl_token_file_free_sensitive (gchar *value, gsize capacity)
   g_free (value);
 }
 
+#ifndef G_OS_WIN32
+/* Match replace/remove/refresh locking: parent aliases are permitted on
+ * POSIX, under the documented trusted, stable ancestor-path boundary.
+ * Resolve only the parent; terminal token names must never be followed. */
+static int
+wyctl_token_file_open_resolved_parent (const gchar *parent)
+{
+  gchar *resolved = realpath (parent, NULL);
+  if (resolved == NULL)
+    return -1;
+  int dirfd = open (resolved, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  int saved_errno = errno;
+  free (resolved);
+  errno = saved_errno;
+  return dirfd;
+}
+#endif
+
 WyctlTokenFileStatus
 wyctl_token_file_check_available (const gchar *path)
 {
@@ -549,7 +567,7 @@ wyctl_token_file_check_available (const gchar *path)
 #else
   g_autofree gchar *parent = g_path_get_dirname (path);
   g_autofree gchar *basename = g_path_get_basename (path);
-  int dirfd = open (parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  int dirfd = wyctl_token_file_open_resolved_parent (parent);
   if (dirfd < 0) {
     if (errno == ELOOP || errno == ENOTDIR)
       return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
@@ -727,7 +745,7 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   WYCTL_TOKEN_FILE_FAULT_BEGIN_WRITE ();
   g_autofree gchar *parent = g_path_get_dirname (path);
   g_autofree gchar *basename = g_path_get_basename (path);
-  int dirfd = open (parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  int dirfd = wyctl_token_file_open_resolved_parent (parent);
   if (dirfd < 0) {
     if (errno == ELOOP || errno == ENOTDIR)
       return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
