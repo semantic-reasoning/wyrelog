@@ -59,6 +59,12 @@ test('wyctl-private-tmpdir-runner-self-test', python3,
   args : [files('test-wyctl-private-tmpdir-runner.py'),
     files('run-wyctl-with-private-tmpdir.py')])
 
+# Process cleanup coverage needs no daemon, database, or feature options.
+test('e2e-daemon', python3,
+  args : [files('test-e2e-daemon.py')],
+  timeout : 30,
+)
+
 test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
   'test-fact-offline-backup-manifest.c',
   '../wyrelog/fact/offline-backup-manifest-private.c',

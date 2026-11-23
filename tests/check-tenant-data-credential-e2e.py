@@ -23,6 +23,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from e2e_daemon import stop_daemon
+
 # WYL_LOG_LEVEL_INFO in wyrelog/wyl-log-private.h.
 LOG_LEVEL_INFO = 3
 GUARD = {'guard_timestamp': '123', 'guard_loc_class': 'trusted',
@@ -318,9 +320,7 @@ def run(daemon, wyctl, templates, log_max_level):
                   file=sys.stderr)
             raise
         finally:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                process.wait(timeout=30)
+            stop_daemon(process, primary_error=sys.exc_info()[1])
 
 
 if __name__ == '__main__':
