@@ -15,6 +15,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from e2e_daemon import stop_daemon
+
 
 def check_self_service(root, base, admin, cli, http, arm, restart):
     """Create-only humans keep their grant while exercising isolated tenants."""
@@ -251,8 +253,7 @@ def run(daemon, wyctl, templates, inspector):
             auth_helper = Path(__file__).with_name('human-user-auth-fixture.py')
             subprocess.run([sys.executable, str(auth_helper), base, str(admin), 'admin', str(root / 'admin.seed')], check=True, timeout=60)
             def restart():
-                process.terminate()
-                process.wait(timeout=30)
+                stop_daemon(process)
                 start_daemon()
                 subprocess.run([sys.executable, str(auth_helper), base, str(admin), 'admin', str(root / 'admin.seed')], check=True, timeout=60)
             check_self_service(root, base, admin, cli, http, arm, restart)
@@ -335,8 +336,7 @@ def run(daemon, wyctl, templates, inspector):
             cli('policy', 'role-grant', '--subject', 'alice', '--role', 'wr.system_admin', '--scope', '__wr_default', token=admin, success=False)
             assert 'subject=alice state=deleted' in cli('user', 'list', token=admin).stdout
             assert 'alice-data' not in cli('tenant', 'list', token=admin).stdout
-            process.terminate()
-            process.wait(timeout=30)
+            stop_daemon(process)
             subprocess.run([inspector, "--inspect-deleted", str(root / "policy.sqlite"), str(key), "alice"], check=True, timeout=30)
             start_daemon()
             assert http('/auth/login', query={'username': 'alice'}, status=403) == absent
@@ -350,9 +350,7 @@ def run(daemon, wyctl, templates, inspector):
             print(log.read_text(encoding='utf-8'), file=sys.stderr)
             raise
         finally:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                process.wait(timeout=30)
+            stop_daemon(process, primary_error=sys.exc_info()[1])
 
 
 if __name__ == '__main__':
