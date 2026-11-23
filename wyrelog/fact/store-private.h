@@ -97,6 +97,9 @@ typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 void wyl_fact_store_attach_physical_quota_context
   (wyl_fact_store_t *store, wyl_policy_store_t *policy_store,
     WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease);
+/* Only before publishing a fresh exclusive writable open, with no active
+ * mutation/finalizer. Borrowed replay leases do not prove orphan ownership. */
+wyrelog_error_t wyl_fact_store_reconcile_physical_quota (wyl_fact_store_t *store);
 void wyl_fact_store_attach_physical_quota_policy
   (wyl_fact_store_t *store, wyl_policy_store_t *policy_store);
 #endif

@@ -20394,6 +20394,117 @@ wyl_policy_store_reserve_fact_physical_quota_attempt_evidence
              &operation, requested_bytes, out_status);
 }
 
+/* A fresh exclusive open proves that all prior graph attempts have stopped.
+ * Unlike per-attempt settlement, recovery cannot rely on the lost writer's
+ * inventory identity. Keep that identity intact and observe allocation anew. */
+wyrelog_error_t
+wyl_policy_store_reconcile_fact_physical_quota (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease)
+{
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || graph_id == NULL || *graph_id == '\0' || namespace_ == NULL || lease == NULL)
+    return WYRELOG_E_INVALID;
+  if (!sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  guint64 held_pending = 0, held_reconciling = 0;
+  g_autofree gchar *first_request = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT request_id,requested_bytes,applied_bytes,state FROM "
+          "fact_physical_quota_reservations WHERE tenant_id=? AND graph_id=? "
+          "AND state IN ('pending','reconciling') ORDER BY request_id;", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, graph_id);
+  while (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step == SQLITE_DONE) break;
+    if (step != SQLITE_ROW || sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 1) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 2) != SQLITE_INTEGER
+        || sqlite3_column_int64 (stmt, 1) < 0 || sqlite3_column_int64 (stmt, 2) < 0) {
+      rc = WYRELOG_E_IO;
+      break;
+    }
+    if (first_request == NULL)
+      first_request = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    gboolean pending = g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 3), "pending") == 0;
+    guint64 bytes = (guint64) sqlite3_column_int64 (stmt, pending ? 1 : 2);
+    guint64 *held = pending ? &held_pending : &held_reconciling;
+    if (*held > G_MAXINT64 - bytes) rc = WYRELOG_E_IO;
+    else *held += bytes;
+  }
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  /* Avoid making ordinary no-hold opens depend on inventory stability. */
+  if (rc == WYRELOG_E_OK && first_request == NULL) {
+    rc = fact_physical_quota_commit (store);
+    if (rc != WYRELOG_E_OK) wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  guint64 committed = 0, pending = 0, reconciling = 0, charged = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_usage_load (store, tenant_id, &committed, &pending, &reconciling);
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "SELECT (SELECT coalesce(sum(charged_bytes),0) FROM fact_physical_quota_graph_charges WHERE tenant_id=?1),"
+            "(SELECT coalesce(sum(requested_bytes),0) FROM fact_physical_quota_reservations WHERE tenant_id=?1 AND state='pending'),"
+            "(SELECT coalesce(sum(applied_bytes),0) FROM fact_physical_quota_reservations WHERE tenant_id=?1 AND state='reconciling');", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK) {
+    guint64 expected[] = { committed, pending, reconciling };
+    if (sqlite3_step (stmt) != SQLITE_ROW) rc = WYRELOG_E_IO;
+    for (guint n = 0; rc == WYRELOG_E_OK && n < G_N_ELEMENTS (expected); n++) {
+      if (sqlite3_column_type (stmt, n) != SQLITE_INTEGER
+          || sqlite3_column_int64 (stmt, n) < 0
+          || (guint64) sqlite3_column_int64 (stmt, n) != expected[n])
+        rc = WYRELOG_E_IO;
+    }
+  }
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  g_autoptr (WylFactArtifactPhysicalQuotaEvidence) evidence = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+          (namespace_, lease, &evidence);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (tenant_id, wyl_fact_artifact_physical_quota_evidence_tenant_id (evidence)) != 0
+      || g_strcmp0 (graph_id, wyl_fact_artifact_physical_quota_evidence_graph_id (evidence)) != 0))
+    rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_graph_charge_load (store, tenant_id, graph_id, &charged);
+  guint64 observed = evidence == NULL ? 0 : wyl_fact_artifact_physical_quota_evidence_allocated_bytes (evidence);
+  guint64 growth = observed > charged ? observed - charged : 0;
+  if (rc == WYRELOG_E_OK && (observed > G_MAXINT64 || held_pending > pending
+      || held_reconciling > reconciling || committed > G_MAXINT64 - growth))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_graph_charge_raise (store, tenant_id, graph_id, observed);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_usage_update (store, tenant_id, committed + growth,
+            pending - held_pending, reconciling - held_reconciling);
+  /* Attribute observed growth once, including when every held bound was zero. */
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_physical_quota_reservations SET state='settled',"
+            "applied_bytes=CASE WHEN request_id=?1 THEN ?2 ELSE 0 END,updated_at=unixepoch() "
+            "WHERE tenant_id=?3 AND graph_id=?4 AND state IN ('pending','reconciling');", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, first_request);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2, (sqlite3_int64) growth) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, tenant_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, graph_id);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK) rc = fact_physical_quota_commit (store);
+  if (rc != WYRELOG_E_OK) wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,

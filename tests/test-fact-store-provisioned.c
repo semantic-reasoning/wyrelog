@@ -898,7 +898,76 @@ physical_assert_invariant (sqlite3 *db)
       "(SELECT coalesce(sum(charged_bytes),0) FROM fact_physical_quota_graph_charges g "
       "WHERE g.tenant_id=u.tenant_id);"), ==, 0);
   g_assert_cmpint (physical_scalar (db,
+      "SELECT count(*) FROM fact_tenant_physical_quota_usage u WHERE pending_bytes != "
+      "(SELECT coalesce(sum(requested_bytes),0) FROM fact_physical_quota_reservations r "
+      "WHERE r.tenant_id=u.tenant_id AND state='pending') OR reconciling_bytes != "
+      "(SELECT coalesce(sum(applied_bytes),0) FROM fact_physical_quota_reservations r "
+      "WHERE r.tenant_id=u.tenant_id AND state='reconciling');"), ==, 0);
+  g_assert_cmpint (physical_scalar (db,
       "SELECT count(*) FROM fact_open_reservations WHERE state != 'settled';"), ==, 0);
+}
+
+/* Physical holds from a writer that exited before finalization. */
+static void
+physical_abandon (PhysicalFixture *fx, const gchar *request, guint64 bytes,
+    gboolean reconciling)
+{
+  WylPolicyFactPhysicalQuotaOperation op = {
+    .tenant_id = tenant_id, .graph_id = graph_id, .request_id = request,
+    .inventory_generation = "lost-writer",
+    .inventory_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  };
+  WylPolicyFactPhysicalOperationStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (fx->policy_store,
+      &op, bytes, &status), ==, WYRELOG_E_OK);
+  if (reconciling)
+    g_assert_cmpint (wyl_policy_store_cancel_fact_physical_quota (fx->policy_store,
+        &op, FALSE, &status), ==, WYRELOG_E_OK);
+}
+
+static void
+test_physical_reconcile_open (void)
+{
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  physical_abandon (&fx, "outcome", 64, FALSE);
+  physical_abandon (&fx, "zero", 0, FALSE);
+  physical_abandon (&fx, "unknown", 128, TRUE);
+  /* A second live writer cannot acquire the lease and must not heal holds. */
+  wyl_fact_store_t *contender = NULL;
+  g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &contender), !=, WYRELOG_E_OK);
+  g_assert_null (contender);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  WylPolicyFactPhysicalQuotaStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (fx.policy_store,
+      tenant_id, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.pending_bytes, ==, 64);
+  g_assert_cmpuint (before.reconciling_bytes, ==, 128);
+  /* Shared readers may observe the graph, but cannot release writer holds. */
+  g_assert_cmpint (open_live (fx.policy_store, fx.root, FALSE, &fx.store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  g_autofree gchar *held = reservation_state (fx.policy_store, "outcome");
+  g_assert_cmpstr (held, ==, "pending");
+  g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), ==, WYRELOG_E_OK);
+  assert_physical_settled (fx.policy_store, &after);
+  g_assert_cmpuint (after.committed_bytes, >=, before.committed_bytes);
+  g_autofree gchar *zero = reservation_state (fx.policy_store, "zero");
+  g_autofree gchar *unknown = reservation_state (fx.policy_store, "unknown");
+  g_assert_cmpstr (zero, ==, "settled");
+  g_assert_cmpstr (unknown, ==, "settled");
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (fx.store, &fx.schema, &fx.batch, &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  physical_assert_invariant (policy_db (fx.policy_store));
+  g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), ==, WYRELOG_E_OK);
+  WylPolicyFactPhysicalQuotaStatus repeated = { 0 };
+  assert_physical_settled (fx.policy_store, &repeated);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), ==, WYRELOG_E_OK);
+  assert_physical_settled (fx.policy_store, &after);
+  g_assert_cmpuint (after.committed_bytes, ==, repeated.committed_bytes);
+  physical_fixture_clear (&fx);
 }
 
 static const gchar recompute_request[] = "0ujtsYcgvSTl8PAuAdqWYSMnLOv";
@@ -953,6 +1022,142 @@ physical_namespace (PhysicalFixture *fx)
   wyl_fact_graph_directory_clear (&directory);
   g_ptr_array_unref (records);
   return namespace_;
+}
+
+/* Stable recovery preserves other scopes, never reduces the high-water mark,
+ * and accounts growth only once even when several reservations are healed. */
+static void
+test_physical_reconcile_accounting (gconstpointer data)
+{
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  physical_abandon (&fx, "outcome", 64, FALSE);
+  physical_abandon (&fx, "zero", 0, FALSE);
+  physical_abandon (&fx, "unknown", 128, TRUE);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  sqlite3 *db = policy_db (fx.policy_store);
+  exec_sqlite_ok (db,
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+      "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
+      "('tenant-provision','sibling','file:///sibling','/sibling',1,'tenant-provision',0,1,1,NULL);"
+      "INSERT INTO fact_physical_quota_graph_charges VALUES ('tenant-provision','sibling',1024,1);"
+      "INSERT INTO fact_physical_quota_reservations SELECT request_id,tenant_id,'sibling',"
+      "inventory_generation,inventory_digest,requested_bytes,applied_bytes,state,created_at,updated_at "
+      "FROM fact_physical_quota_reservations WHERE graph_id='graph-provision' AND state IN ('pending','reconciling');"
+      "UPDATE fact_tenant_physical_quota_usage SET committed_bytes=committed_bytes+1024,pending_bytes=pending_bytes+64,reconciling_bytes=reconciling_bytes+128;"
+      "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,updated_at) VALUES ('isolated','tenant-owner',0,1,1);"
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,schema_version,owner_scope,sealed,created_at,updated_at,sealed_at) "
+      "VALUES ('isolated','graph-provision','file:///isolated','/isolated',1,'isolated',0,1,1,NULL);"
+      "INSERT INTO fact_physical_quota_graph_charges VALUES ('isolated','graph-provision',512,1);"
+      "INSERT INTO fact_tenant_physical_quota_usage VALUES ('isolated',512,64,128);"
+      "INSERT INTO fact_physical_quota_reservations SELECT request_id,'isolated',graph_id,"
+      "inventory_generation,inventory_digest,requested_bytes,applied_bytes,state,created_at,updated_at "
+      "FROM fact_physical_quota_reservations WHERE tenant_id='tenant-provision' AND graph_id='graph-provision' AND state IN ('pending','reconciling');");
+  gboolean high_water = GPOINTER_TO_UINT (data) != 0;
+  if (high_water)
+    exec_sqlite_ok (db,
+        "UPDATE fact_physical_quota_graph_charges SET charged_bytes=charged_bytes+16777216 WHERE tenant_id='tenant-provision' AND graph_id='graph-provision';"
+        "UPDATE fact_tenant_physical_quota_usage SET committed_bytes=committed_bytes+16777216 WHERE tenant_id='tenant-provision';");
+  else
+    exec_sqlite_ok (db,
+        "UPDATE fact_physical_quota_graph_charges SET charged_bytes=0 WHERE tenant_id='tenant-provision' AND graph_id='graph-provision';"
+        "UPDATE fact_tenant_physical_quota_usage SET committed_bytes=1024 WHERE tenant_id='tenant-provision';");
+  physical_assert_invariant (db);
+  gint64 before = graph_charge (fx.policy_store);
+  g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  physical_assert_invariant (db);
+  gint64 after = graph_charge (fx.policy_store);
+  if (high_water) g_assert_cmpint (after, ==, before);
+  else g_assert_cmpint (after, >, before);
+  g_assert_cmpint (physical_scalar (db,
+      "SELECT coalesce(sum(applied_bytes),0) FROM fact_physical_quota_reservations WHERE tenant_id='tenant-provision' AND graph_id='graph-provision' AND inventory_generation='lost-writer';"), ==, after - before);
+  g_assert_cmpint (physical_scalar (db,
+      "SELECT count(*) FROM fact_physical_quota_reservations WHERE state IN ('pending','reconciling');"), ==, 6);
+  g_assert_cmpint (physical_scalar (db,
+      "SELECT pending_bytes FROM fact_tenant_physical_quota_usage WHERE tenant_id='tenant-provision';"), ==, 64);
+  g_assert_cmpint (physical_scalar (db,
+      "SELECT reconciling_bytes FROM fact_tenant_physical_quota_usage WHERE tenant_id='tenant-provision';"), ==, 128);
+  g_assert_cmpint (physical_scalar (db,
+      "SELECT committed_bytes+pending_bytes+reconciling_bytes FROM fact_tenant_physical_quota_usage WHERE tenant_id='isolated';"), ==, 704);
+  physical_fixture_clear (&fx);
+}
+
+static void
+test_physical_reconcile_failure (gconstpointer data)
+{
+  guint mode = GPOINTER_TO_UINT (data);
+  PhysicalFixture fx;
+  physical_fixture_init (&fx);
+  physical_abandon (&fx, "outcome", 64, FALSE);
+  physical_abandon (&fx, "unknown", 128, TRUE);
+  g_clear_pointer (&fx.store, wyl_fact_store_close);
+  sqlite3 *db = policy_db (fx.policy_store);
+  WylFactArtifactNamespace *ns = physical_namespace (&fx);
+  WylFactArtifactMutationLease *lease = NULL;
+  if (mode == 6)
+    g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard (ns, &lease), ==, WYRELOG_E_OK);
+  else
+    g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (ns, &lease), ==, WYRELOG_E_OK);
+  if (mode == 0)
+    wyl_fact_artifact_namespace_set_test_fault (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+  else if (mode == 1)
+    exec_sqlite_ok (db, "CREATE TEMP TRIGGER fail_reconcile BEFORE UPDATE ON fact_physical_quota_reservations BEGIN SELECT RAISE(ABORT,'recovery fault'); END;");
+  else if (mode == 2)
+    exec_sqlite_ok (db, "UPDATE fact_tenant_physical_quota_usage SET pending_bytes=pending_bytes+1;");
+  else if (mode == 3)
+    exec_sqlite_ok (db, "UPDATE fact_tenant_physical_quota_usage SET reconciling_bytes=reconciling_bytes+1;");
+  else if (mode == 4)
+    exec_sqlite_ok (db, "UPDATE fact_tenant_physical_quota_usage SET committed_bytes=committed_bytes+1;");
+  else if (mode == 5)
+    exec_sqlite_ok (db,
+        "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,schema_version,owner_scope,sealed,created_at,updated_at,sealed_at) "
+        "VALUES ('tenant-provision','overflow','file:///overflow','/overflow',1,'tenant-provision',0,1,1,NULL);"
+        "UPDATE fact_physical_quota_graph_charges SET charged_bytes=0;"
+        "INSERT INTO fact_physical_quota_graph_charges VALUES ('tenant-provision','overflow',9223372036854775807,1);"
+        "UPDATE fact_tenant_physical_quota_usage SET committed_bytes=9223372036854775807;");
+  WylPolicyFactPhysicalQuotaStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (fx.policy_store, tenant_id, &before), ==, WYRELOG_E_OK);
+  gint64 charge = graph_charge (fx.policy_store);
+  g_assert_cmpint (wyl_policy_store_reconcile_fact_physical_quota (fx.policy_store, tenant_id, graph_id, ns, lease), !=, WYRELOG_E_OK);
+  if (mode == 0)
+    g_assert_true (wyl_fact_artifact_namespace_test_fault_was_consumed (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE));
+  g_assert_true (wyl_policy_store_is_autocommit (fx.policy_store));
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (fx.policy_store, tenant_id, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.committed_bytes, ==, before.committed_bytes);
+  g_assert_cmpuint (after.pending_bytes, ==, before.pending_bytes);
+  g_assert_cmpuint (after.reconciling_bytes, ==, before.reconciling_bytes);
+  g_assert_cmpint (graph_charge (fx.policy_store), ==, charge);
+  g_autofree gchar *pending = reservation_state (fx.policy_store, "outcome");
+  g_autofree gchar *reconciling = reservation_state (fx.policy_store, "unknown");
+  g_assert_cmpstr (pending, ==, "pending");
+  g_assert_cmpstr (reconciling, ==, "reconciling");
+  if (mode == 0) {
+    g_assert_cmpint (wyl_policy_store_reconcile_fact_physical_quota (fx.policy_store, tenant_id, graph_id, ns, lease), ==, WYRELOG_E_OK);
+    physical_assert_invariant (db);
+    /* A no-hold replay must not enumerate inventory or consume its fault. */
+    wyl_fact_artifact_namespace_set_test_fault (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE);
+    g_assert_cmpint (wyl_policy_store_reconcile_fact_physical_quota (fx.policy_store, tenant_id, graph_id, ns, lease), ==, WYRELOG_E_OK);
+    g_assert_false (wyl_fact_artifact_namespace_test_fault_was_consumed (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE));
+    g_autoptr (WylFactArtifactPhysicalQuotaEvidence) unavailable = NULL;
+    g_assert_cmpint (wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease (ns, lease, &unavailable), !=, WYRELOG_E_OK);
+    g_assert_true (wyl_fact_artifact_namespace_test_fault_was_consumed (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INVENTORY_PRE_FINALIZE));
+  }
+  wyl_fact_artifact_mutation_lease_free (lease);
+  wyl_fact_artifact_namespace_free (ns);
+  if (mode == 1) {
+    /* Recovery failure publishes no handle and releases its newly acquired
+     * native open. A later open can acquire it again and heal the same holds. */
+    g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), !=, WYRELOG_E_OK);
+    g_assert_null (fx.store);
+    physical_assert_invariant (db);
+    g_assert_cmpint (physical_scalar (db, "SELECT count(*) FROM fact_physical_quota_reservations WHERE state IN ('pending','reconciling');"), ==, 2);
+    exec_sqlite_ok (db, "DROP TRIGGER fail_reconcile;");
+    g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), ==, WYRELOG_E_OK);
+    g_clear_pointer (&fx.store, wyl_fact_store_close);
+    physical_assert_invariant (db);
+  }
+  physical_fixture_clear (&fx);
 }
 
 #ifndef G_OS_WIN32
@@ -1799,6 +2004,21 @@ test_physical_quota_fallback (gconstpointer data)
     g_assert_cmpint (present, ==, c->mode == FALLBACK_PRECOMMIT_EXPORT_FAILS
         || c->mode == FALLBACK_PRECOMMIT_SETTLE_FAILS ? 0 : 1);
   }
+  if (c->mode == FALLBACK_UNKNOWN_EXPORT_FAILS) {
+    g_clear_pointer (&fx.store, wyl_fact_store_close);
+    g_assert_cmpint (open_live (fx.policy_store, fx.root, TRUE, &fx.store), ==, WYRELOG_E_OK);
+    WylPolicyFactPhysicalQuotaStatus recovered = { 0 };
+    assert_physical_settled (fx.policy_store, &recovered);
+    g_assert_cmpuint (recovered.committed_bytes, >=, status.committed_bytes);
+    g_assert_cmpint (physical_apply (&fx, c->update, &fx.batch, &inserted), ==, WYRELOG_E_OK);
+    gint64 present = -1;
+    g_assert_cmpint (wyl_fact_store_test_query_int64 (fx.store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id='outcome';", &present), ==, WYRELOG_E_OK);
+    g_assert_cmpint (present, ==, 1);
+    g_assert_cmpint (physical_apply (&fx, c->update, &fx.other, &inserted), ==, WYRELOG_E_OK);
+    g_assert_true (inserted);
+    assert_physical_settled (fx.policy_store, &recovered);
+  }
   physical_fixture_clear (&fx);
 }
 #endif
@@ -1807,6 +2027,18 @@ int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_data_func ("/fact/store-provisioned/physical-quota/reconcile/growth-scopes", GUINT_TO_POINTER (0), test_physical_reconcile_accounting);
+  g_test_add_data_func ("/fact/store-provisioned/physical-quota/reconcile/high-water-scopes", GUINT_TO_POINTER (1), test_physical_reconcile_accounting);
+  const gchar *recovery_failures[] = { "unstable", "write-failure", "corrupt-pending", "corrupt-reconciling", "corrupt-committed", "overflow", "reader-guard" };
+  for (guint i = 0; i < G_N_ELEMENTS (recovery_failures); i++) {
+#if defined(G_OS_WIN32) && !defined(WYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS)
+    if (i == 0) continue;
+#endif
+    g_autofree gchar *name = g_strdup_printf ("/fact/store-provisioned/physical-quota/reconcile/%s", recovery_failures[i]);
+    g_test_add_data_func (name, GUINT_TO_POINTER (i), test_physical_reconcile_failure);
+  }
+
+  g_test_add_func ("/fact/store-provisioned/physical-quota/reconcile/open", test_physical_reconcile_open);
   g_test_add_func ("/fact/store-provisioned/physical-quota/recompute/never-materialized", test_physical_recompute_never_materialized);
   const gchar *busy_cases[] = { "settle-append", "settle-update", "settle-exhausted-append", "settle-exhausted-update" };
   for (guint i = 0; i < G_N_ELEMENTS (busy_cases); i++) {
