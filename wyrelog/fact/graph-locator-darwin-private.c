@@ -200,6 +200,29 @@ wyl_fact_graph_darwin_evidence_equal (
          && memcmp (left->bytes, right->bytes, sizeof left->bytes) == 0;
 }
 
+wyrelog_error_t
+wyl_fact_graph_darwin_evidence_rebind (
+  const WylFactGraphDarwinOperationEvidence *source,
+  const gchar *source_operation_uuid, const gchar *operation_uuid,
+  guint64 artifact_file_id,
+  WylFactGraphDarwinOperationEvidence *out_evidence)
+{
+  if (out_evidence != NULL)
+    memset (out_evidence, 0, sizeof *out_evidence);
+  if (source == NULL || source_operation_uuid == NULL
+      || operation_uuid == NULL || out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_darwin_evidence_decode (source->bytes,
+          sizeof source->bytes, source_operation_uuid, &decoded);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_fact_graph_darwin_evidence_encode (operation_uuid,
+             decoded.bytes + VOLUME_UUID_OFFSET,
+             read_u64_be (decoded.bytes + GRAPH_FILE_ID_OFFSET),
+             artifact_file_id, out_evidence);
+}
+
 #ifdef __APPLE__
 typedef struct
 {

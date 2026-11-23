@@ -352,6 +352,10 @@ void wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+#ifdef __APPLE__
+void wyl_fact_offline_restore_graph_commit_select_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+#endif
 /* The persisted replacement-row comparison behind check_persisted. */
 gboolean wyl_fact_offline_restore_graph_commit_row_equal_for_test
   (const WylPolicyGraphRestoreReplacementRecord *a,

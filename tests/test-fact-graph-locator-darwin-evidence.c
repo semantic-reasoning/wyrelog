@@ -122,6 +122,80 @@ test_encode_rejects_invalid_fields (void)
         &evidence), ==, WYRELOG_E_INVALID);
 }
 
+/* #1303 U5-8: the old ACTIVE evidence is rebuilt from the replacement's
+ * volume and graph identifiers, the old operation and the old main's file ID
+ * once selection has deleted the record that held it. */
+static void
+test_rebind (void)
+{
+  static const gchar other_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070545";
+  const guint8 volume_uuid[16] = {
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+  };
+  const guint64 artifact = G_GUINT64_CONSTANT (0x2122232425262728);
+  WylFactGraphDarwinOperationEvidence source = valid_evidence ();
+  /* The golden encoding with the other operation and the new artifact. */
+  const guint8 expected[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE] = {
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x01, 0x89, 0x0f, 0x47, 0x3c, 0x4b, 0x7c, 0xc2,
+    0xb8, 0xc4, 0xdc, 0x0c, 0x0c, 0x07, 0x05, 0x45,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+  };
+
+  WylFactGraphDarwinOperationEvidence rebound = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      operation_uuid, other_uuid, artifact, &rebound), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (rebound.bytes, sizeof rebound.bytes, expected,
+      sizeof expected);
+
+  /* Rebinding back to the source operation and artifact is the identity. */
+  WylFactGraphDarwinOperationEvidence back = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&rebound,
+      other_uuid, operation_uuid, G_GUINT64_CONSTANT (0x1112131415161718),
+      &back), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_graph_darwin_evidence_equal (&back, &source));
+
+  const WylFactGraphDarwinOperationEvidence zero = { 0 };
+  /* The source must decode against the operation it claims. */
+  memset (&rebound, 0xa5, sizeof rebound);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      other_uuid, other_uuid, artifact, &rebound), ==, WYRELOG_E_POLICY);
+  g_assert_cmpmem (&rebound, sizeof rebound, &zero, sizeof zero);
+
+  WylFactGraphDarwinOperationEvidence malformed = source;
+  memset (malformed.bytes + 24, 0, 16);
+  memset (&rebound, 0xa5, sizeof rebound);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&malformed,
+      operation_uuid, other_uuid, artifact, &rebound), ==, WYRELOG_E_POLICY);
+  g_assert_cmpmem (&rebound, sizeof rebound, &zero, sizeof zero);
+
+  /* The rebuilt fields obey the encoder's rules. */
+  memset (&rebound, 0xa5, sizeof rebound);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      operation_uuid, other_uuid, 0, &rebound), ==, WYRELOG_E_INVALID);
+  g_assert_cmpmem (&rebound, sizeof rebound, &zero, sizeof zero);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      operation_uuid, other_uuid, G_GUINT64_CONSTANT (0x0102030405060708),
+      &rebound), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      operation_uuid, "01890f47-3c4b-6cc2-b8c4-dc0c0c070545", artifact,
+      &rebound), ==, WYRELOG_E_INVALID);
+  g_assert_cmpmem (&rebound, sizeof rebound, &zero, sizeof zero);
+
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (NULL,
+      operation_uuid, other_uuid, artifact, &rebound), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source, NULL,
+      other_uuid, artifact, &rebound), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      operation_uuid, NULL, artifact, &rebound), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_rebind (&source,
+      operation_uuid, other_uuid, artifact, NULL), ==, WYRELOG_E_INVALID);
+}
+
 static WylFactGraphDarwinVolumeObservation
 valid_volume_observation (void)
 {
@@ -211,6 +285,7 @@ main (int argc, char **argv)
       test_strict_decode);
   g_test_add_func ("/fact/darwin-evidence/encode-rejects-invalid-fields",
       test_encode_rejects_invalid_fields);
+  g_test_add_func ("/fact/darwin-evidence/rebind", test_rebind);
   g_test_add_func ("/fact/darwin-evidence/native-observation-classifier",
       test_native_observation_classifier);
   g_test_add_func ("/fact/darwin-evidence/cross-volume-rejected",
