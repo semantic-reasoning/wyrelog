@@ -981,6 +981,50 @@ test_verify (void)
   g_assert_cmpint (after.last_used_at_us, ==, NOW + 10);
 }
 
+/* A credential created by a clock that ran ahead verifies, and records its
+ * first use at its creation (#1497). */
+static void
+test_verify_clock_behind (void)
+{
+  g_autoptr (wyl_policy_store_t) store = open_fixture (NULL);
+  g_auto (WylDataCredentialInfo) info = { 0 };
+  wyl_service_credential_secret_t *secret = NULL;
+  g_assert_cmpint (issue (store, WYL_DATA_CREDENTIAL_OP_QUERY, DAY,
+      NOW + 6 * HOUR, &info, &secret), ==, WYRELOG_E_OK);
+  g_autofree gchar *text = g_strdup (encoded (secret));
+  wyl_service_credential_secret_clear (&secret);
+
+  g_auto (WylDataCredentialInfo) verified = { 0 };
+  g_assert_cmpint (verify (store, info.credential_id, text, NOW + 5 * HOUR,
+      &verified), ==, WYRELOG_E_OK);
+  g_assert_cmpint (verified.last_used_at_us, ==, NOW + 6 * HOUR);
+  g_auto (WylDataCredentialInfo) stored = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      info.credential_id, &stored), ==, WYRELOG_E_OK);
+  g_assert_cmpint (stored.last_used_at_us, ==, NOW + 6 * HOUR);
+
+  /* Still behind: verified, and last use stays at the creation. */
+  g_assert_cmpint (verify (store, info.credential_id, text,
+      NOW + 5 * HOUR + HOUR / 2, NULL), ==, WYRELOG_E_OK);
+  g_auto (WylDataCredentialInfo) again = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      info.credential_id, &again), ==, WYRELOG_E_OK);
+  g_assert_cmpint (again.last_used_at_us, ==, NOW + 6 * HOUR);
+
+  /* A clock past the creation is recorded as it is. */
+  g_auto (WylDataCredentialInfo) later = { 0 };
+  g_assert_cmpint (verify (store, info.credential_id, text, NOW + 7 * HOUR,
+      &later), ==, WYRELOG_E_OK);
+  g_assert_cmpint (later.last_used_at_us, ==, NOW + 7 * HOUR);
+
+  /* A wrong secret behind the clock is still answered AUTH.  That a refusal
+   * records nothing is test_verify's. */
+  g_autofree gchar *wrong = g_strdup (text);
+  wrong[0] = wrong[0] == 'A' ? 'B' : 'A';
+  g_assert_cmpint (verify (store, info.credential_id, wrong, NOW + 5 * HOUR,
+      NULL), ==, WYRELOG_E_AUTH);
+}
+
 static void
 test_revoke_and_bulk (void)
 {
@@ -1925,6 +1969,8 @@ main (int argc, char **argv)
   g_test_add_func ("/data-credential/rotate-clock-behind",
       test_rotate_clock_behind);
   g_test_add_func ("/data-credential/verify", test_verify);
+  g_test_add_func ("/data-credential/verify-clock-behind",
+      test_verify_clock_behind);
   g_test_add_func ("/data-credential/revoke-and-bulk", test_revoke_and_bulk);
   g_test_add_func ("/data-credential/lifecycle-transfer",
       test_lifecycle_transfer);

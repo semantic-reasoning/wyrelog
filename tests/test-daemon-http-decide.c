@@ -25424,11 +25424,12 @@ data_credential_request (ServiceDenialEnv *env, const gchar *token,
 }
 
 /* Issues straight through the store, as the storage unit does, so the list
- * route can be exercised before any issue route exists. */
+ * route can be exercised before any issue route exists.  The encoded secret
+ * goes to *out_secret when it is not NULL. */
 static void
 seed_data_credential_at (wyl_policy_store_t *store, const gchar *tenant,
     const gchar *issuer, guint32 operations, gint64 now_us,
-    WylDataCredentialInfo *out)
+    WylDataCredentialInfo *out, gchar **out_secret)
 {
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
@@ -25444,6 +25445,9 @@ seed_data_credential_at (wyl_policy_store_t *store, const gchar *tenant,
       issuer, request, operations, NULL, 0, G_TIME_SPAN_DAY,
       now_us, out, &secret, &replayed), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+  if (out_secret != NULL)
+    *out_secret = g_strdup (wyl_service_credential_secret_peek_encoded (secret,
+            NULL));
   wyl_service_credential_secret_clear (&secret);
 }
 
@@ -25452,7 +25456,7 @@ seed_data_credential (wyl_policy_store_t *store, const gchar *tenant,
     const gchar *issuer, guint32 operations, WylDataCredentialInfo *out)
 {
   seed_data_credential_at (store, tenant, issuer, operations,
-      g_get_real_time (), out);
+      g_get_real_time (), out, NULL);
 }
 
 static gchar *
@@ -25774,7 +25778,7 @@ check_data_credential_revoke_clock_ahead (void)
   WylDataCredentialInfo ahead = { 0 };
   seed_data_credential_at (store, "dc-1474", "dc-alice",
       WYL_DATA_CREDENTIAL_OP_QUERY, g_get_real_time () + G_TIME_SPAN_HOUR,
-      &ahead);
+      &ahead, NULL);
   g_autoptr (GPtrArray) none = g_ptr_array_new_with_free_func (g_free);
   guint rows_before = data_credential_audit_rows (store, none, NULL, NULL);
 
@@ -25839,7 +25843,7 @@ check_data_credential_rotate_clock_ahead (void)
   WylDataCredentialInfo ahead = { 0 };
   seed_data_credential_at (store, "dc-1474", "dc-alice",
       WYL_DATA_CREDENTIAL_OP_QUERY, g_get_real_time () + G_TIME_SPAN_HOUR,
-      &ahead);
+      &ahead, NULL);
   g_autoptr (GPtrArray) secrets = g_ptr_array_new_with_free_func (g_free);
   guint wipes = 0;
   guint rows_before = data_credential_audit_rows (store, secrets, NULL, NULL);
@@ -26836,6 +26840,58 @@ data_credential_bearer_resolves (ServiceDenialEnv *env, const gchar *bearer,
           "dc-1475", NULL, resolves ? 403 : 401);
   if (resolves)
     g_assert_cmpstr (body, ==, "{\"error\":\"data_credential_denied\"}");
+}
+
+/* #1497: a credential created by a clock that ran ahead of the daemon's
+ * exchanges, records its first use at its creation, and its bearer
+ * resolves.  A later clock is recorded as it is. */
+static void
+check_data_credential_exchange_clock_ahead (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *alice = data_credential_use_fixture (&env);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  WylDataCredentialInfo ahead = { 0 };
+  g_autofree gchar *secret = NULL;
+  seed_data_credential_at (store, "dc-1475", "dc-alice",
+      WYL_DATA_CREDENTIAL_OP_QUERY, g_get_real_time () + G_TIME_SPAN_HOUR,
+      &ahead, &secret);
+  g_assert_nonnull (secret);
+
+  g_autofree gchar *token = data_credential_bearer (&env, ahead.credential_id,
+          secret);
+  WylDataCredentialInfo info = { 0 };
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &info), ==, WYRELOG_E_OK);
+  g_assert_cmpint (info.last_used_at_us, ==, ahead.created_at_us);
+  wyl_data_credential_info_clear (&info);
+  gboolean issuer_named = FALSE;
+  g_assert_cmpuint (data_token_exchange_audit_rows (store,
+      ahead.credential_id, &issuer_named), ==, 1);
+  g_assert_true (issuer_named);
+  data_credential_bearer_resolves (&env, token, TRUE);
+
+  /* Still behind: exchanged again, last use unchanged. */
+  g_autofree gchar *again = data_credential_bearer (&env,
+          ahead.credential_id, secret);
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &info), ==, WYRELOG_E_OK);
+  g_assert_cmpint (info.last_used_at_us, ==, ahead.created_at_us);
+  wyl_data_credential_info_clear (&info);
+  g_assert_cmpuint (data_token_exchange_audit_rows (store,
+      ahead.credential_id, &issuer_named), ==, 2);
+
+  /* Past the creation, the clock is recorded as it is. */
+  wyl_daemon_http_advance_data_credential_clock_for_test (env.http.server,
+      2 * G_TIME_SPAN_HOUR);
+  g_autofree gchar *later = data_credential_bearer (&env,
+          ahead.credential_id, secret);
+  g_assert_cmpint (wyl_policy_store_data_credential_lookup (store,
+      ahead.credential_id, &info), ==, WYRELOG_E_OK);
+  g_assert_cmpint (info.last_used_at_us, >, ahead.created_at_us);
+  wyl_data_credential_info_clear (&info);
+  wyl_data_credential_info_clear (&ahead);
+  service_denial_env_clear (&env);
 }
 
 static guint
@@ -29214,6 +29270,7 @@ main (void)
   check_data_credential_recovery_pending ();
 #ifdef WYL_HAS_AUDIT
   check_data_credential_exchange_contract ();
+  check_data_credential_exchange_clock_ahead ();
   check_data_credential_never_routes ();
 #endif
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
