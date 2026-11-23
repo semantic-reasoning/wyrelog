@@ -605,6 +605,46 @@ wyrelog_error_t wyl_fact_graph_restore_selected_cleanup_execute
     const gchar *restore_uuid, const gchar *replacement_uuid,
     const WylFactArtifactInventoryIdentity *expected_old_main,
     const WylFactArtifactInventoryIdentity *expected_new_main);
+#ifdef __APPLE__
+/* Darwin selected cleanup (ADR 0006, "Restore replacement evidence").  No
+ * companion, so never PARTIAL.  DUAL is the post-publication namespace that
+ * wyl_fact_graph_restore_darwin_post_publish_shape_open proves, with
+ * old_evidence the old main's evidence rebuilt from the restore_selected
+ * record.  TERMINAL is that namespace without the rollback name:
+ * `facts.duckdb` is expected_new_main by device and inode, one link, 0600,
+ * owned, of logical_bytes, at most `facts.duckdb.lock` beside it, which must
+ * not be expected_old_main, and nothing else.  TERMINAL proves neither the
+ * new main's bytes nor its evidence, so the caller's replacement compare is
+ * mandatory on both shapes.  Read-only; no witness or descriptor escapes;
+ * out_shape is INVALID on failure. */
+wyrelog_error_t wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    guint64 logical_bytes, WylFactGraphRestoreSelectedCleanupShape *out_shape);
+/* The same caller obligations as the Linux execute.  Success means one
+ * thing on every call: the directory fsync and a final TERMINAL proof of
+ * the graph directory.  From DUAL it first holds the old main through the
+ * RETAINED_ROLLBACK evidence witness, revalidates it and unlinks the
+ * rollback name; it then refuses if the held, evidence-proved object still
+ * has a link.  That refusal detects interference during this call only; it
+ * neither proves that the removed name was the old main nor that the old
+ * main is gone.  A failure may leave TERMINAL, and a retry from fresh
+ * journal and shape observations succeeds on its TERMINAL proof alone, even
+ * if the old main survives outside the graph directory.  The rollback object
+ * is never proved by its device and inode alone. */
+wyrelog_error_t wyl_fact_graph_restore_darwin_selected_cleanup_execute
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    guint64 logical_bytes);
+#endif
 /* For a durable RESERVED row, classify the replacement basename once and
  * prove only the selected layout. A completed link may precede the policy
  * phase CAS after a crash. This is an observation, not sync evidence. */

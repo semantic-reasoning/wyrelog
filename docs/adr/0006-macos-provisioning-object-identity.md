@@ -286,7 +286,10 @@ holds durability only in memory, so a transition admitted afresh after
 the steps that follow; the stage it flushes must be the request's staged main.
 Every one of them renames onto an absent name
 or flushes; `FINALIZE`, the only delete, stays refused for a provisioned main
-until the provisioning record's cleanup is journaled. `PUBLISH` re-pins the
+until the provisioning record's cleanup is journaled. That is the transition
+machine's `FINALIZE` operation, and it stays refused on macOS too: a
+selected restore's cleanup is a locator path of its own (see "Restore
+replacement evidence"), not that operation. `PUBLISH` re-pins the
 stage it moves, not the object at the rollback name, so a caller must
 recapture and reauthorize before each step rather than reuse an authorization
 across a restart. macOS adopts this reasoning for its restore witness,
@@ -367,12 +370,13 @@ the replacement evidence, its compare form names that object too. The
 evidence execute stops at `PUBLISHED_DURABLE` with `FINALIZE` next. The
 companion step (see "Restore replacement evidence") then binds the replacement
 evidence and advances the replacement row, and selection (see "Restore
-replacement evidence") then takes the restore to `selected_pending_cleanup`;
-`FINALIZE`, `RETIRE_STAGE`, promotion and the resume dispatcher still
+replacement evidence") then takes the restore to `selected_pending_cleanup`,
+and `FINALIZE` (see "Restore replacement evidence") then takes it to
+`FINALIZED`; `RETIRE_STAGE`, promotion and the resume dispatcher still
 refuse, so a macOS graph restore stops there. None of it is reachable while
 macOS commit admission refuses; these steps are proved by tests that reach
-the decision directly, and the companion step and selection by tests that
-call them directly.
+the decision directly, and the companion step, selection and `FINALIZE` by
+tests that call them directly.
 
 ## Restore replacement evidence
 
@@ -468,18 +472,64 @@ Selection deletes the only record that holds the old main's evidence, yet
 name. The old evidence is a function of values that outlive the record: the
 journal's old provisioning operation and old main file ID, and the volume
 UUID and graph directory file ID, which the replacement evidence shares
-because both were taken from the same held graph directory. macOS
-`FINALIZE` still refuses. When it is ported it must rebuild the old evidence
-from those values, with the replacement evidence taken from the
-`restore_selected` record, and prove the old main at the rollback name
-through the same `RETAINED_ROLLBACK` evidence witness, under the same
-capability gate, as every step before it. No step proves the rollback object
-by its device and inode alone. Selection checks the premise while it still
-can: it rebuilds the old evidence in the same way and refuses unless the
-result equals the stored bytes of the record it is about to delete. A
+because both were taken from the same held graph directory. Selection checks
+that premise while it still can: it rebuilds the old evidence from those
+values and refuses unless the result equals the stored bytes of the record
+it is about to delete.
+
+The macOS `FINALIZE` step takes a `selected_pending_cleanup` restore to
+`FINALIZED`. Under the root writer lease and quiescence, with the journal
+predicate of the Linux step, it refuses a row without evidence before it
+reads the old evidence, the namespace or the main. It loads the
+`restore_selected` record, which must be the graph's only record and carry
+the row's evidence, and rebuilds the old evidence from it with the journal's
+old provisioning operation and old main file ID. Inside each `FINALIZE`
+transaction the store's selection postcondition
+(`restore_selection_postcondition_locked` in `wyrelog/policy/store.c`)
+requires the `restore_selected` record's evidence to be the row's, and the
+row is immutable in `selected_pending_cleanup`, so the bytes loaded under the
+lease are the bytes the transaction commits against. The cleanup namespace
+has two accepted shapes and no partial one, as there is no companion link.
+`DUAL` is the published namespace the companion step proves, the old main at
+the rollback name proved by the rebuilt evidence through the same
+`RETAINED_ROLLBACK` evidence witness. `TERMINAL` is that namespace without the
+rollback name: the new main by the journal's device, inode and logical size,
+at most a lock that is not the old main, and nothing else. The capability gate
+is the one every step before it passes: the witness compares the rebuilt
+evidence through the held descriptor's volume UUID and file ID, and the
+replacement compare runs the volume preflight. No step proves the rollback
+object by its device and inode alone.
+
+A fresh `FINALIZE` requires `DUAL`. It compares the stored replacement
+evidence through a fresh descriptor, the only proof of the new main's bytes
+and evidence on either shape, journals the attempt (`FINALIZE` pending) and
+then, in one policy transaction, requires the row's evidence to be the bytes
+it compared, opens the witness on the old main, revalidates it, unlinks the
+rollback name, flushes the directory, proves `TERMINAL` and CASes
+`FINALIZED`. The acceptance criterion of `FINALIZE` is one rule on every
+call: a `TERMINAL` proof of the graph directory, so the old main has no name
+left there. After the unlink the step also refuses if the held,
+evidence-proved object still has a link. That check detects interference
+during this call only (a same-user actor swapping, linking or removing the
+rollback name after the last revalidation); it is not a guarantee that the
+old main is gone, and it does not claim that the removed name was that
+object. A pending `FINALIZE`, which only a durable begin from `DUAL`
+produces, also accepts `TERMINAL`, and so does the transaction of a fresh
+call, as on Linux. A failure after the unlink rolls back the CAS but not the
+unlink, leaving `TERMINAL` with `FINALIZE` pending, and the next call
+finalizes from it if its `TERMINAL` proof holds. So after an interfered call
+the retry can finalize with the old main surviving outside the graph
+directory; a second name inside the directory fails that proof instead and
+is an operator wedge. Every other locator refusal is a policy refusal. A
 remount or reboot between selection and `FINALIZE` changes the device number
-that the witness also compares, so `FINALIZE` then refuses as an operator
-wedge, the same liveness every step after `RETAIN` already has.
+the witness and the `TERMINAL` inventory compare, so `FINALIZE` then refuses
+as an operator wedge, the liveness every step after `RETAIN` already has;
+after the unlink and before the CAS it makes the `TERMINAL` retry such a
+wedge. A `FINALIZED`
+macOS journal is the end of the direct-call path for now: the terminal proof
+the daemon's restore handler calls for it
+(`wyl_fact_offline_restore_graph_commit_finalized_prove_terminal`) still
+fails closed on macOS, and porting it is the next unit (#1303 U5-10).
 
 | Durable observation | Required recovery result |
 | --- | --- |
@@ -488,7 +538,9 @@ wedge, the same liveness every step after `RETAIN` already has.
 | `companion_synced`, evidence absent (macOS) | Fail closed at the companion step, at mark and at selection; no recapture; operator wedge. |
 | `companion_synced`, evidence present, the old evidence rebuilds from it, the namespace and compare hold (macOS) | Select: copy the evidence into `restore_selected`, delete the old `ACTIVE` record and advance the row, in one transaction. |
 | `companion_synced`, the old `ACTIVE` evidence does not rebuild from the replacement evidence and the journal (macOS) | Fail closed at selection before the namespace is read; the old record stays; operator wedge. |
-| `selected_pending_cleanup` (macOS) | No step runs yet; `FINALIZE`, when ported, proves the old main by the old evidence rebuilt from the `restore_selected` evidence and the journal, and a mismatch or a changed device is an operator wedge. |
+| `selected_pending_cleanup`, `FINALIZE` not begun (macOS) | `FINALIZE` requires `DUAL`, the old main proved at the rollback name by the old evidence rebuilt from the `restore_selected` evidence and the journal; a mismatch, an absent rollback name or a changed device is an operator wedge. |
+| `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
+| `FINALIZED` (macOS) | No step runs yet; every replay refuses, and the terminal proof fails closed (#1303 U5-10). |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
 | `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |
