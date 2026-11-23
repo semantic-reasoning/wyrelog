@@ -3047,6 +3047,13 @@ wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota_attempt_evidence
     const WylFactArtifactPhysicalQuotaEvidence *evidence,
     guint64 requested_bytes,
     WylPolicyFactPhysicalOperationStatus *out_status);
+/* Recover preexisting holds before publishing a newly opened writable store.
+ * Caller holds the exact exclusive graph lease through return and guarantees
+ * no live attempt/finalizer uses it. Captures fresh evidence itself, preserves
+ * the graph high-water charge, and settles all graph holds atomically. */
+wyrelog_error_t wyl_policy_store_reconcile_fact_physical_quota
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease);
 wyrelog_error_t wyl_policy_store_settle_fact_physical_quota
   (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,

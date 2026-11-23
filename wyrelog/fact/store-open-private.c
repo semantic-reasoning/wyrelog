@@ -197,6 +197,13 @@ open_provisioned_graph_observed
     rc = wyl_fact_open_reservation_adopt_native (reservation);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_open_reservation_mark_active (reservation);
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  /* This fresh lifetime exclusive lease excludes prior attempt finalizers.
+   * Never infer orphan ownership from a shared reader or borrowed replay lease.
+   * Maintenance recompute retains its explicit refusal of outstanding holds. */
+  if (rc == WYRELOG_E_OK && writable && allow_recovery)
+    rc = wyl_fact_store_reconcile_physical_quota (*out_store);
+#endif
   if (rc == WYRELOG_E_OK)
     wyl_fact_store_observe_open (*out_store, resource_recorder);
   if (rc != WYRELOG_E_OK) {

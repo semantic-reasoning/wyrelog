@@ -427,6 +427,17 @@ wyl_fact_store_attach_physical_quota_context
   store->physical_quota_lease = lease;
 }
 
+wyrelog_error_t
+wyl_fact_store_reconcile_physical_quota (wyl_fact_store_t *store)
+{
+  if (store == NULL || store->physical_quota_policy == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_policy_store_reconcile_fact_physical_quota
+           (store->physical_quota_policy, store->identity_tenant_id,
+             store->identity_graph_id, store->physical_quota_namespace,
+             store->physical_quota_lease);
+}
+
 void
 wyl_fact_store_attach_physical_quota_policy
   (wyl_fact_store_t *store, wyl_policy_store_t *policy_store)
