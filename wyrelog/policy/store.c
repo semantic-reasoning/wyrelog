@@ -50006,6 +50006,11 @@ wyl_policy_store_data_credential_verify (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_NOT_FOUND || (rc == WYRELOG_E_OK && !match))
     rc = WYRELOG_E_AUTH;
   if (rc == WYRELOG_E_OK) {
+    /* As in the revocations, a credential created by a clock that ran
+     * ahead records its use at its creation rather than failing the CHECK
+     * (#1497).  Expiry was judged above at now_us itself.  The write and
+     * the forward-only guard share the one value. */
+    gint64 used_at_us = MAX (now_us, info.created_at_us);
     sqlite3_stmt *stmt = NULL;
     rc = prepare_stmt (store->db,
             "UPDATE data_credentials SET last_used_at_us=?2 WHERE "
@@ -50013,7 +50018,7 @@ wyl_policy_store_data_credential_verify (wyl_policy_store_t *store,
             "(last_used_at_us IS NULL OR last_used_at_us<?2)", &stmt);
     if (rc == WYRELOG_E_OK
         && (bind_text (stmt, 1, credential_id) != WYRELOG_E_OK
-        || sqlite3_bind_int64 (stmt, 2, now_us) != SQLITE_OK
+        || sqlite3_bind_int64 (stmt, 2, used_at_us) != SQLITE_OK
         || sqlite3_step (stmt) != SQLITE_DONE))
       rc = WYRELOG_E_IO;
     sqlite3_finalize (stmt);

@@ -2470,12 +2470,13 @@ wyrelog_error_t wyl_policy_store_foreach_service_credential_event
  * a SYSTEM administrator, even while the tenant is sealed) and who may change
  * settings.
  *
- * now_us is the caller's clock and must not run backwards.  A write with a
- * now_us earlier than the credential's created_at_us is refused by a CHECK
- * constraint and returns WYRELOG_E_IO, except in the revocations below:
- * wyl_policy_store_data_credential_revoke, the predecessor of a rotation
- * and the lifecycle revocations clamp to it.  No other ordering against
- * stored timestamps is enforced.
+ * now_us is the caller's clock, and it may step back.  Judgments such as
+ * expiry and the caps are made at now_us itself, so a step back can change
+ * their answer, but no write is refused because of it: where now_us is
+ * earlier than a credential's created_at_us, the revocations below
+ * (wyl_policy_store_data_credential_revoke, the predecessor of a rotation and
+ * the lifecycle revocations) and the last use verify records are written at
+ * created_at_us instead.  Verify never moves last use backwards.
  *
  * Every WylDataCredentialInfo *out must be zero-initialized or previously
  * cleared: it is cleared before it is filled.
@@ -2626,7 +2627,9 @@ gchar *wyl_policy_store_data_credential_audit_scope
 wyrelog_error_t wyl_policy_store_data_credential_lifecycle_audits
   (wyl_policy_store_t * store, const gchar * request_id, GPtrArray ** out);
 /* Verifies the credential only; the per-use checks of #1475 are the
- * caller's.  Every refusal of a well-formed presentation is WYRELOG_E_AUTH. */
+ * caller's.  Every refusal of a well-formed presentation is WYRELOG_E_AUTH.
+ * A success records last use at now_us, or at created_at_us if that is
+ * later. */
 wyrelog_error_t wyl_policy_store_data_credential_verify
   (wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * presented_secret, gsize presented_secret_len,
