@@ -96,10 +96,11 @@ owner issues, lists, rotates and revokes data credentials with
 `wyctl tenant data-credential`, a program exchanges one at
 `/auth/service-token` and uses its bearer on the data routes, and the lifecycle
 events below revoke them. A credential's last-used time is the time of its
-last exchange. An exchange of an unknown credential id is refused sooner than
-one with a wrong secret, so its timing can tell whether an id exists; ids are
-not secrets, and the exchange limiter applies. The operator runbook ("Data
-credentials") describes the commands and their exit statuses.
+last exchange, or its creation if that is later. An exchange of an unknown
+credential id is refused sooner than one with a wrong secret, so its timing can
+tell whether an id exists; ids are not secrets, and the exchange limiter
+applies. The operator runbook ("Data credentials") describes the commands and
+their exit statuses.
 
 ### Why the boundary moves
 
@@ -367,12 +368,15 @@ event, through the revoke route or of a rotated credential, is recorded at the
 event's time, or at the credential's creation if that is later, so a clock that
 stepped back can make neither the event, the revoke nor the rotation fail. Such
 a revocation shows a time later than its audit row and than the clock that made
-it. A rotation's successor is created at the rotation's time and keeps its
-predecessor's absolute expiry, not its creation plus its lifetime, so after
-such a step it can show a creation earlier than its predecessor's and a span to
-its expiry longer than the lifetime; its generation and predecessor id, not its
-times, order the lineage. Every data operation made through a credential is
-attributed to the credential id and its issuer.
+it. An exchange whose clock is behind the credential's creation records its last
+use at the creation in the same way, so a credential created by a clock that ran
+ahead can be exchanged at once, and its last use can then show a time later than
+the exchange's audit row (#1497). A rotation's successor is created at the
+rotation's time and keeps its predecessor's absolute expiry, not its creation
+plus its lifetime, so after such a step it can show a creation earlier than its
+predecessor's and a span to its expiry longer than the lifetime; its generation
+and predecessor id, not its times, order the lineage. Every data operation made
+through a credential is attributed to the credential id and its issuer.
 
 ### Interaction with tenant deletion
 
