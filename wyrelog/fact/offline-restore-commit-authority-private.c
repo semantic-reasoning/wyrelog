@@ -4482,6 +4482,13 @@ graph_commit_quiesce (wyl_policy_store_t *policy,
   return rc;
 }
 
+#ifdef __APPLE__
+static wyrelog_error_t darwin_finalized_prove_terminal
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+#endif
 wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
   wyl_policy_store_t *policy, const gchar *fact_root,
   WylFactGraphRuntimeManager *runtime,
@@ -4494,6 +4501,10 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
       finalized->operation_uuid == NULL || finalized->revision == 0 ||
       out_committed == NULL)
     return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_finalized_prove_terminal (policy, fact_root, runtime,
+             finalized, drain_timeout_us, out_committed);
+#else
 #ifndef __linux__
   (void)drain_timeout_us;
   return WYRELOG_E_POLICY;
@@ -4636,6 +4647,7 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
     wyl_fact_offline_restore_journal_clear(out_committed);
   }
   return rc;
+#endif
 #endif
 }
 
@@ -6357,6 +6369,194 @@ darwin_finalize_selected (wyl_policy_store_t *policy,
       *out_committed = completed;
       memset (&completed, 0, sizeof completed);
     }
+  }
+  wyl_fact_graph_directory_clear (&directory);
+  g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  return rc;
+}
+
+/* The macOS terminal proof of a FINALIZED selected graph restore (ADR 0006,
+ * "Restore replacement evidence").  Read-only under the root writer lease
+ * and quiescence.  The caller predicate, the journal and row predicate and
+ * the quiescence copy the Linux ones; the unifdef views of this file keep
+ * the Linux body unchanged, so the copy may drift, and the bind-wiring
+ * guard requires a call of each authority helper here.  A caller journal
+ * other than the stored one byte for byte, and a change between the reads,
+ * is stale (BUSY); a row that disagrees with the journal is a POLICY
+ * refusal, and a row without evidence is refused before the graph is
+ * opened.  The old main's evidence is rebuilt from the restore_selected
+ * record, whose rc passes through (its mismatches are POLICY).  Only
+ * TERMINAL is accepted: DUAL, the old main proved back at the rollback
+ * name, is an operator wedge.  TERMINAL proves the new main by device,
+ * inode and size only, so the replacement evidence is compared on a fresh
+ * descriptor.  Every locator refusal is POLICY; IO and NOMEM pass. */
+static wyrelog_error_t
+darwin_finalized_prove_terminal (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_autoptr (GBytes) expected_bytes = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (finalized,
+          &expected_bytes);
+  if (rc == WYRELOG_E_OK
+      && (finalized->version !=
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || finalized->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || finalized->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !finalized->replacement_selected_pending_cleanup
+      || finalized->policy_generation_published
+      || finalized->lifecycle_handoff_complete || finalized->graphs == NULL
+      || finalized->graphs->len != 1))
+    rc = WYRELOG_E_POLICY;
+  WylFactRootWriterLease *lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphKey key = { 0 };
+  WylFactGraphQuiescenceToken *quiescence = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            finalized->operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            finalized->operation_uuid, &row);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
+  if (rc == WYRELOG_E_OK && (journal.revision != finalized->revision
+      || !g_bytes_equal (encoded, expected_bytes)))
+    rc = WYRELOG_E_BUSY;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      journal.graphs != NULL && journal.graphs->len == 1
+      ? g_ptr_array_index (journal.graphs, 0) : NULL;
+  if (rc == WYRELOG_E_OK
+      && (graph == NULL || row == NULL
+      || !g_str_equal (row->phase, "selected_pending_cleanup")
+      || g_strcmp0 (row->operation_uuid, journal.operation_uuid) != 0
+      || g_strcmp0 (row->tenant_id, journal.tenant_id) != 0
+      || g_strcmp0 (row->graph_id, journal.selected_graph_id) != 0
+      || g_strcmp0 (graph->graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->store_uuid, row->store_uuid) != 0
+      || g_strcmp0 (graph->old_provisioning_uuid,
+      row->old_provisioning_uuid) != 0
+      || (graph->replacement_provisioning_uuid != NULL
+      && g_strcmp0 (graph->replacement_provisioning_uuid,
+      row->replacement_uuid) != 0)
+      || journal.destination_tenant_lifecycle_generation !=
+      row->tenant_lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation !=
+      row->tenant_reconciliation_generation
+      || graph->destination_lifecycle_generation !=
+      row->graph_lifecycle_generation
+      || graph->destination_reconciliation_generation !=
+      row->graph_reconciliation_generation
+      || graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      || !graph->transition_terminal))
+    rc = WYRELOG_E_POLICY;
+  /* ADR 0006: a row without evidence is refused before the old evidence,
+   * the namespace or the main is read. */
+  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL
+      || g_bytes_get_size (row->darwin_operation_evidence)
+      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
+            drain_timeout_us, &quiescence);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    rc = wyl_fact_root_writer_lease_verify (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_resolver_revalidate (&resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = check_finalized_persisted (policy, journal.operation_uuid,
+              encoded, row, &journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed (runtime,
+              &key, drain_timeout_us, &quiescence);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_verify (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_resolver_revalidate (&resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = check_finalized_persisted (policy, journal.operation_uuid,
+              encoded, row, &journal);
+  }
+  WylFactGraphLocator locator = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal (wyl_fact_graph_resolver_open_directory
+              (&resolver, &locator, FALSE, &directory));
+  wyl_fact_graph_locator_clear (&locator);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK) {
+    directory.checkpoint = finalize_checkpoint;
+    directory.checkpoint_data = finalize_checkpoint_data;
+  }
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  GraphProvenance provenance = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_provenance_load (policy, &journal, row, &provenance);
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (&resolver, &directory, lease, provenance.uuid,
+            &provenance.evidence, journal.operation_uuid,
+            row->replacement_uuid, &graph->expected_main_identity,
+            &graph->staged_main_identity, graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  WylFactGraphDarwinOperationEvidence expected = { 0 };
+  if (rc == WYRELOG_E_OK)
+    memcpy (expected.bytes, g_bytes_get_data (row->darwin_operation_evidence,
+        NULL), sizeof expected.bytes);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_finalize_checkpoint
+          ("finalize-darwin-terminal-before-compare");
+#endif
+  /* The only proof of the new main's bytes and evidence. */
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &expected));
+  if (rc == WYRELOG_E_OK)
+    rc = check_finalized_persisted (policy, journal.operation_uuid, encoded,
+            row, &journal);
+  if (rc == WYRELOG_E_OK) {
+    *out_committed = journal;
+    memset (&journal, 0, sizeof journal);
   }
   wyl_fact_graph_directory_clear (&directory);
   g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
