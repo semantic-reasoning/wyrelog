@@ -115,8 +115,40 @@ resolver, graph_commit_quiesce and check_runtime) and the selected
 provenance load; darwin_finalize_effect re-proves the lease's authority and
 the runtime state and calls the Darwin cleanup execute.
 
-function_body counts braces without regard to string or character literals;
-none of the pinned functions holds a brace literal today.
+Terminal rules (check_terminal_rules), for the macOS terminal proof of a
+FINALIZED restore (#1303 U5-10):
+
+- wyl_fact_offline_restore_graph_commit_finalized_prove_terminal has exactly
+  one ``#ifdef __APPLE__`` arm, which calls darwin_finalized_prove_terminal
+  exactly once and none of the Darwin cleanup shape, the compare or the
+  selected provenance load itself; its ``#else`` arm calls neither
+  darwin_finalized_prove_terminal, the Darwin cleanup shape, the compare,
+  the evidence rebind nor the selected provenance load;
+- darwin_finalized_prove_terminal calls graph_selected_provenance_load, the
+  Darwin cleanup shape and the compare exactly once each, in that order,
+  and neither graph_provenance_load nor the rebind;
+- it mutates nothing: it calls none of the Darwin cleanup execute, the
+  Linux cleanup shape or execute, the dual witness, the capture, the
+  setter, the sync, the mark, the store selection, the store begin or
+  completion, or the journal attempt begin or completion;
+- it refuses every shape but TERMINAL (``shape !=
+  WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL``) and never names
+  WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL;
+- its last check_finalized_persisted follows the compare, and a
+  ``row->darwin_operation_evidence == NULL`` test precedes its first
+  wyl_fact_graph_resolver_open.
+
+The terminal proof also has a route row: it calls each authority helper of
+the Linux terminal proof it copies (the lease acquisition, the policy bind,
+the journal and row loads, the lease authorization of the resolver, both
+quiescence calls, check_finalized_persisted and check_runtime) and the
+selected provenance load.
+
+function_body finds a definition whose return type is on the line before
+its name or on the same line, and skips a declaration: a match whose
+parameter list reaches a ``;`` before the next ``{``.  It counts braces
+without regard to string or character literals; none of the pinned
+functions holds a brace literal today.
 
 Self-test: each mutant is applied to one function of a fixture set and must
 fail with its own error code.
@@ -195,6 +227,11 @@ LINUX_CLEANUP_EXECUTE_CALL = "wyl_fact_graph_restore_selected_cleanup_execute"
 DUAL_WITNESS_CALL = "wyl_fact_graph_provisioned_restore_dual_witness_open"
 BEGIN_CALL = "wyl_policy_store_graph_restore_selected_finalize_begin"
 COMPLETE_CALL = "wyl_policy_store_graph_restore_selected_finalize_with_effect"
+TERMINAL_RUN = "wyl_fact_offline_restore_graph_commit_finalized_prove_terminal"
+DARWIN_TERMINAL = "darwin_finalized_prove_terminal"
+PERSISTED_FINALIZED = "check_finalized_persisted"
+JOURNAL_BEGIN_CALL = "wyl_fact_offline_restore_journal_begin_attempt"
+JOURNAL_COMPLETE_CALL = "wyl_fact_offline_restore_journal_complete_attempt"
 
 
 @dataclass(frozen=True)
@@ -279,6 +316,16 @@ ROUTE_RULES = (
               ("wyl_fact_root_writer_lease_authorizes_resolver",
                "check_runtime",
                "wyl_fact_graph_restore_darwin_selected_cleanup_execute")),
+    RouteRule("darwin_finalized_prove_terminal",
+              ("wyl_fact_root_writer_lease_acquire",
+               "wyl_policy_store_bind_fact_root_authorized",
+               "wyl_fact_offline_restore_journal_store_load",
+               "wyl_policy_store_graph_restore_replacement_load",
+               "wyl_fact_root_writer_lease_authorizes_resolver",
+               "wyl_fact_graph_runtime_manager_quiesce",
+               "wyl_fact_graph_runtime_manager_quiesce_missing_closed",
+               "check_finalized_persisted", "check_runtime",
+               "graph_selected_provenance_load")),
 )
 
 
@@ -298,13 +345,25 @@ def strip_comments(source: str) -> str:
 
 
 def function_body(source: str, name: str) -> str:
-    """The brace-delimited body of the definition of ``name``."""
-    match = re.search(
-        r"^[A-Za-z_][\w \t*]*\n" + re.escape(name) + r"\s*\(", source, re.M
+    """The brace-delimited body of the definition of ``name``.
+
+    The return type sits on the line before the name, or on the same line
+    as it.  A match whose parameter list reaches a ``;`` before the next
+    ``{`` is a declaration and is skipped."""
+    pattern = re.compile(
+        r"^(?:[A-Za-z_][\w \t*]*\n|[A-Za-z_][\w \t*]*[ \t*])"
+        + re.escape(name) + r"\s*\(",
+        re.M,
     )
-    if match is None:
+    start = -1
+    for match in pattern.finditer(source):
+        brace = source.find("{", match.end())
+        semicolon = source.find(";", match.end())
+        if brace >= 0 and (semicolon < 0 or brace < semicolon):
+            start = brace
+            break
+    if start < 0:
         raise ContractError(f"E_NO_FUNCTION: {name} is not defined")
-    start = source.index("{", match.end())
     depth = 0
     for index in range(start, len(source)):
         if source[index] == "{":
@@ -677,6 +736,89 @@ def check_finalize_rules(source: str) -> None:
         )
 
 
+def check_terminal_rules(source: str) -> None:
+    body = function_body(source, TERMINAL_RUN)
+    arms = apple_arms(body)
+    if len(arms) != 1:
+        raise ContractError(
+            f"E_TERMINAL_ARMS: {TERMINAL_RUN} has {len(arms)}"
+            " #ifdef __APPLE__ arms, expected 1"
+        )
+    apple, other = arms[0]
+    if count_calls(apple, DARWIN_TERMINAL) != 1:
+        raise ContractError(
+            f"E_TERMINAL_ROUTE: the Darwin arm of {TERMINAL_RUN} must call"
+            f" {DARWIN_TERMINAL} exactly once"
+        )
+    for call in (CLEANUP_SHAPE_CALL, COMPARE_CALL, SELECTED_PROVENANCE):
+        if count_calls(apple, call) != 0:
+            raise ContractError(
+                f"E_TERMINAL_DIRECT: the Darwin arm of {TERMINAL_RUN} calls"
+                f" {call} instead of {DARWIN_TERMINAL}"
+            )
+    for call in (DARWIN_TERMINAL, CLEANUP_SHAPE_CALL, COMPARE_CALL,
+                 REBIND_CALL, SELECTED_PROVENANCE):
+        if count_calls(other, call) != 0:
+            raise ContractError(
+                f"E_TERMINAL_LEAK: the #else arm of {TERMINAL_RUN} calls"
+                f" {call}"
+            )
+    body = function_body(source, DARWIN_TERMINAL)
+    ordered = (SELECTED_PROVENANCE, CLEANUP_SHAPE_CALL, COMPARE_CALL)
+    for call in ordered:
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_TERMINAL_CALLS: {DARWIN_TERMINAL} must call {call}"
+                " exactly once"
+            )
+    for call in ("graph_provenance_load", REBIND_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_TERMINAL_CALLS: {DARWIN_TERMINAL} calls {call}"
+            )
+    order = [first_call(body, call) for call in ordered]
+    if order != sorted(order):
+        raise ContractError(
+            f"E_TERMINAL_ORDER: {DARWIN_TERMINAL} must load the selected"
+            " provenance, prove the cleanup shape and compare in that order"
+        )
+    for call in (CLEANUP_EXECUTE_CALL, LINUX_CLEANUP_SHAPE_CALL,
+                 LINUX_CLEANUP_EXECUTE_CALL, DUAL_WITNESS_CALL, CAPTURE_CALL,
+                 SETTER_CALL, SYNC_CALL, MARK_CALL, SELECT_CALL, BEGIN_CALL,
+                 COMPLETE_CALL, JOURNAL_BEGIN_CALL, JOURNAL_COMPLETE_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_TERMINAL_MUTATES: {DARWIN_TERMINAL} calls {call}, but"
+                " the terminal proof is read-only"
+            )
+    if (re.search(r"\bshape\s*!=\s*"
+                  r"WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL\b",
+                  body) is None
+            or re.search(r"\bWYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL\b",
+                         body) is not None):
+        raise ContractError(
+            f"E_TERMINAL_SHAPE: {DARWIN_TERMINAL} must refuse every shape"
+            " but TERMINAL and never accept DUAL"
+        )
+    persisted = [match.start() for match in re.finditer(
+        r"(?<![\w])" + PERSISTED_FINALIZED + r"\s*\(", body)]
+    compared = first_call(body, COMPARE_CALL)
+    if not persisted or persisted[-1] < compared:
+        raise ContractError(
+            f"E_TERMINAL_PERSISTED: {DARWIN_TERMINAL} must re-prove the"
+            f" persisted state with {PERSISTED_FINALIZED} after the compare"
+        )
+    evidence = re.search(
+        r"\brow->darwin_operation_evidence\s*==\s*NULL", body
+    )
+    opened = first_call(body, "wyl_fact_graph_resolver_open")
+    if evidence is None or opened < 0 or evidence.start() > opened:
+        raise ContractError(
+            f"E_TERMINAL_EARLY_EVIDENCE: {DARWIN_TERMINAL} must refuse a row"
+            " without evidence before its first wyl_fact_graph_resolver_open"
+        )
+
+
 def check_source(source: str) -> None:
     source = strip_comments(source)
     for rule in ARM_RULES:
@@ -686,6 +828,7 @@ def check_source(source: str) -> None:
     check_companion_rules(source)
     check_select_rules(source)
     check_finalize_rules(source)
+    check_terminal_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -1318,6 +1461,110 @@ graph_selected_provenance_load (wyl_policy_store_t *policy,
 }
 """
 
+TERMINAL_RUN_FIXTURE = """\
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
+  wyl_policy_store_t *policy, const gchar *fact_root,
+  WylFactOfflineRestoreJournal *out_committed) {
+  if (policy == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_finalized_prove_terminal (policy, fact_root, runtime,
+             finalized, drain_timeout_us, out_committed);
+#else
+#ifndef __linux__
+  (void)drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_selected_cleanup_shape_open(
+      &resolver, &directory, lease, row->old_provisioning_uuid,
+      journal.operation_uuid, row->replacement_uuid,
+      &graph->expected_main_identity, &graph->staged_main_identity, &shape);
+  if (rc == WYRELOG_E_OK &&
+      shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+#endif
+#endif
+}
+"""
+
+DARWIN_TERMINAL_FIXTURE = """\
+static wyrelog_error_t
+darwin_finalized_prove_terminal (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactOfflineRestoreJournal *out_committed)
+{
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (finalized,
+          &expected_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            finalized->operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            finalized->operation_uuid, &row);
+  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL
+      || g_bytes_get_size (row->darwin_operation_evidence)
+      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
+            drain_timeout_us, &quiescence);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    rc = wyl_fact_root_writer_lease_verify (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = check_finalized_persisted (policy, journal.operation_uuid,
+              encoded, row, &journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed (runtime,
+              &key, drain_timeout_us, &quiescence);
+    if (rc == WYRELOG_E_OK)
+      rc = check_finalized_persisted (policy, journal.operation_uuid,
+              encoded, row, &journal);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (&resolver, &directory, lease, provenance.uuid,
+            &provenance.evidence, journal.operation_uuid,
+            row->replacement_uuid, &graph->expected_main_identity,
+            &graph->staged_main_identity, graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &expected));
+  if (rc == WYRELOG_E_OK)
+    rc = check_finalized_persisted (policy, journal.operation_uuid, encoded,
+            row, &journal);
+  return rc;
+}
+"""
+
+# Forward declarations ahead of the definitions, in the one-line form of
+# the real file, which function_body must skip.
+TERMINAL_DECLARATIONS = """\
+static wyrelog_error_t darwin_finalized_prove_terminal
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactOfflineRestoreJournal *out_committed);
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
+  wyl_policy_store_t *policy, WylFactOfflineRestoreJournal *out_committed);
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -1347,6 +1594,9 @@ POSITIVE = {
     "darwin_finalize_selected": DARWIN_FINALIZE_FIXTURE,
     "darwin_finalize_effect": DARWIN_FINALIZE_EFFECT_FIXTURE,
     "graph_selected_provenance_load": SELECTED_PROVENANCE_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_finalized_prove_terminal":
+        TERMINAL_RUN_FIXTURE,
+    "darwin_finalized_prove_terminal": DARWIN_TERMINAL_FIXTURE,
 }
 
 
@@ -1384,6 +1634,8 @@ N = "wyl_fact_offline_restore_graph_commit_finalize_run"
 J = "darwin_finalize_selected"
 A = "darwin_finalize_effect"
 L = "graph_selected_provenance_load"
+TR = "wyl_fact_offline_restore_graph_commit_finalized_prove_terminal"
+DT = "darwin_finalized_prove_terminal"
 FINALIZE_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
     "    rc = darwin_post_publish_refusal\n"
@@ -1427,6 +1679,40 @@ FINALIZE_RESOLVER_OPEN_LINES = (
 )
 FINALIZE_EXECUTE_CALL_LINE = (
     "          (wyl_fact_graph_restore_darwin_selected_cleanup_execute\n"
+)
+TERMINAL_SHAPE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open\n"
+    "              (&resolver, &directory, lease, provenance.uuid,\n"
+    "            &provenance.evidence, journal.operation_uuid,\n"
+    "            row->replacement_uuid, &graph->expected_main_identity,\n"
+    "            &graph->staged_main_identity, graph->logical_bytes,"
+    " &shape));\n"
+)
+TERMINAL_COMPARE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_directory_compare_darwin_replacement_evidence\n"
+    "              (&directory, row->replacement_uuid,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, graph->checksum, &expected));\n"
+)
+TERMINAL_PROVENANCE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = graph_selected_provenance_load (policy, &journal, row,"
+    " &provenance);\n"
+)
+TERMINAL_FINAL_PERSISTED_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = check_finalized_persisted (policy, journal.operation_uuid,"
+    " encoded,\n"
+    "            row, &journal);\n"
+)
+TERMINAL_EARLY_EVIDENCE_LINES = FINALIZE_EARLY_EVIDENCE_LINES
+TERMINAL_RESOLVER_OPEN_LINES = FINALIZE_RESOLVER_OPEN_LINES
+TERMINAL_SHAPE_TEST = (
+    "shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL"
 )
 SELECT_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
@@ -1972,6 +2258,101 @@ MUTANTS = (
         "      || !evidence_equal (record->darwin_operation_evidence,\n"
         "      row->darwin_operation_evidence))\n", "      )\n"),
      "E_FINALIZE_PROVENANCE"),
+    ("terminal: Apple arm dropped", TR, drop_apple_arm, "E_TERMINAL_ARMS"),
+    ("terminal: Darwin step called twice", TR, replace(
+        "             finalized, drain_timeout_us, out_committed);\n#else",
+        "             finalized, drain_timeout_us, out_committed);\n"
+        "  rc = darwin_finalized_prove_terminal (policy, fact_root, runtime,"
+        " finalized, drain_timeout_us, out_committed);\n#else"),
+     "E_TERMINAL_ROUTE"),
+    ("terminal: Apple arm proves the shape directly", TR, replace(
+        "             finalized, drain_timeout_us, out_committed);\n#else",
+        "             finalized, drain_timeout_us, out_committed);\n"
+        "  rc = wyl_fact_graph_restore_darwin_selected_cleanup_shape_open"
+        " (&resolver, &directory, lease, uuid, &evidence, operation_uuid,"
+        " replacement, &old_main, &new_main, size, &shape);\n#else"),
+     "E_TERMINAL_DIRECT"),
+    ("terminal: Linux arm calls the Darwin step", TR, replace(
+        "  return rc;\n#endif",
+        "  rc = darwin_finalized_prove_terminal (policy, fact_root, runtime,"
+        " finalized, drain_timeout_us, out_committed);\n"
+        "  return rc;\n#endif"), "E_TERMINAL_LEAK"),
+    ("terminal: Linux arm takes the Darwin shape", TR, replace(
+        "    rc = wyl_fact_graph_restore_selected_cleanup_shape_open(",
+        "    rc = wyl_fact_graph_restore_darwin_selected_cleanup_shape_open("),
+     "E_TERMINAL_LEAK"),
+    ("darwin terminal: compare dropped", DT,
+     replace(TERMINAL_COMPARE_LINES, ""), "E_TERMINAL_CALLS"),
+    ("darwin terminal: provenance load dropped", DT,
+     replace(TERMINAL_PROVENANCE_LINES, ""), "E_ROUTE_HELPER"),
+    ("darwin terminal: ACTIVE loader swapped in", DT, replace(
+        "    rc = graph_selected_provenance_load (policy,",
+        "    rc = graph_provenance_load (policy,"), "E_ROUTE_HELPER"),
+    ("darwin terminal: ACTIVE loader beside", DT, replace(
+        TERMINAL_PROVENANCE_LINES,
+        TERMINAL_PROVENANCE_LINES
+        + "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n"), "E_TERMINAL_CALLS"),
+    ("darwin terminal: rebind called directly", DT, replace(
+        TERMINAL_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_darwin_evidence_rebind (&expected, uuid,"
+        " old_uuid, object, &rebuilt);\n" + TERMINAL_SHAPE_LINES),
+     "E_TERMINAL_CALLS"),
+    ("darwin terminal: compare before the shape", DT,
+     move_before(TERMINAL_COMPARE_LINES, TERMINAL_SHAPE_LINES),
+     "E_TERMINAL_ORDER"),
+    ("darwin terminal: shape before the provenance load", DT,
+     move_before(TERMINAL_SHAPE_LINES, TERMINAL_PROVENANCE_LINES),
+     "E_TERMINAL_ORDER"),
+    ("darwin terminal: cleanup executed", DT, replace(
+        TERMINAL_FINAL_PERSISTED_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_restore_darwin_selected_cleanup_execute"
+        " (&resolver, &directory, lease, uuid, &evidence, operation_uuid,"
+        " replacement, &old_main, &new_main, size);\n"
+        + TERMINAL_FINAL_PERSISTED_LINES), "E_TERMINAL_MUTATES"),
+    ("darwin terminal: store begin added", DT, replace(
+        TERMINAL_FINAL_PERSISTED_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_policy_store_graph_restore_selected_finalize_begin"
+        " (policy, row, &before, &after, &result);\n"
+        + TERMINAL_FINAL_PERSISTED_LINES), "E_TERMINAL_MUTATES"),
+    ("darwin terminal: journal attempt begun", DT, replace(
+        TERMINAL_FINAL_PERSISTED_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_offline_restore_journal_begin_attempt (&journal,"
+        " journal.selected_graph_id, op);\n"
+        + TERMINAL_FINAL_PERSISTED_LINES), "E_TERMINAL_MUTATES"),
+    ("darwin terminal: DUAL accepted", DT, replace(
+        TERMINAL_SHAPE_TEST,
+        "shape == WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID"),
+     "E_TERMINAL_SHAPE"),
+    ("darwin terminal: DUAL named", DT, replace(
+        TERMINAL_SHAPE_TEST,
+        TERMINAL_SHAPE_TEST
+        + "\n      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL"),
+     "E_TERMINAL_SHAPE"),
+    ("darwin terminal: final persisted check dropped", DT,
+     replace(TERMINAL_FINAL_PERSISTED_LINES, ""), "E_TERMINAL_PERSISTED"),
+    ("darwin terminal: persisted check before the compare", DT,
+     move_before(TERMINAL_FINAL_PERSISTED_LINES, TERMINAL_COMPARE_LINES),
+     "E_TERMINAL_PERSISTED"),
+    ("darwin terminal: early row-evidence refusal dropped", DT,
+     replace(TERMINAL_EARLY_EVIDENCE_LINES, ""),
+     "E_TERMINAL_EARLY_EVIDENCE"),
+    ("darwin terminal: row-evidence refusal after the resolver open", DT,
+     move_before(TERMINAL_RESOLVER_OPEN_LINES, TERMINAL_EARLY_EVIDENCE_LINES),
+     "E_TERMINAL_EARLY_EVIDENCE"),
+    ("darwin terminal: quiesce_missing_closed dropped", DT, replace(
+        "      rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed"
+        " (runtime,\n"
+        "              &key, drain_timeout_us, &quiescence);\n",
+        "      rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin terminal: check_runtime dropped", DT, replace(
+        "    rc = check_runtime (runtime, &key);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
 )
 
 
@@ -1995,6 +2376,27 @@ def self_test() -> None:
                 ) from error
             continue
         raise ContractError(f"self-test mutant survived: {label}")
+    # Forward declarations ahead of the definitions are skipped: the real
+    # bodies still pass, and a compare dropped from the real body still
+    # fails.
+    declared = TERMINAL_DECLARATIONS + "".join(POSITIVE.values())
+    check_source(declared)
+    dropped = TERMINAL_DECLARATIONS + "".join(
+        text.replace(TERMINAL_COMPARE_LINES, "") if name == DT else text
+        for name, text in POSITIVE.items()
+    )
+    if dropped == declared:
+        raise ContractError("self-test mutant did not apply: declared compare")
+    try:
+        check_source(dropped)
+    except ContractError as error:
+        if not str(error).startswith("E_TERMINAL_CALLS:"):
+            raise ContractError(
+                "self-test mutant failed for another reason: declared"
+                f" compare: {error}"
+            ) from error
+    else:
+        raise ContractError("self-test mutant survived: declared compare")
 
 
 def main(argv: list[str]) -> int:

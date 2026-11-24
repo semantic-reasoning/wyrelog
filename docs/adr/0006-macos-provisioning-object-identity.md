@@ -372,11 +372,12 @@ companion step (see "Restore replacement evidence") then binds the replacement
 evidence and advances the replacement row, and selection (see "Restore
 replacement evidence") then takes the restore to `selected_pending_cleanup`,
 and `FINALIZE` (see "Restore replacement evidence") then takes it to
-`FINALIZED`; `RETIRE_STAGE`, promotion and the resume dispatcher still
-refuse, so a macOS graph restore stops there. None of it is reachable while
-macOS commit admission refuses; these steps are proved by tests that reach
-the decision directly, and the companion step, selection and `FINALIZE` by
-tests that call them directly.
+`FINALIZED`, which the terminal proof (see "Restore replacement evidence")
+then proves; `RETIRE_STAGE`, promotion and the resume dispatcher still
+refuse, so a macOS graph restore stops after that proof. None of it is
+reachable while macOS commit admission refuses; these steps are proved by
+tests that reach the decision directly, and the companion step, selection,
+`FINALIZE` and the terminal proof by tests that call them directly.
 
 ## Restore replacement evidence
 
@@ -525,11 +526,32 @@ remount or reboot between selection and `FINALIZE` changes the device number
 the witness and the `TERMINAL` inventory compare, so `FINALIZE` then refuses
 as an operator wedge, the liveness every step after `RETAIN` already has;
 after the unlink and before the CAS it makes the `TERMINAL` retry such a
-wedge. A `FINALIZED`
-macOS journal is the end of the direct-call path for now: the terminal proof
-the daemon's restore handler calls for it
-(`wyl_fact_offline_restore_graph_commit_finalized_prove_terminal`) still
-fails closed on macOS, and porting it is the next unit (#1303 U5-10).
+wedge.
+
+The macOS terminal proof
+(`wyl_fact_offline_restore_graph_commit_finalized_prove_terminal`) is
+read-only under the root writer lease and quiescence. The caller's
+`FINALIZED` journal must equal the stored journal byte for byte; any other
+journal is stale and gives `BUSY`. A row that disagrees with the journal
+gives `POLICY`, and a row without evidence is refused before the graph is
+opened. The proof rebuilds the old main's evidence from the
+`restore_selected` record, which must carry the row's evidence; that load's
+store errors pass through unmapped and its mismatches are `POLICY`. It requires
+`TERMINAL`: `DUAL`, including the old main proved back at the rollback name,
+is an operator wedge, and so is the old main at the lock. `TERMINAL` proves
+the new main by device, inode and logical size only, so the proof compares
+the stored replacement evidence through a fresh descriptor, the only proof
+of the new main's bytes. Every locator refusal is a policy refusal. A change
+of the journal or the row between the reads
+(`check_finalized_persisted`) gives `BUSY`. A remount or reboot after
+`FINALIZE` changes the device number the `TERMINAL` inventory compares, so
+the proof then refuses as an operator wedge (`POLICY`). The daemon's resume
+handler reaches the proof only for a journal that direct calls produced,
+and promotion still refuses (#1303 U5-11), so a `FINALIZED` macOS journal is
+the end of the direct-call path for now. For such a journal the resume
+handler on macOS runs the proof before promotion refuses: it takes the root
+writer lease, quiesces the graph and reads the main, so it can return the
+proof's `BUSY` or `IO` before that `POLICY`.
 
 | Durable observation | Required recovery result |
 | --- | --- |
@@ -540,7 +562,7 @@ fails closed on macOS, and porting it is the next unit (#1303 U5-10).
 | `companion_synced`, the old `ACTIVE` evidence does not rebuild from the replacement evidence and the journal (macOS) | Fail closed at selection before the namespace is read; the old record stays; operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` not begun (macOS) | `FINALIZE` requires `DUAL`, the old main proved at the rollback name by the old evidence rebuilt from the `restore_selected` evidence and the journal; a mismatch, an absent rollback name or a changed device is an operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
-| `FINALIZED` (macOS) | No step runs yet; every replay refuses, and the terminal proof fails closed (#1303 U5-10). |
+| `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal; promotion and every replay refuse (#1303 U5-11); a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
 | `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |
