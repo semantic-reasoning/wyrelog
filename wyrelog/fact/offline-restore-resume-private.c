@@ -269,7 +269,7 @@ wyrelog_error_t wyl_fact_offline_restore_graph_selected_finalize_resume_run(
       runtime == NULL || expected == NULL || expected->operation_uuid == NULL ||
       expected->revision == 0 || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   (void)drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else

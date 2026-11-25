@@ -19150,12 +19150,13 @@ darwin_flip_file_byte (const gchar *path, off_t offset)
 /* A graph restore taken to selected_pending_cleanup on macOS by direct
  * calls: the decision, the resume dispatcher to PUBLISHED_DURABLE, the
  * companion step and selection.  Returns the selected revision with its
- * journal bytes, the old main's identity and the stored evidence. */
+ * journal bytes, the old main's identity and the stored evidence, and, when
+ * out_durable is given, the PUBLISHED_DURABLE journal bytes. */
 static guint64
 darwin_graph_commit_selected (BackupFixture *fixture,
     DestinationCapture *capture, WylFactOfflineBackupBundle *bundle,
     const gchar *operation, WylFactArtifactInventoryIdentity *out_old_main,
-    GBytes **out_selected, GBytes **out_stored)
+    GBytes **out_selected, GBytes **out_stored, GBytes **out_durable)
 {
   g_autoptr (GBytes) decided_journal = NULL;
   const guint64 decided = darwin_graph_commit_decided (fixture, capture,
@@ -19169,6 +19170,9 @@ darwin_graph_commit_selected (BackupFixture *fixture,
       0, &committed), ==, WYRELOG_E_OK);
   g_assert_cmpuint (committed.revision, ==, decided + 12);
   const guint64 durable = committed.revision;
+  if (out_durable != NULL)
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        out_durable), ==, WYRELOG_E_OK);
   wyl_fact_offline_restore_journal_clear (&committed);
   WylPolicyGraphRestoreReplacementRecord *synced = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
@@ -19496,7 +19500,7 @@ test_graph_commit_finalize_macos (gconstpointer data)
   g_autoptr (GBytes) selected_journal = NULL;
   g_autoptr (GBytes) stored = NULL;
   const guint64 selected = darwin_graph_commit_selected (&fixture, &capture,
-          bundle, operation, &old_main, &selected_journal, &stored);
+          bundle, operation, &old_main, &selected_journal, &stored, NULL);
   const WylFactArtifactInventoryIdentity new_main =
       darwin_file_identity (main_path);
   WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
@@ -20077,7 +20081,7 @@ test_graph_commit_finalized_macos (gconstpointer data)
   g_autoptr (GBytes) selected_journal = NULL;
   g_autoptr (GBytes) stored = NULL;
   const guint64 selected = darwin_graph_commit_selected (&fixture, &capture,
-          bundle, operation, &old_main, &selected_journal, &stored);
+          bundle, operation, &old_main, &selected_journal, &stored, NULL);
   const WylFactArtifactInventoryIdentity new_main =
       darwin_file_identity (main_path);
   WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
@@ -20932,6 +20936,12 @@ test_graph_commit_select_resume_macos (gconstpointer data)
             &committed);
     g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
     assert_select_points (&probe, none);
+    /* As measured: a substitute at the rollback name is refused before the
+     * witness binds it; with the rollback name intact the witness binds and
+     * revalidates, two passes, and the DUAL inventory then refuses the
+     * substituted main or the stray name. */
+    g_assert_cmpuint (probe.witness_hits, ==, target == rollback_path ? 0
+        : 2);
     g_assert_cmpuint (probe.main_read_hits, ==, 0);
     g_assert_null (committed.operation_uuid);
     assert_restore_journal_unchanged (fixture.policy, operation,
@@ -21419,7 +21429,7 @@ test_graph_commit_promote_macos (gconstpointer data)
   g_autoptr (GBytes) selected_journal = NULL;
   g_autoptr (GBytes) stored = NULL;
   const guint64 selected = darwin_graph_commit_selected (&fixture, &capture,
-          bundle, operation, &old_main, &selected_journal, &stored);
+          bundle, operation, &old_main, &selected_journal, &stored, NULL);
   const WylFactArtifactInventoryIdentity new_main =
       darwin_file_identity (main_path);
   WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
@@ -21949,6 +21959,656 @@ test_graph_commit_promote_macos (gconstpointer data)
 }
 
 #if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+#define FINALIZE_RESUME_FRESH_WITNESS 12
+/* Witness passes of FINALIZE, as measured through the dispatcher (U5-14):
+ * fresh as in test_graph_commit_finalize_macos; from FINALIZE pending at
+ * DUAL the same, measured on the lost-begin retries and resume-pending;
+ * from TERMINAL none, since no rollback name is left to bind. */
+#define FINALIZE_RESUME_PENDING_DUAL_WITNESS 12
+#define FINALIZE_RESUME_PENDING_TERMINAL_WITNESS 0
+
+/* One call of the FINALIZE resume dispatcher, recording its points afresh. */
+static wyrelog_error_t
+finalize_resume_run (BackupFixture *fixture, FinalizeProbe *probe,
+    const WylFactOfflineRestoreJournal *expected,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_ptr_array_set_size (probe->seen, 0);
+  probe->hits = 0;
+  probe->witness_hits = 0;
+  probe->main_read_hits = 0;
+  return wyl_fact_offline_restore_graph_selected_finalize_resume_run
+           (fixture->policy, fixture->root, fixture->runtime, expected, 0,
+             out_committed);
+}
+
+/* zeta's graph authority, one line: what an unseal would change. */
+static gchar *
+finalize_resume_authority (BackupFixture *fixture)
+{
+  WylPolicyGraphAuthorityRecord *graph = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture->policy,
+      "tenant-a", "zeta", &graph), ==, WYRELOG_E_OK);
+  gchar *line = g_strdup_printf ("%d %" G_GUINT64_FORMAT " %"
+          G_GUINT64_FORMAT " %d %d %d", (gint) graph->lifecycle_state,
+          graph->lifecycle_generation, graph->reconciliation_generation,
+          (gint) graph->materialization_state,
+          (gint) graph->last_error_class, graph->sealed_compatibility ? 1 : 0);
+  wyl_policy_graph_authority_record_free (graph);
+  return line;
+}
+
+/* The probe call: the runtime manager shut down. */
+static void
+finalize_resume_shutdown (gpointer data)
+{
+  wyl_fact_graph_runtime_manager_shutdown (data);
+}
+
+/* The journal bytes decoded. */
+static void
+finalize_resume_decode (GBytes *blob, WylFactOfflineRestoreJournal *out)
+{
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (blob, out), ==,
+      WYRELOG_E_OK);
+}
+
+/* A dispatcher call that finalizes or proves: OK at the given points,
+ * witness passes and main reads, with the FINALIZED state stored and
+ * returned. */
+static void
+assert_finalize_resumed (BackupFixture *fixture, FinalizeProbe *probe,
+    const FinalizeExpect *expect, const WylFactOfflineRestoreJournal *anchor,
+    const gchar *const *points, guint witness, guint main_reads)
+{
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (finalize_resume_run (fixture, probe, anchor, &committed),
+      ==, WYRELOG_E_OK);
+  assert_finalize_points (probe, points);
+  g_assert_cmpuint (probe->witness_hits, ==, witness);
+  g_assert_cmpuint (probe->main_read_hits, ==, main_reads);
+  g_assert_cmpuint (committed.revision, ==, expect->selected + 2);
+  assert_finalize_applied (fixture, expect, &committed);
+  wyl_fact_offline_restore_journal_clear (&committed);
+}
+#endif
+
+/* macOS (#1303 U5-14): the FINALIZE resume dispatcher, the Linux body
+ * opened in place, takes the caller's selected journal, fresh or FINALIZE
+ * pending, as its anchor.  The stored journal equal to the anchor runs
+ * FINALIZE and then the terminal proof on its output; the anchor with
+ * FINALIZE begun one past it (a lost begin) runs FINALIZE from there; a
+ * stored FINALIZED journal equal to the anchor's completion (a lost
+ * completion) runs only the proof.  Any other stored journal is BUSY, any
+ * other anchor POLICY before the store is read, and a step's refusal
+ * passes through unmapped.  Nothing is unsealed.
+ *
+ * Per mode: setup | code | state afterwards (sel is the selected revision,
+ * sel+1 FINALIZE pending, sel+2 FINALIZED) | the retry with the sel anchor,
+ * if any.  Unless stated the setup is selected at sel by direct calls.
+ *
+ *   resume
+ *     - | OK | sel+2 | lost completion; the sel+2 journal POLICY; the promote
+ *     resume dispatcher POLICY
+ *   resume-restart
+ *     a new runtime manager and a reopened store | OK | sel+2 | lost
+ *     completion
+ *   resume-pending
+ *     FINALIZE stopped before its commit; the pending anchor | OK | sel+2
+ *     | lost completion
+ *   crash-before-commit
+ *     FINALIZE's commit point fails | IO | sel+1, rollback name | lost
+ *     begin from DUAL
+ *   crash-after-rollback-unlink
+ *     the point after the unlink fails | IO | sel+1, no rollback name
+ *     | lost begin from TERMINAL
+ *   lost-response
+ *     sel+1, then the pending anchor with the commit response lost | IO
+ *     | sel+2 after a reopen | the pending anchor, then lost completion
+ *   prove-crash
+ *     the proof's point fails | IO | sel+2 | lost completion
+ *   prove-main-bytes
+ *     one main byte flipped at the proof's point | POLICY | sel+2 | lost
+ *     completion
+ *   finalized-input
+ *     the stored FINALIZED journal as anchor, also with zeta quiesced by
+ *     another owner | POLICY | sel+2 | none
+ *   not-selected-input
+ *     the PUBLISHED_DURABLE journal or a FINALIZED-shaped one built from
+ *     the anchor | POLICY | sel | none
+ *   invalid-input
+ *     NULL arguments, an empty root, no operation, revision 0 | INVALID
+ *     | sel | none
+ *   stale
+ *     changed bytes, an older revision, a pending journal not stored
+ *     | BUSY | sel | none
+ *   quiesce-held
+ *     zeta quiesced by another owner | BUSY | sel | released
+ *   runtime-busy
+ *     the runtime manager shut down at FINALIZE's commit point | BUSY
+ *     | sel+1, rollback name | lost begin from DUAL on a new manager
+ *   substituted-rollback, missing-rollback-fresh
+ *     a same-bytes object at, or nothing at, the rollback name | POLICY
+ *     | sel | restored
+ *   chain-handoff
+ *     the daemon's HANDOFF branch by direct calls from the decision: the
+ *     commit steps, the select resume dispatcher, this dispatcher, the
+ *     promote resume dispatcher; then its SELECTED branch on the FINALIZED
+ *     journal | OK, POLICY | sel+2 | promotion by direct call, after which
+ *     the dispatcher finds nothing
+ *
+ * Every mode but chain-handoff ends with zeta's runtime empty and closed,
+ * its graph authority and alpha unchanged. */
+static void
+test_graph_commit_finalize_resume_macos (gconstpointer data)
+{
+#if !defined(__APPLE__) || !defined(WYL_TEST_HANDLE_SEAMS)
+  (void) data;
+  g_test_skip ("macOS graph restore FINALIZE resume by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0063";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-finalize-resume-mac-XXXXXX", &capture,
+      &bundle_root, &bundle);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *parked_path = graph_file_path (&fixture, "zeta",
+          "../parked-main.duckdb");
+  g_autofree gchar *linked_path = graph_file_path (&fixture, "zeta",
+          "../linked-main.duckdb");
+  g_autofree gchar *stray_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb.wal");
+  gboolean chain = g_str_equal (mode, "chain-handoff");
+  WylFactArtifactInventoryIdentity old_main = { 0 };
+  g_autoptr (GBytes) selected_journal = NULL;
+  g_autoptr (GBytes) stored = NULL;
+  g_autoptr (GBytes) durable_journal = NULL;
+  WylFactOfflineRestoreJournal committed = { 0 };
+  guint64 selected;
+  if (chain) {
+    /* http.c's HANDOFF branch: the remaining commit steps, then the select
+     * resume dispatcher at the published revision, which runs the
+     * companion step and selection and deletes the old ACTIVE record. */
+    g_autoptr (GBytes) decided_journal = NULL;
+    const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+            bundle, operation, &decided_journal);
+    old_main = darwin_file_identity (main_path);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        decided, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, decided + 12);
+    const guint64 durable = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        durable, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, durable + 1);
+    selected = committed.revision;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &selected_journal), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    stored = select_resume_evidence (&fixture, operation,
+            "selected_pending_cleanup", main_path);
+  } else {
+    selected = darwin_graph_commit_selected (&fixture, &capture, bundle,
+            operation, &old_main, &selected_journal, &stored,
+            &durable_journal);
+  }
+  const WylFactArtifactInventoryIdentity new_main =
+      darwin_file_identity (main_path);
+  WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
+          operation, "selected_pending_cleanup", stored);
+  g_autofree gchar *legacy_name = g_strdup_printf ("provision-%s.sqlite",
+          row->replacement_uuid);
+  g_autofree gchar *legacy_path = graph_file_path (&fixture, "zeta",
+          legacy_name);
+  g_autofree gchar *replacement_uuid = g_strdup (row->replacement_uuid);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  /* Selection deleted the old ACTIVE record: zeta's only record is
+   * restore_selected with the stored evidence. */
+  assert_select_zeta_record (&fixture, replacement_uuid,
+      WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED, stored);
+  g_autofree gchar *alpha = select_provisioning_snapshot (&fixture, "alpha");
+  g_autofree gchar *authority = finalize_resume_authority (&fixture);
+
+  FinalizeProbe probe = {
+    .parked_path = parked_path, .linked_path = linked_path,
+    .stray_path = stray_path,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (finalize_probe_checkpoint, &probe);
+  const FinalizeExpect expect = {
+    .operation = operation, .selected_journal = selected_journal,
+    .selected = selected, .replacement_uuid = replacement_uuid,
+    .stored = stored, .legacy_path = legacy_path, .main_path = main_path,
+    .rollback_path = rollback_path, .old_main = &old_main,
+    .new_main = &new_main, .alpha = alpha,
+  };
+  /* FINALIZE's points as in test_graph_commit_finalize_macos, each run
+   * followed by the terminal proof's one point. */
+  const gchar *const resumed_fresh[] = {
+    FINALIZE_BEFORE_COMPARE, FINALIZE_BEFORE_BEGIN, FINALIZE_BEFORE_COMMIT,
+    FINALIZE_BEFORE_UNLINK, FINALIZE_PROVED, FINALIZE_AFTER_UNLINK,
+    FINALIZE_AFTER_SYNC, TERMINAL_BEFORE_COMPARE, NULL,
+  };
+  const gchar *const resumed_dual[] = {
+    FINALIZE_BEFORE_COMPARE, FINALIZE_BEFORE_COMMIT, FINALIZE_BEFORE_UNLINK,
+    FINALIZE_PROVED, FINALIZE_AFTER_UNLINK, FINALIZE_AFTER_SYNC,
+    TERMINAL_BEFORE_COMPARE, NULL,
+  };
+  const gchar *const resumed_terminal[] = {
+    FINALIZE_BEFORE_COMPARE, FINALIZE_BEFORE_COMMIT, FINALIZE_AFTER_SYNC,
+    TERMINAL_BEFORE_COMPARE, NULL,
+  };
+  const gchar *const pending_dual[] = {
+    FINALIZE_BEFORE_COMPARE, FINALIZE_BEFORE_COMMIT, FINALIZE_BEFORE_UNLINK,
+    FINALIZE_PROVED, FINALIZE_AFTER_UNLINK, FINALIZE_AFTER_SYNC, NULL,
+  };
+  const gchar *const to_commit[] = {
+    FINALIZE_BEFORE_COMPARE, FINALIZE_BEFORE_BEGIN, FINALIZE_BEFORE_COMMIT,
+    NULL,
+  };
+  const gchar *const to_after_unlink[] = {
+    FINALIZE_BEFORE_COMPARE, FINALIZE_BEFORE_BEGIN, FINALIZE_BEFORE_COMMIT,
+    FINALIZE_BEFORE_UNLINK, FINALIZE_PROVED, FINALIZE_AFTER_UNLINK, NULL,
+  };
+  const gchar *const proved[] = { TERMINAL_BEFORE_COMPARE, NULL };
+  const gchar *const none[] = { NULL };
+  g_auto (WylFactOfflineRestoreJournal) sel = { 0 };
+  finalize_resume_decode (selected_journal, &sel);
+  wyrelog_error_t rc;
+  /* The retry with the sel anchor after the mode, if any: its points,
+   * witness passes and main reads. */
+  const gchar *const *retry_points = resumed_fresh;
+  guint retry_witness = FINALIZE_RESUME_FRESH_WITNESS;
+  guint retry_reads = 2;
+  /* Whether the mode ends with the common runtime, authority and alpha
+   * checks. */
+  gboolean common = TRUE;
+
+  if (g_str_equal (mode, "resume")) {
+    /* FINALIZE and the proof in one call; then the same anchor finds its
+     * completion and only proves, and the output is no anchor. */
+    assert_finalize_resumed (&fixture, &probe, &expect, &sel, resumed_fresh,
+        FINALIZE_RESUME_FRESH_WITNESS, 2);
+    assert_finalize_resumed (&fixture, &probe, &expect, &sel, proved, 0, 1);
+    g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &finalized), ==, WYRELOG_E_OK);
+    rc = finalize_resume_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    /* Promotion's dispatcher still refuses on macOS (U5-15). */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_selected_promote_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_finalize_applied (&fixture, &expect, NULL);
+    assert_finalize_stopped (&fixture, &probe, &expect);
+    retry_points = NULL;
+  } else if (g_str_equal (mode, "resume-restart")) {
+    /* No open graph: both steps take the missing-closed quiescence. */
+    promote_restart (&fixture);
+    assert_finalize_resumed (&fixture, &probe, &expect, &sel, resumed_fresh,
+        FINALIZE_RESUME_FRESH_WITNESS, 2);
+    retry_points = proved;
+    retry_witness = 0;
+    retry_reads = 1;
+  } else if (g_str_equal (mode, "resume-pending")) {
+    /* The pending anchor is accepted as UNKNOWN and finishes from DUAL. */
+    probe.act_at = FINALIZE_BEFORE_COMMIT;
+    probe.action = FINALIZE_PROBE_FAIL;
+    g_assert_cmpint (finalize_run (&fixture, &probe, operation, selected,
+        &committed), ==, WYRELOG_E_IO);
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (pending.revision, ==, selected + 1);
+    assert_finalize_resumed (&fixture, &probe, &expect, &pending,
+        resumed_dual, FINALIZE_RESUME_PENDING_DUAL_WITNESS, 2);
+    retry_points = proved;
+    retry_witness = 0;
+    retry_reads = 1;
+  } else if (g_str_equal (mode, "crash-before-commit")
+      || g_str_equal (mode, "crash-after-rollback-unlink")) {
+    /* FINALIZE's IO passes through after its begin; the same anchor then
+     * finds the begin and finishes from DUAL, or from TERMINAL once the
+     * rollback name is gone. */
+    gboolean at_commit = g_str_equal (mode, "crash-before-commit");
+    probe.act_at = at_commit ? FINALIZE_BEFORE_COMMIT : FINALIZE_AFTER_UNLINK;
+    probe.action = FINALIZE_PROBE_FAIL;
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    assert_finalize_points (&probe, at_commit ? to_commit : to_after_unlink);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_IO, &committed,
+        selected + 1, at_commit ? &old_main : NULL);
+    retry_points = at_commit ? resumed_dual : resumed_terminal;
+    retry_witness = at_commit ? FINALIZE_RESUME_PENDING_DUAL_WITNESS
+        : FINALIZE_RESUME_PENDING_TERMINAL_WITNESS;
+  } else if (g_str_equal (mode, "lost-response")) {
+    /* FINALIZE's completion commits and the caller sees IO before the
+     * proof: the pending anchor then finds its completion one past it and
+     * the sel anchor two past it. */
+    probe.act_at = FINALIZE_BEFORE_COMMIT;
+    probe.action = FINALIZE_PROBE_FAIL;
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (pending.revision, ==, selected + 1);
+    wyl_policy_store_offline_restore_fail_once (fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    rc = finalize_resume_run (&fixture, &probe, &pending, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_finalize_points (&probe, pending_dual);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    select_reopen_policy (&fixture);
+    assert_finalize_applied (&fixture, &expect, NULL);
+    assert_finalize_resumed (&fixture, &probe, &expect, &pending, proved, 0,
+        1);
+    retry_points = proved;
+    retry_witness = 0;
+    retry_reads = 1;
+  } else if (g_str_equal (mode, "prove-crash")
+      || g_str_equal (mode, "prove-main-bytes")) {
+    /* The proof's refusal passes through with FINALIZED committed, and the
+     * same anchor then finds the completion and only proves. */
+    gboolean crash = g_str_equal (mode, "prove-crash");
+    probe.act_at = TERMINAL_BEFORE_COMPARE;
+    probe.action = crash ? FINALIZE_PROBE_FAIL : FINALIZE_PROBE_CALL;
+    probe.call = promote_flip_main;
+    probe.call_data = main_path;
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    g_assert_cmpint (rc, ==, crash ? WYRELOG_E_IO : WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, resumed_fresh);
+    g_assert_cmpuint (probe.witness_hits, ==, FINALIZE_RESUME_FRESH_WITNESS);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_finalize_applied (&fixture, &expect, NULL);
+    if (!crash)
+      darwin_flip_file_byte (main_path, 4096);
+    retry_points = proved;
+    retry_witness = 0;
+    retry_reads = 1;
+  } else if (g_str_equal (mode, "finalized-input")) {
+    /* A FINALIZED anchor is refused before any step: no point, and not the
+     * BUSY of a quiescence held elsewhere. */
+    g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    for (guint i = 0; i < 2; i++) {
+      WylFactGraphQuiescenceToken *held = i == 0 ? NULL
+          : finalized_hold_quiescence (&fixture);
+      rc = finalize_resume_run (&fixture, &probe, &finalized, &committed);
+      g_clear_pointer (&held, wyl_fact_graph_quiescence_token_release);
+      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      assert_finalize_points (&probe, none);
+      g_assert_cmpuint (probe.witness_hits, ==, 0);
+      g_assert_cmpuint (probe.main_read_hits, ==, 0);
+      g_assert_null (committed.operation_uuid);
+      assert_finalize_applied (&fixture, &expect, NULL);
+    }
+    retry_points = NULL;
+  } else if (g_str_equal (mode, "not-selected-input")) {
+    /* The published journal from before selection, and a FINALIZED shape
+     * built from the anchor without storing it, are no anchor: POLICY
+     * before the store is read.  Without the caller predicate the journal
+     * attempt functions refuse both with POLICY as well, so this pins the
+     * code; chain-handoff pins the predicate itself, after promotion. */
+    g_auto (WylFactOfflineRestoreJournal) published = { 0 };
+    finalize_resume_decode (durable_journal, &published);
+    g_assert_cmpuint (published.revision, ==, selected - 1);
+    g_assert_false (published.replacement_selected_pending_cleanup);
+    g_auto (WylFactOfflineRestoreJournal) shaped = { 0 };
+    finalize_resume_decode (selected_journal, &shaped);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&shaped,
+        shaped.selected_graph_id,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_complete_attempt
+          (&shaped, shaped.selected_graph_id,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE), ==, WYRELOG_E_OK);
+    const WylFactOfflineRestoreJournal *const anchors[] = {
+      &published, &shaped,
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (anchors); i++) {
+      rc = finalize_resume_run (&fixture, &probe, anchors[i], &committed);
+      assert_finalize_points (&probe, none);
+      g_assert_cmpuint (probe.witness_hits, ==, 0);
+      g_assert_cmpuint (probe.main_read_hits, ==, 0);
+      assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+          &committed, selected, &old_main);
+    }
+    retry_points = NULL;
+  } else if (g_str_equal (mode, "invalid-input")) {
+    /* INVALID before anything is read, with the output cleared. */
+    g_auto (WylFactOfflineRestoreJournal) no_operation = { 0 };
+    finalize_resume_decode (selected_journal, &no_operation);
+    g_clear_pointer (&no_operation.operation_uuid, g_free);
+    g_auto (WylFactOfflineRestoreJournal) no_revision = { 0 };
+    finalize_resume_decode (selected_journal, &no_revision);
+    no_revision.revision = 0;
+    g_ptr_array_set_size (probe.seen, 0);
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_selected_finalize_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, &sel, 0, NULL), ==,
+        WYRELOG_E_INVALID);
+    const struct
+    {
+      wyl_policy_store_t *policy;
+      const gchar *root;
+      WylFactGraphRuntimeManager *runtime;
+      const WylFactOfflineRestoreJournal *expected;
+    } cases[] = {
+      { NULL, fixture.root, fixture.runtime, &sel },
+      { fixture.policy, NULL, fixture.runtime, &sel },
+      { fixture.policy, "", fixture.runtime, &sel },
+      { fixture.policy, fixture.root, NULL, &sel },
+      { fixture.policy, fixture.root, fixture.runtime, NULL },
+      { fixture.policy, fixture.root, fixture.runtime, &no_operation },
+      { fixture.policy, fixture.root, fixture.runtime, &no_revision },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
+      finalize_resume_decode (selected_journal, &committed);
+      rc = wyl_fact_offline_restore_graph_selected_finalize_resume_run
+            (cases[i].policy, cases[i].root, cases[i].runtime,
+              cases[i].expected, 0, &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_INVALID);
+      g_assert_null (committed.operation_uuid);
+      g_assert_null (committed.graphs);
+    }
+    assert_finalize_points (&probe, none);
+    assert_finalize_refused (&fixture, &expect, WYRELOG_E_INVALID,
+        WYRELOG_E_INVALID, &committed, selected, &old_main);
+    retry_points = NULL;
+  } else if (g_str_equal (mode, "stale")) {
+    /* A selected anchor the store does not hold, by bytes or by revision,
+     * and a pending anchor whose begin was never stored. */
+    g_auto (WylFactOfflineRestoreJournal) changed = { 0 };
+    finalize_resume_decode (selected_journal, &changed);
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (changed.graphs, 0);
+    graph->logical_bytes++;
+    g_auto (WylFactOfflineRestoreJournal) older = { 0 };
+    finalize_resume_decode (selected_journal, &older);
+    older.revision = selected - 1;
+    g_auto (WylFactOfflineRestoreJournal) begun = { 0 };
+    finalize_resume_decode (selected_journal, &begun);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&begun,
+        begun.selected_graph_id,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==, WYRELOG_E_OK);
+    const WylFactOfflineRestoreJournal *const anchors[] = {
+      &changed, &older, &begun,
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (anchors); i++) {
+      rc = finalize_resume_run (&fixture, &probe, anchors[i], &committed);
+      assert_finalize_points (&probe, none);
+      g_assert_cmpuint (probe.witness_hits, ==, 0);
+      g_assert_cmpuint (probe.main_read_hits, ==, 0);
+      assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_BUSY,
+          &committed, selected, &old_main);
+    }
+    retry_points = NULL;
+  } else if (g_str_equal (mode, "quiesce-held")) {
+    /* FINALIZE's quiescence passes through as BUSY, before the namespace
+     * is read. */
+    WylFactGraphQuiescenceToken *held = finalized_hold_quiescence (&fixture);
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    wyl_fact_graph_quiescence_token_release (held);
+    assert_finalize_points (&probe, none);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_BUSY,
+        &committed, selected, &old_main);
+  } else if (g_str_equal (mode, "runtime-busy")) {
+    /* The effect's runtime check after its begin: the manager shut down
+     * inside the transaction gives BUSY and the CAS rolls back with the
+     * rollback name untouched; on a new manager the same anchor finds the
+     * begin and finishes from DUAL. */
+    probe.act_at = FINALIZE_BEFORE_COMMIT;
+    probe.action = FINALIZE_PROBE_CALL;
+    probe.call = finalize_resume_shutdown;
+    probe.call_data = fixture.runtime;
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    assert_finalize_points (&probe, to_commit);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_BUSY,
+        &committed, selected + 1, &old_main);
+    g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
+        ==, WYRELOG_E_OK);
+    retry_points = resumed_dual;
+    retry_witness = FINALIZE_RESUME_PENDING_DUAL_WITNESS;
+  } else if (g_str_equal (mode, "substituted-rollback")
+      || g_str_equal (mode, "missing-rollback-fresh")) {
+    /* FINALIZE's prologue requires DUAL for a fresh anchor: its POLICY
+     * passes through and nothing is written. */
+    gboolean substitute = g_str_equal (mode, "substituted-rollback");
+    if (substitute)
+      companion_substitute (rollback_path, parked_path);
+    else
+      g_assert_cmpint (g_rename (rollback_path, parked_path), ==, 0);
+    const WylFactArtifactInventoryIdentity other = substitute
+        ? darwin_file_identity (rollback_path) : old_main;
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    assert_finalize_points (&probe, none);
+    /* As measured: the substitute is refused before the witness binds it,
+     * and an absent rollback name has nothing to bind. */
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, selected, substitute ? &other : NULL);
+    const WylFactArtifactInventoryIdentity at_parked =
+        darwin_file_identity (parked_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
+        &at_parked));
+    if (substitute)
+      companion_unsubstitute (rollback_path, parked_path);
+    else
+      g_assert_cmpint (g_rename (parked_path, rollback_path), ==, 0);
+  } else if (g_str_equal (mode, "chain-handoff")) {
+    /* The rest of http.c's HANDOFF branch: this dispatcher finalizes and
+     * proves, and the promote resume dispatcher refuses. */
+    WylFactOfflineRestoreJournal finalized = { 0 };
+    rc = finalize_resume_run (&fixture, &probe, &sel, &finalized);
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    assert_finalize_points (&probe, resumed_fresh);
+    g_assert_cmpuint (finalized.revision, ==, selected + 2);
+    assert_finalize_applied (&fixture, &expect, &finalized);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_selected_promote_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_finalize_applied (&fixture, &expect, NULL);
+    wyl_fact_offline_restore_journal_clear (&finalized);
+    /* The SELECTED branch of a retry on the FINALIZED journal: the proof,
+     * then the same refusal, changing nothing. */
+    g_auto (WylFactOfflineRestoreJournal) loaded = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &loaded), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_finalized_prove_terminal
+          (fixture.policy, fixture.root, fixture.runtime, &loaded, 0,
+        &finalized), ==, WYRELOG_E_OK);
+    assert_finalize_applied (&fixture, &expect, &finalized);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_selected_promote_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    wyl_fact_offline_restore_journal_clear (&finalized);
+    assert_finalize_applied (&fixture, &expect, NULL);
+    assert_select_resume_runtime (&fixture);
+    g_autofree gchar *authority_after = finalize_resume_authority (&fixture);
+    g_assert_cmpstr (authority_after, ==, authority);
+    g_autofree gchar *alpha_after = select_provisioning_snapshot (&fixture,
+            "alpha");
+    g_assert_cmpstr (alpha_after, ==, alpha);
+    /* What U5-14 leaves is what promotion takes: a direct call commits and
+     * unseals, after which the dispatcher finds no journal. */
+    g_assert_cmpint (promote_run (&fixture, &probe, operation, selected + 2,
+        &committed), ==, WYRELOG_E_OK);
+    assert_promote_applied (&fixture, &expect, &committed);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    rc = finalize_resume_run (&fixture, &probe, &sel, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_NOT_FOUND);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    /* With the journal gone, a FINALIZED anchor is refused by the caller
+     * predicate before the store is read: POLICY, not the load's
+     * NOT_FOUND. */
+    rc = finalize_resume_run (&fixture, &probe, &loaded, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, none);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    retry_points = NULL;
+    common = FALSE;
+  } else {
+    g_assert_not_reached ();
+  }
+  if (retry_points != NULL) {
+    /* The same anchor resumes from what the mode left. */
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    assert_finalize_resumed (&fixture, &probe, &expect, &sel, retry_points,
+        retry_witness, retry_reads);
+  }
+  if (common) {
+    assert_select_resume_runtime (&fixture);
+    g_autofree gchar *authority_after = finalize_resume_authority (&fixture);
+    g_assert_cmpstr (authority_after, ==, authority);
+    g_autofree gchar *alpha_after = select_provisioning_snapshot (&fixture,
+            "alpha");
+    g_assert_cmpstr (alpha_after, ==, alpha);
+  }
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (NULL, NULL);
+  g_ptr_array_unref (probe.seen);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
 #define PUBLISHED_BEFORE_UNSEAL "finalize-darwin-published-before-unseal"
 
 /* One direct call of the published proof, recording its points afresh.
@@ -22116,7 +22776,7 @@ test_graph_commit_published_macos (gconstpointer data)
   g_autoptr (GBytes) selected_journal = NULL;
   g_autoptr (GBytes) stored = NULL;
   const guint64 selected = darwin_graph_commit_selected (&fixture, &capture,
-          bundle, operation, &old_main, &selected_journal, &stored);
+          bundle, operation, &old_main, &selected_journal, &stored, NULL);
   const WylFactArtifactInventoryIdentity new_main =
       darwin_file_identity (main_path);
   WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
@@ -23857,6 +24517,57 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-finalized-substituted-main",
       "proof-substituted-main", test_graph_commit_finalized_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume",
+      "resume", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-chain-handoff",
+      "chain-handoff", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-crash-after-rollback-unlink",
+      "crash-after-rollback-unlink", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-crash-before-commit",
+      "crash-before-commit", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-finalized-input",
+      "finalized-input", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-invalid-input",
+      "invalid-input", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-lost-response",
+      "lost-response", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-missing-rollback-fresh",
+      "missing-rollback-fresh", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-not-selected-input",
+      "not-selected-input", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-pending",
+      "resume-pending", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-prove-crash",
+      "prove-crash", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-prove-main-bytes",
+      "prove-main-bytes", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-quiesce-held",
+      "quiesce-held", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-restart",
+      "resume-restart", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-runtime-busy",
+      "runtime-busy", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-stale",
+      "stale", test_graph_commit_finalize_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-finalize-resume-substituted-rollback",
+      "substituted-rollback", test_graph_commit_finalize_resume_macos);
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-promote",
       "graph-promote", test_graph_commit_promote_macos);

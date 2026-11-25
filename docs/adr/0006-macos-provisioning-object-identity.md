@@ -376,12 +376,13 @@ and `FINALIZE` (see "Restore replacement evidence") then takes it to
 proves, and promotion (see "Restore replacement evidence") then commits it,
 which the published proof resolves after a lost response. The select resume
 dispatcher drives the companion step and selection and replays a selected
-restore; the `FINALIZE` and promote resume dispatchers still refuse (#1303
-U5-14, U5-15), and so does `RETIRE_STAGE`. None of it is reachable while
-macOS commit admission refuses; these steps are proved by tests that reach
-the decision directly, and the companion step, selection, the select resume
-dispatcher, `FINALIZE`, the terminal proof, promotion and the published
-proof by tests that call them directly.
+restore; the `FINALIZE` resume dispatcher finalizes a selected restore and
+proves it terminal; the promote resume dispatcher still refuses (#1303 U5-15),
+and so does `RETIRE_STAGE`. None of it is reachable while macOS commit
+admission refuses; these steps are proved by tests that reach the decision
+directly, and the companion step, selection, the select resume dispatcher,
+`FINALIZE`, the `FINALIZE` resume dispatcher, the terminal proof, promotion
+and the published proof by tests that call them directly.
 
 ## Restore replacement evidence
 
@@ -575,19 +576,51 @@ of the new main's bytes. Every locator refusal is a policy refusal. A change
 of the journal or the row between the reads
 (`check_finalized_persisted`) gives `BUSY`. A remount or reboot after
 `FINALIZE` changes the device number the `TERMINAL` inventory compares, so
-the proof then refuses as an operator wedge (`POLICY`). For a journal at
-`PUBLISHED_DURABLE` that direct calls produced, the daemon's resume handler
-on macOS now takes the restore through the companion step and selection to
-`selected_pending_cleanup`, deleting the old `ACTIVE` record, and then the
-`FINALIZE` resume dispatcher refuses (`POLICY`, #1303 U5-14); none of this is
-reachable while macOS commit admission refuses. The daemon's resume
-handler reaches the proof only for a journal that direct calls produced. It
-reaches promotion only through the promote resume dispatcher, which still
-refuses on macOS (#1303 U5-15), so promotion runs by direct call only. For
-such a journal the resume handler on macOS runs the proof before that
-dispatcher refuses: it takes the root writer lease, quiesces the graph and
-reads the main, so it can return the proof's `BUSY` or `IO` before that
-`POLICY`.
+the proof then refuses as an operator wedge (`POLICY`). For a `HANDOFF` graph
+journal with a `COMMIT` decision that direct calls produced, the daemon's
+resume handler on macOS now takes the restore through the remaining commit
+steps, the companion step and selection, deleting the old `ACTIVE` record, and
+through the `FINALIZE` resume dispatcher to `FINALIZED`, unlinking the
+rollback name. The promote resume dispatcher then refuses (`POLICY`, #1303
+U5-15), so the handler answers 403 with the journal at the selected revision
+plus two and the rollback name gone. Any step's `BUSY` or `IO` can return
+before that `POLICY`, and the handler reports `BUSY` as a conflict when the
+revision moved. The handler's `SELECTED` branch (`wyrelog/daemon/http.c`, for
+a stored `selected_pending_cleanup` journal) now finalizes a selected journal
+that is not yet `FINALIZED` the same way. A retry finds a `FINALIZED` journal,
+runs the terminal proof and refuses at the same dispatcher, changing nothing.
+Between #1303 U5-14 and U5-15 a macOS restore driven by direct calls therefore
+parks at `FINALIZED` and is not promotable through the daemon; only a direct
+call of promotion takes it further. None of this is reachable while macOS
+commit admission refuses. The daemon's resume handler reaches the proof only
+for a journal that direct calls produced. It reaches promotion only through
+the promote resume dispatcher, which still refuses on macOS (#1303 U5-15), so
+promotion runs by direct call only. For such a journal the resume handler on
+macOS runs the proof before that dispatcher refuses: it takes the root writer
+lease, quiesces the graph and reads the main, so it can return the proof's
+`BUSY` or `IO` before that `POLICY`.
+
+The macOS `FINALIZE` resume dispatcher
+(`wyl_fact_offline_restore_graph_selected_finalize_resume_run`, #1303 U5-14)
+is the Linux dispatcher opened in place, with no platform arm: every platform
+difference lives behind the public steps it calls, `FINALIZE` and the terminal
+proof. The caller's selected journal, fresh or with `FINALIZE` pending, is the
+anchor; any other caller journal, a `FINALIZED` or a not yet selected one
+included, is `POLICY` before the store is read. A stored journal that
+disagrees with its record is `BUSY`, and a row that disagrees with the journal
+or is not `selected_pending_cleanup` is `POLICY`. A stored journal equal to
+the anchor runs `FINALIZE` and then the terminal proof on its output. The
+anchor with `FINALIZE` begun one revision past it (a lost begin) runs
+`FINALIZE` from that revision, from `DUAL` or, once the rollback name is gone,
+from `TERMINAL`. A stored `FINALIZED` journal equal to the anchor's completion
+(a lost completion) runs only the terminal proof. Any other stored journal is
+stale (`BUSY`). The dispatcher reads no namespace and takes no lease or
+quiescence itself; each step takes its own and releases it, so one call reads
+the main twice, or once when only the proof runs, and the runtime stays
+closed. It never unseals. Step refusals pass through unmapped: a call can
+return `IO`, `BUSY` or `POLICY` after `FINALIZE` committed, with the store at
+`FINALIZED`, and the retry with the same anchor resolves it as a lost
+completion.
 
 The macOS promotion (`wyl_fact_offline_restore_graph_commit_promote_run`)
 takes a `FINALIZED` restore to its committed receipt. Under its own root
@@ -666,6 +699,7 @@ then refuses as an operator wedge (`POLICY`).
 | `selected_pending_cleanup`, `FINALIZE` not begun, replayed by the select resume dispatcher (macOS) | Read-only: `DUAL` and the replacement compare, then the stored journal returned byte for byte; `TERMINAL`, a mismatch or a row without evidence is `POLICY`, and a journal or row changed during the proof is `BUSY`. |
 | `selected_pending_cleanup`, `FINALIZE` not begun (macOS) | `FINALIZE` requires `DUAL`, the old main proved at the rollback name by the old evidence rebuilt from the `restore_selected` evidence and the journal; a mismatch, an absent rollback name or a changed device is an operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
+| `selected_pending_cleanup`, resumed by the `FINALIZE` resume dispatcher (macOS) | The anchor equal to the stored journal runs `FINALIZE` and the terminal proof; a lost begin runs `FINALIZE` from the begun revision; a lost completion runs the proof only; any other stored journal is `BUSY` and any other anchor `POLICY`; nothing is unsealed. |
 | `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal. Promotion requires `TERMINAL` before and inside its transaction and the replacement compare inside it, then commits; a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge, and a journal or row changed since it was loaded is `BUSY`. |
 | Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed and a retry gives `NOT_FOUND`; the published proof matches the receipt to the `FINALIZED` journal and unseals through the `ACTIVE` evidence, in process after a reopen or after a restart. |
 | Committed receipt (macOS) | The published proof requires the `FINALIZED` journal, a matching committed receipt and the graph still active and unsealed in policy; it reads only the receipt and the graph's authority before the unseal, and the unseal reads the `ACTIVE` evidence and opens the main by identity. No receipt, a mismatch or a graph sealed since is `POLICY`, and nothing is unsealed. |

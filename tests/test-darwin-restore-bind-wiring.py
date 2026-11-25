@@ -12,7 +12,10 @@ Nothing at runtime distinguishes a step that skipped that proof, because the
 journal-pinned identity alone also admits the main, and a capture just before
 an unproved execute has already passed.  This guard reads the source instead.
 
-Rules, all on wyrelog/fact/offline-restore-commit-authority-private.c.
+Rules on wyrelog/fact/offline-restore-commit-authority-private.c, except the
+resume dispatcher rules at the end, which read
+wyrelog/fact/offline-restore-resume-private.c.  The gate helpers gate_arms
+and check_refusing_gate judge a body from either file.
 
 Arm rules (ARM_RULES), one per function: graph_bind_prove_effect, the two
 commit-step helpers graph_capture_provisioned and graph_execute_provisioned,
@@ -226,9 +229,11 @@ Select resume rules (check_select_resume_rules), for the macOS arm of the
 select resume dispatcher (#1303 U5-13), which shares its loop with Linux:
 
 - in wyl_fact_offline_restore_graph_commit_select_resume_run the first
-  conditional is exactly ``#if !defined(__linux__) && !defined(__APPLE__)``,
-  no ``#ifndef __linux__`` remains, and that gate's true arm returns
-  WYRELOG_E_POLICY and calls neither step nor either prove;
+  conditional is exactly ``#if !defined(__linux__) && !defined(__APPLE__)``
+  with an ``#else``, no ``#ifndef __linux__`` remains, and that gate's true
+  arm is exactly ``(void) drain_timeout_us; return WYRELOG_E_POLICY;`` once
+  all whitespace is removed (check_refusing_gate), so an early return or a
+  call there fails;
 - the gate's ``#else`` holds no conditional but one ``#ifdef __APPLE__``
   arm, which calls darwin_selected_namespace_prove exactly once and
   selected_replacement_namespace_prove never; that arm's ``#else`` calls
@@ -265,6 +270,30 @@ selected_replacement_snapshot_valid, row_equal, the lease authorization of
 the resolver, graph_commit_quiesce and check_runtime), the selected
 provenance load and check_finalized_persisted.
 
+Resume dispatcher rules (check_resume_source), on
+wyrelog/fact/offline-restore-resume-private.c with comments stripped:
+
+- wyl_fact_offline_restore_graph_selected_finalize_resume_run is opened to
+  macOS in place (#1303 U5-14): its gate passes check_refusing_gate
+  (E_FINALIZE_RESUME_GATE); the gate's ``#else`` holds no conditional at
+  all, since every platform difference lives behind the public steps
+  (E_FINALIZE_RESUME_ARMS); it calls graph_selected_load_durable and
+  FINALIZE exactly once and the terminal proof exactly twice, loading
+  before finalizing and finalizing before the last proof
+  (E_FINALIZE_RESUME_STEPS); and it calls none of the store FINALIZE begin
+  or completion, the journal store CAS, the store promotion,
+  restore_unseal_graph, promotion, the published proof, the Darwin cleanup
+  shape or execute, the compare or wyl_fact_graph_resolver_open, nor any
+  wyl_policy_store_* function: only its steps read the graph or mutate
+  (E_FINALIZE_RESUME_DIRECT);
+- wyl_fact_offline_restore_graph_selected_promote_resume_run still refuses
+  off Linux until #1303 U5-15: its first conditional is ``#ifndef
+  __linux__`` with an ``#else`` and its true arm is the refusal above
+  (E_PROMOTE_RESUME_FENCE).
+
+The two files are read separately, each with E_UNREADABLE on failure, and
+the authority rules run first.
+
 function_body finds a definition whose return type is on the line before
 its name or on the same line, and skips a declaration: a match whose
 parameter list reaches a ``;`` before the next ``{``.  It counts braces
@@ -272,7 +301,10 @@ without regard to string or character literals; none of the pinned
 functions holds a brace literal today.
 
 Self-test: each mutant is applied to one function of a fixture set and must
-fail with its own error code.
+fail with its own error code.  The resume fixtures are the real bodies;
+each rule set fails with E_NO_FUNCTION on the other file's fixtures, so
+neither passes vacuously, and both spellings of the refusing arm's cast
+pass in every gated dispatcher.
 """
 
 from __future__ import annotations
@@ -380,6 +412,17 @@ SELECT_RESUME_RUN = "wyl_fact_offline_restore_graph_commit_select_resume_run"
 DARWIN_SELECTED_PROVE = "darwin_selected_namespace_prove"
 LINUX_SELECTED_PROVE = "selected_replacement_namespace_prove"
 REPLAY_GATE = "#if !defined(__linux__) && !defined(__APPLE__)"
+REFUSING_ARM = "(void)drain_timeout_us;returnWYRELOG_E_POLICY;"
+RESUME_SOURCE = "wyrelog/fact/offline-restore-resume-private.c"
+FINALIZE_RESUME_RUN = (
+    "wyl_fact_offline_restore_graph_selected_finalize_resume_run"
+)
+PROMOTE_RESUME_RUN = (
+    "wyl_fact_offline_restore_graph_selected_promote_resume_run"
+)
+LOAD_DURABLE = "graph_selected_load_durable"
+JOURNAL_CAS_CALL = "wyl_fact_offline_restore_journal_store_cas"
+STORE_CALL = re.compile(r"(?<![\w])wyl_policy_store_\w+\s*\(")
 OPEN_DIRECTORY_CALL = "wyl_fact_graph_resolver_open_directory"
 STORE_ENTRY = re.compile(
     r"(?<![\w])(?:wyl_policy_store_\w+"
@@ -1255,9 +1298,12 @@ def check_published_rules(source: str) -> None:
         )
 
 
-def gate_arms(body: str) -> tuple[str, str, str | None] | None:
+def gate_arms(body: str, name: str,
+              code: str) -> tuple[str, str, str | None] | None:
     """The first ``#if``-family line of ``body``, its true arm and its
-    ``#else`` arm (None without one), up to the matching ``#endif``."""
+    ``#else`` arm (None without one), up to the matching ``#endif``.  An
+    ``#elif`` chain or a missing ``#endif`` is reported under ``code`` for
+    the function ``name``."""
     lines = body.splitlines()
     for index, line in enumerate(lines):
         if re.match(r"^\s*#\s*if", line):
@@ -1278,38 +1324,50 @@ def gate_arms(body: str) -> tuple[str, str, str | None] | None:
             depth -= 1
         elif depth == 0 and re.match(r"^\s*#\s*elif", line):
             raise ContractError(
-                f"E_SELECT_RESUME_GATE: an #elif chain in {SELECT_RESUME_RUN}"
-                " is not judged"
+                f"{code}: an #elif chain in {name} is not judged"
             )
         elif depth == 0 and re.match(r"^\s*#\s*else\s*$", line):
             else_arm = []
             current = else_arm
             continue
         current.append(line)
-    raise ContractError(
-        f"E_SELECT_RESUME_GATE: the gate of {SELECT_RESUME_RUN} has no #endif"
-    )
+    raise ContractError(f"{code}: the gate of {name} has no #endif")
+
+
+def refuses(arm: str) -> bool:
+    """Whether a gate arm is exactly the refusal, whitespace aside."""
+    return re.sub(r"\s+", "", arm) == REFUSING_ARM
+
+
+def check_refusing_gate(body: str, name: str, code: str) -> str:
+    """The shared ``#else`` arm of a dispatcher opened to macOS in place.
+
+    The first conditional of ``body`` is exactly REPLAY_GATE with an
+    ``#else``, no ``#ifndef __linux__`` remains anywhere in it, and the
+    gate's true arm is exactly ``(void) drain_timeout_us; return
+    WYRELOG_E_POLICY;`` with whitespace removed, so both spellings of the
+    cast pass and nothing else does."""
+    split = gate_arms(body, name, code)
+    if (split is None or split[0] != REPLAY_GATE or split[2] is None
+            or re.search(r"^\s*#\s*ifndef\s+__linux__\b", body, re.M)):
+        raise ContractError(
+            f"{code}: the first conditional of {name} must be"
+            f" {REPLAY_GATE!r} with an #else, and no #ifndef __linux__ may"
+            " remain"
+        )
+    _, refused, shared = split
+    if not refuses(refused):
+        raise ContractError(
+            f"{code}: the true arm of the gate of {name} must be exactly"
+            " (void) drain_timeout_us; return WYRELOG_E_POLICY;"
+        )
+    return shared
 
 
 def check_select_resume_rules(source: str) -> None:
     body = function_body(source, SELECT_RESUME_RUN)
-    split = gate_arms(body)
-    if (split is None or split[0] != REPLAY_GATE or split[2] is None
-            or re.search(r"^\s*#\s*ifndef\s+__linux__\b", body, re.M)):
-        raise ContractError(
-            f"E_SELECT_RESUME_GATE: the first conditional of"
-            f" {SELECT_RESUME_RUN} must be {REPLAY_GATE!r} with an #else,"
-            " and no #ifndef __linux__ may remain"
-        )
-    _, refused, shared = split
-    if (re.search(r"\breturn\s+WYRELOG_E_POLICY\s*;", refused) is None
-            or any(count_calls(refused, call) != 0 for call in
-                   (COMPANION_RECOVER, SELECT_RUN, DARWIN_SELECTED_PROVE,
-                    LINUX_SELECTED_PROVE))):
-        raise ContractError(
-            f"E_SELECT_RESUME_GATE: the true arm of the gate of"
-            f" {SELECT_RESUME_RUN} must only return WYRELOG_E_POLICY"
-        )
+    shared = check_refusing_gate(body, SELECT_RESUME_RUN,
+                                 "E_SELECT_RESUME_GATE")
     conditionals = [line.strip() for line in shared.splitlines()
                     if re.match(r"^\s*#\s*if", line)]
     arms = apple_arms(shared)
@@ -1446,13 +1504,77 @@ def check_source(source: str) -> None:
     check_select_resume_rules(source)
 
 
-def check_tree(root: Path) -> None:
-    path = root / SOURCE
+def check_finalize_resume_rules(source: str) -> None:
+    body = function_body(source, FINALIZE_RESUME_RUN)
+    shared = check_refusing_gate(body, FINALIZE_RESUME_RUN,
+                                 "E_FINALIZE_RESUME_GATE")
+    if re.search(r"^\s*#\s*(?:if|elif|else|endif)", shared, re.M):
+        raise ContractError(
+            f"E_FINALIZE_RESUME_ARMS: the #else of the gate of"
+            f" {FINALIZE_RESUME_RUN} must hold no conditional: every platform"
+            " difference lives behind the public steps"
+        )
+    terminal = [match.start() for match in re.finditer(
+        r"(?<![\w])" + re.escape(TERMINAL_RUN) + r"\s*\(", shared)]
+    if (count_calls(shared, LOAD_DURABLE) != 1
+            or count_calls(shared, FINALIZE_RUN) != 1 or len(terminal) != 2
+            or not first_call(shared, LOAD_DURABLE)
+            < first_call(shared, FINALIZE_RUN) < terminal[-1]):
+        raise ContractError(
+            f"E_FINALIZE_RESUME_STEPS: {FINALIZE_RESUME_RUN} must call"
+            f" {LOAD_DURABLE} and {FINALIZE_RUN} exactly once and"
+            f" {TERMINAL_RUN} exactly twice, loading before finalizing and"
+            " finalizing before the last proof"
+        )
+    for call in (BEGIN_CALL, COMPLETE_CALL, JOURNAL_CAS_CALL, PROMOTE_CALL,
+                 UNSEAL_CALL, PROMOTE_RUN, PUBLISHED_RUN, CLEANUP_SHAPE_CALL,
+                 CLEANUP_EXECUTE_CALL, COMPARE_CALL,
+                 "wyl_fact_graph_resolver_open"):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_FINALIZE_RESUME_DIRECT: {FINALIZE_RESUME_RUN} calls"
+                f" {call}, but only its steps may read the graph or mutate"
+            )
+    store = STORE_CALL.search(body)
+    if store is not None:
+        raise ContractError(
+            f"E_FINALIZE_RESUME_DIRECT: {FINALIZE_RESUME_RUN} calls"
+            f" {store.group(0).rstrip('( ')}, but only its steps and"
+            f" {LOAD_DURABLE} may reach the store"
+        )
+
+
+def check_promote_resume_fence(source: str) -> None:
+    body = function_body(source, PROMOTE_RESUME_RUN)
+    split = gate_arms(body, PROMOTE_RESUME_RUN, "E_PROMOTE_RESUME_FENCE")
+    if (split is None or split[0] != "#ifndef __linux__" or split[2] is None
+            or not refuses(split[1])):
+        raise ContractError(
+            f"E_PROMOTE_RESUME_FENCE: {PROMOTE_RESUME_RUN} must still refuse"
+            " off Linux: its first conditional is #ifndef __linux__ with an"
+            " #else, whose true arm is exactly (void) drain_timeout_us;"
+            " return WYRELOG_E_POLICY; (#1303 U5-15 opens it)"
+        )
+
+
+def check_resume_source(source: str) -> None:
+    source = strip_comments(source)
+    check_finalize_resume_rules(source)
+    check_promote_resume_fence(source)
+
+
+def read_source(root: Path, name: str) -> str:
     try:
-        source = path.read_text(encoding="utf-8")
+        return (root / name).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
-        raise ContractError(f"E_UNREADABLE: {SOURCE}: {error}") from error
-    check_source(source)
+        raise ContractError(f"E_UNREADABLE: {name}: {error}") from error
+
+
+def check_tree(root: Path) -> None:
+    authority = read_source(root, SOURCE)
+    resume = read_source(root, RESUME_SOURCE)
+    check_source(authority)
+    check_resume_source(resume)
 
 
 BIND_FIXTURE = """\
@@ -2739,6 +2861,237 @@ static wyrelog_error_t darwin_selected_namespace_prove
     const WylPolicyGraphRestoreReplacementRecord *expected_row);
 """
 
+# The real body of the FINALIZE resume dispatcher, from RESUME_SOURCE, in
+# that file's one-line declaration style.
+FINALIZE_RESUME_RUN_FIXTURE = """\
+wyrelog_error_t wyl_fact_offline_restore_graph_selected_finalize_resume_run(
+  wyl_policy_store_t *policy, const gchar *fact_root,
+  WylFactGraphRuntimeManager *runtime,
+  const WylFactOfflineRestoreJournal *expected, gint64 drain_timeout_us,
+  WylFactOfflineRestoreJournal *out_committed) {
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear(out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\\0' ||
+      runtime == NULL || expected == NULL || expected->operation_uuid == NULL ||
+      expected->revision == 0 || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#if !defined(__linux__) && !defined(__APPLE__)
+  (void)drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  g_autoptr(GBytes) expected_blob = NULL;
+  wyrelog_error_t rc =
+      wyl_fact_offline_restore_journal_encode(expected, &expected_blob);
+  const WylFactOfflineRestoreJournalGraph *expected_graph =
+      expected->graphs != NULL && expected->graphs->len == 1
+          ? g_ptr_array_index(expected->graphs, 0)
+          : NULL;
+  gboolean fresh =
+      expected_graph != NULL &&
+      expected_graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE &&
+      expected_graph->next_op ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE &&
+      expected_graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE &&
+      expected_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  gboolean unknown =
+      expected_graph != NULL &&
+      expected_graph->next_op ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE &&
+      expected_graph->pending_op ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE &&
+      expected_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
+  if (rc == WYRELOG_E_OK &&
+      (expected->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION ||
+      expected->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH ||
+      expected->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT ||
+      !expected->replacement_selected_pending_cleanup ||
+      expected->policy_generation_published ||
+      expected->lifecycle_handoff_complete || expected_graph == NULL ||
+      (!fresh && !unknown)))
+    rc = WYRELOG_E_POLICY;
+  WylFactOfflineRestoreJournal current = {0};
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_autoptr(GBytes) current_blob = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_load_durable(policy, expected->operation_uuid, &current,
+            &record, &row, &current_blob);
+  if (rc == WYRELOG_E_OK &&
+      (!graph_selected_row_matches_journal(row, &current) ||
+      !g_str_equal(row->phase, "selected_pending_cleanup")))
+    rc = WYRELOG_E_POLICY;
+
+  gboolean exact_input = rc == WYRELOG_E_OK &&
+      current.revision == expected->revision &&
+      g_bytes_equal(current_blob, expected_blob);
+
+  g_auto(WylFactOfflineRestoreJournal) pending = {0};
+  g_auto(WylFactOfflineRestoreJournal) completed = {0};
+  g_autoptr(GBytes) pending_blob = NULL;
+  g_autoptr(GBytes) completed_blob = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_clone_journal(expected, &pending);
+  if (rc == WYRELOG_E_OK && fresh)
+    rc = wyl_fact_offline_restore_journal_begin_attempt(
+      &pending, pending.selected_graph_id,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode(&pending, &pending_blob);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_clone_journal(&pending, &completed);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_complete_attempt(
+      &completed, completed.selected_graph_id,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode(&completed, &completed_blob);
+  gboolean lost_begin = rc == WYRELOG_E_OK && fresh && !exact_input &&
+      current.revision == expected->revision + 1 &&
+      g_bytes_equal(current_blob, pending_blob);
+  gboolean lost_complete =
+      rc == WYRELOG_E_OK && !exact_input &&
+      graph_selected_finalized_shape(&current) &&
+      current.revision == expected->revision + (fresh ? 2 : 1) &&
+      g_bytes_equal(current_blob, completed_blob);
+  if (rc == WYRELOG_E_OK && !exact_input && !lost_begin && !lost_complete)
+    rc = WYRELOG_E_BUSY;
+  wyl_policy_offline_restore_record_free(record);
+  record = NULL;
+  wyl_policy_graph_restore_replacement_record_free(row);
+  row = NULL;
+  wyl_fact_offline_restore_journal_clear(&current);
+  g_clear_pointer(&current_blob, g_bytes_unref);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (lost_complete)
+    return wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
+      policy, fact_root, runtime, &completed, drain_timeout_us,
+      out_committed);
+  guint64 revision = lost_begin ? pending.revision : expected->revision;
+  g_auto(WylFactOfflineRestoreJournal) result = {0};
+  rc = wyl_fact_offline_restore_graph_commit_finalize_run(
+    policy, fact_root, runtime, expected->operation_uuid, revision,
+    drain_timeout_us, &result);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
+      policy, fact_root, runtime, &result, drain_timeout_us, out_committed);
+  return rc;
+#endif
+}
+"""
+
+# The real body of the promote resume dispatcher, from RESUME_SOURCE.
+PROMOTE_RESUME_RUN_FIXTURE = """\
+wyrelog_error_t wyl_fact_offline_restore_graph_selected_promote_resume_run(
+  wyl_policy_store_t *policy, const gchar *fact_root,
+  WylFactGraphRuntimeManager *runtime,
+  const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+  WylFactOfflineRestoreJournal *out_committed) {
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear(out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\\0' ||
+      runtime == NULL || finalized == NULL ||
+      finalized->operation_uuid == NULL || finalized->revision == 0 ||
+      out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void)drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  g_autoptr(GBytes) finalized_blob = NULL;
+  wyrelog_error_t rc =
+      wyl_fact_offline_restore_journal_encode(finalized, &finalized_blob);
+  if (rc == WYRELOG_E_OK && !graph_selected_finalized_shape(finalized))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t terminal_rc =
+        wyl_fact_offline_restore_graph_commit_published_prove_terminal(
+      policy, fact_root, runtime, finalized, drain_timeout_us,
+      out_committed);
+    if (terminal_rc == WYRELOG_E_OK)
+      return WYRELOG_E_OK;
+    if (terminal_rc != WYRELOG_E_POLICY)
+      return terminal_rc;
+  }
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  WylFactOfflineRestoreJournal current = {0};
+  g_autoptr(GBytes) current_blob = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_offline_restore_load(policy, finalized->operation_uuid,
+            &record);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode(record->journal_blob, &current);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode(&current, &current_blob);
+  if (rc == WYRELOG_E_OK &&
+      (record->revision != current.revision ||
+      record->scope != WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH ||
+      record->graph_count != 1 ||
+      g_strcmp0(record->operation_uuid, current.operation_uuid) != 0 ||
+      g_strcmp0(record->tenant_id, current.tenant_id) != 0 ||
+      g_strcmp0(record->selected_graph_id, current.selected_graph_id) != 0 ||
+      memcmp(record->manifest_sha256, current.manifest_sha256, 32) != 0 ||
+      !g_bytes_equal(current_blob, record->journal_blob)))
+    rc = WYRELOG_E_BUSY;
+  gboolean candidate_terminal = rc == WYRELOG_E_OK &&
+      current.version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION &&
+      current.revision == finalized->revision + 2;
+  if (candidate_terminal) {
+    wyl_policy_offline_restore_record_free(record);
+    wyl_fact_offline_restore_journal_clear(&current);
+    return wyl_fact_offline_restore_graph_commit_published_prove_terminal(
+      policy, fact_root, runtime, finalized, drain_timeout_us, out_committed);
+  }
+  gboolean exact_input = rc == WYRELOG_E_OK &&
+      current.revision == finalized->revision &&
+      g_bytes_equal(current_blob, finalized_blob);
+  if (rc == WYRELOG_E_OK && !exact_input)
+    rc = WYRELOG_E_BUSY;
+  wyl_policy_offline_restore_record_free(record);
+  record = NULL;
+  wyl_fact_offline_restore_journal_clear(&current);
+  g_clear_pointer(&current_blob, g_bytes_unref);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylPolicyOfflineRestoreRecord *checked_record = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  WylFactOfflineRestoreJournal selected = {0};
+  g_autoptr(GBytes) selected_blob = NULL;
+  rc = graph_selected_load_durable(policy, finalized->operation_uuid, &selected,
+          &checked_record, &row, &selected_blob);
+  if (rc == WYRELOG_E_OK &&
+      (!graph_selected_row_matches_journal(row, &selected) ||
+      !g_str_equal(row->phase, "selected_pending_cleanup")))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_offline_restore_record_free(checked_record);
+  wyl_policy_graph_restore_replacement_record_free(row);
+  wyl_fact_offline_restore_journal_clear(&selected);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_auto(WylFactOfflineRestoreJournal) promoted = {0};
+  rc = wyl_fact_offline_restore_graph_commit_promote_run(
+    policy, fact_root, runtime, finalized->operation_uuid,
+    finalized->revision, drain_timeout_us, &promoted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (promoted.revision != finalized->revision + 2
+      || promoted.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION
+      || promoted.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !promoted.lifecycle_handoff_complete)
+    return WYRELOG_E_POLICY;
+  /* Promotion stores a terminal receipt and removes the live journal in the
+   * same transaction. Return the journal state proven by that promotion. */
+  *out_committed = promoted;
+  memset (&promoted, 0, sizeof promoted);
+  return WYRELOG_E_OK;
+#endif
+}
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -2780,6 +3133,12 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_select_resume_run":
         SELECT_RESUME_RUN_FIXTURE,
     "darwin_selected_namespace_prove": DARWIN_SELECTED_PROVE_FIXTURE,
+}
+
+
+RESUME_POSITIVE = {
+    FINALIZE_RESUME_RUN: FINALIZE_RESUME_RUN_FIXTURE,
+    PROMOTE_RESUME_RUN: PROMOTE_RESUME_RUN_FIXTURE,
 }
 
 
@@ -4014,6 +4373,11 @@ MUTANTS = (
         SELECT_RESUME_REFUSAL_LINES,
         "  (void) drain_timeout_us;\n  return WYRELOG_E_OK;\n#else\n"),
      "E_SELECT_RESUME_GATE"),
+    ("select resume: gate refusal returns OK early", SR, replace(
+        SELECT_RESUME_REFUSAL_LINES,
+        "  (void) drain_timeout_us;\n  if (drain_timeout_us > 0)\n"
+        "    return WYRELOG_E_OK;\n  return WYRELOG_E_POLICY;\n#else\n"),
+     "E_SELECT_RESUME_GATE"),
     ("select resume: #ifndef __linux__ inside the shared arm", SR, replace(
         SELECT_RESUME_STEP_LINES, "#ifndef __linux__\n    (void) deadline;\n"
         "#endif\n" + SELECT_RESUME_STEP_LINES), "E_SELECT_RESUME_GATE"),
@@ -4129,6 +4493,129 @@ MUTANTS = (
         SELECTED_PROVE_PERSISTED_LINES, SELECTED_PROVE_COMPARE_LINES),
      "E_SELECTED_PROVE_PERSISTED"),
 )
+
+
+FR = FINALIZE_RESUME_RUN
+PRR = PROMOTE_RESUME_RUN
+RESUME_REFUSAL_LINES = (
+    "  (void)drain_timeout_us;\n"
+    "  return WYRELOG_E_POLICY;\n"
+    "#else\n"
+)
+FINALIZE_RESUME_LOAD_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = graph_selected_load_durable(policy, expected->operation_uuid,"
+    " &current,\n"
+    "            &record, &row, &current_blob);\n"
+)
+FINALIZE_RESUME_STEP_LINES = (
+    "  rc = wyl_fact_offline_restore_graph_commit_finalize_run(\n"
+    "    policy, fact_root, runtime, expected->operation_uuid, revision,\n"
+    "    drain_timeout_us, &result);\n"
+)
+FINALIZE_RESUME_PROOF_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(\n"
+    "      policy, fact_root, runtime, &result, drain_timeout_us,"
+    " out_committed);\n"
+)
+FINALIZE_RESUME_REVISION_LINE = (
+    "  guint64 revision = lost_begin ? pending.revision :"
+    " expected->revision;\n"
+)
+
+
+def finalize_resume_added(call: str):
+    return replace(FINALIZE_RESUME_REVISION_LINE,
+                   "  rc = " + call + ";\n" + FINALIZE_RESUME_REVISION_LINE)
+
+
+def finalize_resume_load_moved(text: str) -> str:
+    return text.replace(FINALIZE_RESUME_LOAD_LINES, "", 1).replace(
+        FINALIZE_RESUME_STEP_LINES,
+        FINALIZE_RESUME_STEP_LINES + FINALIZE_RESUME_LOAD_LINES, 1)
+
+
+RESUME_MUTANTS = (
+    ("finalize resume: gate back to #ifndef __linux__", FR, replace(
+        REPLAY_GATE + "\n", "#ifndef __linux__\n"),
+     "E_FINALIZE_RESUME_GATE"),
+    ("finalize resume: gate refusal returns OK", FR, replace(
+        RESUME_REFUSAL_LINES,
+        "  (void)drain_timeout_us;\n  return WYRELOG_E_OK;\n#else\n"),
+     "E_FINALIZE_RESUME_GATE"),
+    ("finalize resume: gate refusal returns OK early", FR, replace(
+        RESUME_REFUSAL_LINES,
+        "  (void)drain_timeout_us;\n  if (drain_timeout_us > 0)\n"
+        "    return WYRELOG_E_OK;\n  return WYRELOG_E_POLICY;\n#else\n"),
+     "E_FINALIZE_RESUME_GATE"),
+    ("finalize resume: #ifndef __linux__ inside the shared arm", FR, replace(
+        FINALIZE_RESUME_REVISION_LINE,
+        "#ifndef __linux__\n  (void) fresh;\n#endif\n"
+        + FINALIZE_RESUME_REVISION_LINE), "E_FINALIZE_RESUME_GATE"),
+    ("finalize resume: Apple arm inside the shared arm", FR, replace(
+        FINALIZE_RESUME_REVISION_LINE,
+        "#ifdef __APPLE__\n  return WYRELOG_E_POLICY;\n#endif\n"
+        + FINALIZE_RESUME_REVISION_LINE), "E_FINALIZE_RESUME_ARMS"),
+    ("finalize resume: another conditional in the shared arm", FR, replace(
+        FINALIZE_RESUME_REVISION_LINE,
+        "#ifdef G_OS_WIN32\n  (void) fresh;\n#endif\n"
+        + FINALIZE_RESUME_REVISION_LINE), "E_FINALIZE_RESUME_ARMS"),
+    ("finalize resume: FINALIZE not called", FR, replace(
+        "  rc = wyl_fact_offline_restore_graph_commit_finalize_run(\n",
+        "  rc = finalize_skipped(\n"), "E_FINALIZE_RESUME_STEPS"),
+    ("finalize resume: FINALIZE called twice", FR, replace(
+        FINALIZE_RESUME_STEP_LINES,
+        FINALIZE_RESUME_STEP_LINES + FINALIZE_RESUME_STEP_LINES),
+     "E_FINALIZE_RESUME_STEPS"),
+    ("finalize resume: no proof after FINALIZE", FR, replace(
+        FINALIZE_RESUME_PROOF_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = journal_moved(&result, out_committed);\n"),
+     "E_FINALIZE_RESUME_STEPS"),
+    ("finalize resume: load after FINALIZE", FR, finalize_resume_load_moved,
+     "E_FINALIZE_RESUME_STEPS"),
+    ("finalize resume: store begin called directly", FR,
+     finalize_resume_added(
+         "wyl_policy_store_graph_restore_selected_finalize_begin(policy,"
+         " row, &result)"), "E_FINALIZE_RESUME_DIRECT"),
+    ("finalize resume: unseal added", FR, finalize_resume_added(
+        "restore_unseal_graph(policy, fact_root, runtime, &result)"),
+     "E_FINALIZE_RESUME_DIRECT"),
+    ("finalize resume: promotion added", FR, finalize_resume_added(
+        "wyl_fact_offline_restore_graph_commit_promote_run(policy, fact_root,"
+        " runtime, expected->operation_uuid, revision, 0, &result)"),
+     "E_FINALIZE_RESUME_DIRECT"),
+    ("finalize resume: journal CAS added", FR, finalize_resume_added(
+        "wyl_fact_offline_restore_journal_store_cas(policy, revision,"
+        " &pending, &stored, &result)"), "E_FINALIZE_RESUME_DIRECT"),
+    ("finalize resume: another store call added", FR, finalize_resume_added(
+        "wyl_policy_store_offline_restore_load(policy,"
+        " expected->operation_uuid, &record)"), "E_FINALIZE_RESUME_DIRECT"),
+    ("promote resume: gate opened to macOS", PRR, replace(
+        "#ifndef __linux__\n", REPLAY_GATE + "\n"),
+     "E_PROMOTE_RESUME_FENCE"),
+    ("promote resume: gate refusal returns OK", PRR, replace(
+        RESUME_REFUSAL_LINES,
+        "  (void)drain_timeout_us;\n  return WYRELOG_E_OK;\n#else\n"),
+     "E_PROMOTE_RESUME_FENCE"),
+    ("promote resume: gate dropped", PRR, lambda text: text.replace(
+        "#ifndef __linux__\n" + RESUME_REFUSAL_LINES, "", 1).replace(
+        "#endif\n}\n", "}\n", 1), "E_PROMOTE_RESUME_FENCE"),
+)
+
+
+def expect_failure(label: str, expected: str, check, source: str) -> None:
+    try:
+        check(source)
+    except ContractError as error:
+        if not str(error).startswith(expected + ":"):
+            raise ContractError(
+                f"self-test mutant failed for another reason: {label}:"
+                f" {error}"
+            ) from error
+        return
+    raise ContractError(f"self-test mutant survived: {label}")
 
 
 def self_test() -> None:
@@ -4247,6 +4734,44 @@ def self_test() -> None:
         raise ContractError(
             "self-test mutant survived: declared selected compare"
         )
+    # The resume dispatchers, from RESUME_SOURCE.  The refusing arm is
+    # compared without whitespace: each file's spelling of the cast passes
+    # in either function, and a comment there is stripped first.
+    check_resume_source("".join(RESUME_POSITIVE.values()))
+    for label, target, transform, expected in RESUME_MUTANTS:
+        mutated = transform(RESUME_POSITIVE[target])
+        if mutated == RESUME_POSITIVE[target]:
+            raise ContractError(f"self-test mutant did not apply: {label}")
+        expect_failure(label, expected, check_resume_source, "".join(
+            mutated if name == target else text
+            for name, text in RESUME_POSITIVE.items()
+        ))
+    spelled = {
+        FR: FINALIZE_RESUME_RUN_FIXTURE.replace(
+            "(void)drain_timeout_us;", "(void) drain_timeout_us;"),
+        PRR: PROMOTE_RESUME_RUN_FIXTURE.replace(
+            "  return WYRELOG_E_POLICY;\n#else\n",
+            "  /* U5-15 */ return WYRELOG_E_POLICY;\n#else\n", 1),
+    }
+    for name, text in spelled.items():
+        if text == RESUME_POSITIVE[name]:
+            raise ContractError(
+                f"self-test spelling did not apply: {name}"
+            )
+    check_resume_source("".join(spelled.values()))
+    respelled = SELECT_RESUME_RUN_FIXTURE.replace(
+        SELECT_RESUME_REFUSAL_LINES,
+        "  (void)drain_timeout_us;\n  return WYRELOG_E_POLICY;\n#else\n")
+    if respelled == SELECT_RESUME_RUN_FIXTURE:
+        raise ContractError("self-test spelling did not apply: " + SR)
+    check_source("".join(
+        respelled if name == SR else text for name, text in POSITIVE.items()
+    ))
+    # Neither rule set passes vacuously on the other file.
+    expect_failure("resume rules on the authority source", "E_NO_FUNCTION",
+                   check_resume_source, "".join(POSITIVE.values()))
+    expect_failure("authority rules on the resume source", "E_NO_FUNCTION",
+                   check_source, "".join(RESUME_POSITIVE.values()))
 
 
 def main(argv: list[str]) -> int:
