@@ -18141,10 +18141,10 @@ test_graph_commit_companion_macos (gconstpointer data)
           (replayed, out));
     wyl_policy_graph_restore_replacement_record_free (replayed);
     g_clear_pointer (&out, wyl_policy_graph_restore_replacement_record_free);
-    /* The promotion boundary (U5-11): selection, finalize and the
-     * terminal proof run by direct call (see
-     * test_graph_commit_select_macos, test_graph_commit_finalize_macos and
-     * test_graph_commit_finalized_macos); at companion_synced the resume
+    /* Selection, finalize, the terminal proof and promotion run by direct
+     * call (see test_graph_commit_select_macos,
+     * test_graph_commit_finalize_macos, test_graph_commit_finalized_macos
+     * and test_graph_commit_promote_macos); at companion_synced the resume
      * dispatcher, finalize and promotion refuse. */
     wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
         const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
@@ -19302,10 +19302,12 @@ assert_terminal_proved (BackupFixture *fixture, FinalizeProbe *probe,
   wyl_fact_offline_restore_journal_clear (&committed);
 }
 
-/* Once FINALIZED a macOS restore stops at promotion (U5-11): FINALIZE at
- * each revision from the selected one, selection, the resume dispatcher
- * and promotion refuse without reaching a point, and the terminal proof
- * returns the stored journal.  Nothing changes. */
+/* Once FINALIZED a macOS restore waits for promotion, which runs by direct
+ * call at the FINALIZED revision (see test_graph_commit_promote_macos):
+ * FINALIZE at each revision from the selected one, selection, the resume
+ * dispatcher and promotion at any earlier revision refuse without reaching
+ * a point, and the terminal proof returns the stored journal.  Nothing
+ * changes. */
 static void
 assert_finalize_stopped (BackupFixture *fixture, FinalizeProbe *probe,
     const FinalizeExpect *expect)
@@ -19325,7 +19327,6 @@ assert_finalize_stopped (BackupFixture *fixture, FinalizeProbe *probe,
       gint64, WylFactOfflineRestoreJournal *) = {
     wyl_fact_offline_restore_graph_commit_select_replacement_run,
     wyl_fact_offline_restore_graph_commit_select_resume_run,
-    wyl_fact_offline_restore_graph_commit_promote_run,
   };
   for (guint i = 0; i < G_N_ELEMENTS (refused); i++)
     for (guint64 revision = expect->selected - 1;
@@ -19335,6 +19336,14 @@ assert_finalize_stopped (BackupFixture *fixture, FinalizeProbe *probe,
           WYRELOG_E_POLICY);
       g_assert_null (committed.operation_uuid);
     }
+  for (guint64 revision = expect->selected - 1;
+      revision <= expect->selected + 1; revision++) {
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+          (fixture->policy, fixture->root, fixture->runtime,
+        expect->operation, revision, 0, &committed), ==, WYRELOG_E_POLICY);
+    assert_finalize_points (probe, none);
+    g_assert_null (committed.operation_uuid);
+  }
   assert_terminal_proved (fixture, probe, expect);
 }
 #endif
@@ -19891,9 +19900,13 @@ finalized_rewrite_journal (gpointer data)
 {
   FinalizedJournalRewrite *rewrite = data;
   sqlite3 *db = wyl_policy_store_get_db (rewrite->fixture->policy);
+  /* The out value is the setting after the call, so read it first and
+   * enable the triggers again afterwards. */
   gint previous = 0;
-  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER, 0,
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER, -1,
       &previous), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER, 0,
+      NULL), ==, SQLITE_OK);
   sqlite3_stmt *update = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
       "UPDATE fact_offline_restore_journals SET journal_blob=?1 "
@@ -20402,6 +20415,794 @@ test_graph_commit_finalized_macos (gconstpointer data)
     probe.act_at = NULL;
     probe.action = FINALIZE_PROBE_NONE;
     assert_terminal_proved (&fixture, &probe, &expect);
+  }
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (NULL, NULL);
+  g_ptr_array_unref (probe.seen);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+#define PROMOTE_BEFORE_RECHECK "finalize-darwin-promote-before-recheck"
+#define PROMOTE_BEFORE_TRANSACTION \
+  "finalize-darwin-promote-before-transaction"
+#define PROMOTE_BEFORE_COMPARE "finalize-darwin-promote-before-compare"
+
+/* One direct call of promotion, recording its points afresh. */
+static wyrelog_error_t
+promote_run (BackupFixture *fixture, FinalizeProbe *probe,
+    const gchar *operation, guint64 revision,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_ptr_array_set_size (probe->seen, 0);
+  probe->hits = 0;
+  probe->witness_hits = 0;
+  probe->main_read_hits = 0;
+  return wyl_fact_offline_restore_graph_commit_promote_run
+           (fixture->policy, fixture->root, fixture->runtime, operation,
+             revision, 0, out_committed);
+}
+
+/* The probe call: one main byte flipped in place. */
+static void
+promote_flip_main (gpointer data)
+{
+  darwin_flip_file_byte (data, 4096);
+}
+
+/* The policy side of a committed promotion: committed, when given, is the
+ * published and handed-off journal four past the selected revision; the
+ * journal, the row and the claim are gone behind a committed graph receipt;
+ * zeta's only record is ACTIVE with the replacement evidence; zeta and the
+ * tenant are active and unsealed; alpha is untouched; and the new main
+ * holds the main name with no rollback, legacy or stage name beside it. */
+static void
+assert_promote_policy (BackupFixture *fixture, const FinalizeExpect *expect,
+    const WylFactOfflineRestoreJournal *committed)
+{
+  if (committed != NULL) {
+    g_assert_cmpstr (committed->operation_uuid, ==, expect->operation);
+    g_assert_cmpuint (committed->revision, ==, expect->selected + 4);
+    g_assert_cmpuint (committed->version, ==,
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION);
+    g_assert_true (committed->policy_generation_published);
+    g_assert_true (committed->lifecycle_handoff_complete);
+  }
+  g_auto (WylFactOfflineRestoreJournal) gone = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture->policy, expect->operation, &gone), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (expect->selected_journal, &selected), ==, WYRELOG_E_OK);
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+        (fixture->policy, expect->operation, &receipt), ==, WYRELOG_E_OK);
+  g_assert_nonnull (receipt);
+  g_assert_cmpstr (receipt->terminal_state, ==, "committed");
+  g_assert_cmpuint (receipt->final_revision, ==, expect->selected + 4);
+  g_assert_cmpint (receipt->scope, ==, WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH);
+  g_assert_cmpstr (receipt->tenant_id, ==, "tenant-a");
+  g_assert_cmpstr (receipt->selected_graph_id, ==, "zeta");
+  g_assert_cmpuint (receipt->graph_count, ==, 1);
+  g_assert_cmpmem (receipt->manifest_sha256, 32, selected.manifest_sha256,
+      32);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture->policy, expect->operation, &row), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (row);
+  /* The phase update keeps the evidence column: the ACTIVE record carries
+   * the replacement's evidence. */
+  assert_select_zeta_record (fixture, expect->replacement_uuid,
+      WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, expect->stored);
+  g_autofree gchar *alpha = select_provisioning_snapshot (fixture, "alpha");
+  g_assert_cmpstr (alpha, ==, expect->alpha);
+  WylPolicyGraphAuthorityRecord *graph = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture->policy,
+      "tenant-a", "zeta", &graph), ==, WYRELOG_E_OK);
+  g_assert_cmpint (graph->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+  g_assert_false (graph->sealed_compatibility);
+  wyl_policy_graph_authority_record_free (graph);
+  WylPolicyTenantAuthorityRecord *tenant = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (fixture->policy,
+      "tenant-a", &tenant), ==, WYRELOG_E_OK);
+  g_assert_cmpint (tenant->lifecycle_state, ==,
+      WYL_POLICY_TENANT_LIFECYCLE_ACTIVE);
+  g_assert_false (tenant->sealed_compatibility);
+  wyl_policy_tenant_authority_record_free (tenant);
+  const WylFactArtifactInventoryIdentity at_main =
+      darwin_file_identity (expect->main_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (expect->new_main,
+      &at_main));
+  g_assert_false (g_file_test (expect->rollback_path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (expect->legacy_path, G_FILE_TEST_EXISTS));
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          expect->operation);
+  g_autofree gchar *stage_path = graph_file_path (fixture, "zeta",
+          stage_name);
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+}
+
+/* zeta's runtime: state, admission and whether it is queryable. */
+static void
+assert_promote_runtime (BackupFixture *fixture,
+    WylFactGraphRuntimeState state, WylFactGraphAdmission admission,
+    gboolean queryable)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (fixture->runtime, &key, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, state);
+  g_assert_cmpint (status.admission, ==, admission);
+  g_assert_cmpint (status.queryable, ==, queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
+}
+
+/* A committed promotion, unsealed in the same call. */
+static void
+assert_promote_applied (BackupFixture *fixture, const FinalizeExpect *expect,
+    const WylFactOfflineRestoreJournal *committed)
+{
+  assert_promote_policy (fixture, expect, committed);
+  assert_promote_runtime (fixture, WYL_FACT_GRAPH_RUNTIME_READY,
+      WYL_FACT_GRAPH_ADMISSION_OPEN, TRUE);
+}
+
+/* Promotion of the stored FINALIZED journal: it reaches the recheck, the
+ * transaction and the in-transaction compare, opens no witness, reads the
+ * main once and commits. */
+static void
+assert_promoted (BackupFixture *fixture, FinalizeProbe *probe,
+    const FinalizeExpect *expect)
+{
+  const gchar *const full[] = {
+    PROMOTE_BEFORE_RECHECK, PROMOTE_BEFORE_TRANSACTION,
+    PROMOTE_BEFORE_COMPARE, NULL,
+  };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (promote_run (fixture, probe, expect->operation,
+      expect->selected + 2, &committed), ==, WYRELOG_E_OK);
+  assert_finalize_points (probe, full);
+  g_assert_cmpuint (probe->witness_hits, ==, 0);
+  g_assert_cmpuint (probe->main_read_hits, ==, 1);
+  assert_promote_applied (fixture, expect, &committed);
+  wyl_fact_offline_restore_journal_clear (&committed);
+}
+
+/* A new runtime manager and a reopened store: no graph is open. */
+static void
+promote_restart (BackupFixture *fixture)
+{
+  g_clear_pointer (&fixture->runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->runtime),
+      ==, WYRELOG_E_OK);
+  select_reopen_policy (fixture);
+}
+#endif
+
+/* macOS (#1303 U5-11): promotion, called directly on a FINALIZED graph
+ * restore, rebuilds the old main's evidence from the restore_selected
+ * record under its own lease and quiescence, requires TERMINAL, rechecks
+ * the journal and row, and commits in one fenced policy transaction whose
+ * effect proves TERMINAL again and compares the replacement evidence on a
+ * fresh descriptor.  The ACTIVE record then carries the replacement
+ * evidence and the graph is unsealed.  No file changes.
+ *
+ * Per mode: setup | code | state afterwards (sel is the selected revision,
+ * sel+2 FINALIZED, sel+4 the committed receipt) | the retry, if any.
+ * Unless stated, setup is one fresh FINALIZE to sel+2, a refusal leaves
+ * FINALIZED at sel+2 with no rollback name, and the retry is promotion at
+ * sel+2.  The points are the recheck, the transaction and the compare.
+ *
+ *   promote
+ *     promoted; replayed at sel+2 and sel+4, the terminal proof, the
+ *     promote resume dispatcher; a reopened store | OK; NOT_FOUND,
+ *     NOT_FOUND, POLICY | promoted, READY | -
+ *   promote-restart
+ *     a new runtime manager and a reopened store | OK | promoted | -
+ *   promote-quiescence-held
+ *     zeta quiesced by another owner | BUSY | sel+2 | released
+ *   promote-wrong-revision
+ *     at sel, sel+1 and sel+3 | POLICY | sel+2 | yes
+ *   promote-not-finalized
+ *     no FINALIZE; FINALIZE stopped before its commit | POLICY | sel, sel+1
+ *     | FINALIZE at sel+1, then promotion
+ *   promote-invalid-input
+ *     NULL output, root or operation, empty root, revision 0 | INVALID
+ *     | sel+2 | yes
+ *   promote-crash-before-recheck, -before-transaction, -in-transaction
+ *     a failure at the recheck, the transaction or the compare, also with
+ *     a restart | IO | sel+2 | yes
+ *   promote-lost-response
+ *     the commit response lost | IO | committed in policy, zeta not
+ *     unsealed | NOT_FOUND
+ *   promote-journal-changed-*, promote-row-changed-*
+ *     the stored journal or the row's evidence rewritten at the recheck or
+ *     the transaction | BUSY | rewritten | rewritten back
+ *   promote-substituted-main, promote-main-bytes, promote-stray-name and
+ *   their in-transaction forms
+ *     a same-bytes object at the main name, one main byte flipped, a
+ *     secure facts.duckdb.wal | POLICY | sel+2 | restored
+ *   promote-rollback-reappeared, promote-old-main-returned,
+ *   promote-old-main-returned-in-transaction, promote-old-main-as-lock
+ *     a secure file or the old main at the rollback name, before the call
+ *     or at the transaction, the old main at the lock | POLICY | sel+2
+ *     | removed
+ *   promote-foreign-lock
+ *     a secure one-link lock that is not the old main | OK | promoted | -
+ *   promote-shape-busy, promote-shape-not-found, promote-compare-busy
+ *     the TERMINAL proof before the transaction or the main read inside it
+ *     returns BUSY or NOT_FOUND | POLICY | sel+2 | yes
+ *   promote-evidence-other-volume, -graph, -artifact
+ *     the row and record evidence rewritten alike | POLICY | rewritten | -
+ *   promote-selected-evidence-diverged, promote-selected-without-evidence,
+ *   promote-row-without-evidence
+ *     the record or the row evidence rewritten, the row's also with zeta
+ *     quiesced by another owner | POLICY | sel+2 | -
+ *
+ * A locator refusal is a policy refusal; a changed journal or row, and a
+ * quiescence held elsewhere, is BUSY. */
+static void
+test_graph_commit_promote_macos (gconstpointer data)
+{
+#if !defined(__APPLE__) || !defined(WYL_TEST_HANDLE_SEAMS)
+  (void) data;
+  g_test_skip ("macOS graph restore promotion by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0060";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-promote-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *parked_path = graph_file_path (&fixture, "zeta",
+          "../parked-main.duckdb");
+  g_autofree gchar *linked_path = graph_file_path (&fixture, "zeta",
+          "../linked-main.duckdb");
+  g_autofree gchar *stray_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb.wal");
+  g_autofree gchar *lock_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb.lock");
+  WylFactArtifactInventoryIdentity old_main = { 0 };
+  g_autoptr (GBytes) selected_journal = NULL;
+  g_autoptr (GBytes) stored = NULL;
+  const guint64 selected = darwin_graph_commit_selected (&fixture, &capture,
+          bundle, operation, &old_main, &selected_journal, &stored);
+  const WylFactArtifactInventoryIdentity new_main =
+      darwin_file_identity (main_path);
+  WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
+          operation, "selected_pending_cleanup", stored);
+  g_autofree gchar *legacy_name = g_strdup_printf ("provision-%s.sqlite",
+          row->replacement_uuid);
+  g_autofree gchar *legacy_path = graph_file_path (&fixture, "zeta",
+          legacy_name);
+  g_autofree gchar *replacement_uuid = g_strdup (row->replacement_uuid);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  g_autofree gchar *alpha = select_provisioning_snapshot (&fixture, "alpha");
+
+  FinalizeProbe probe = {
+    .parked_path = parked_path, .linked_path = linked_path,
+    .stray_path = stray_path,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (finalize_probe_checkpoint, &probe);
+  const FinalizeExpect expect = {
+    .operation = operation, .selected_journal = selected_journal,
+    .selected = selected, .replacement_uuid = replacement_uuid,
+    .stored = stored, .legacy_path = legacy_path, .main_path = main_path,
+    .rollback_path = rollback_path, .old_main = &old_main,
+    .new_main = &new_main, .alpha = alpha,
+  };
+  const gchar *const full[] = {
+    PROMOTE_BEFORE_RECHECK, PROMOTE_BEFORE_TRANSACTION,
+    PROMOTE_BEFORE_COMPARE, NULL,
+  };
+  const gchar *const to_transaction[] = {
+    PROMOTE_BEFORE_RECHECK, PROMOTE_BEFORE_TRANSACTION, NULL,
+  };
+  const gchar *const to_recheck[] = { PROMOTE_BEFORE_RECHECK, NULL };
+  const gchar *const none[] = { NULL };
+  const guint64 finalized_revision = selected + 2;
+  g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  wyrelog_error_t rc;
+  gboolean retry = TRUE;
+
+  if (g_str_equal (mode, "graph-promote")) {
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    assert_finalize_points (&probe, full);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    assert_promote_applied (&fixture, &expect, &committed);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    /* Terminal: the journal is gone, so a replay at either revision finds
+     * nothing and reaches no point, and the promote resume dispatcher still
+     * refuses on macOS (U5-15).  The terminal proof, as on Linux, takes the
+     * journal load's NOT_FOUND for the quiescence's and fails on the
+     * resolver it has not opened yet: INVALID. */
+    for (guint64 revision = finalized_revision;
+        revision <= finalized_revision + 2; revision += 2) {
+      rc = promote_run (&fixture, &probe, operation, revision, &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_NOT_FOUND);
+      assert_finalize_points (&probe, none);
+      g_assert_null (committed.operation_uuid);
+    }
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_finalized_prove_terminal
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        &committed), ==, WYRELOG_E_INVALID);
+    g_assert_null (committed.operation_uuid);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_selected_promote_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_promote_applied (&fixture, &expect, NULL);
+    /* A store-only reopen keeps the unsealed runtime. */
+    select_reopen_policy (&fixture);
+    assert_promote_applied (&fixture, &expect, NULL);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "graph-promote-restart")) {
+    /* No open graph: the quiescence takes the missing-closed path, and the
+     * unseal opens zeta through the ACTIVE evidence. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    promote_restart (&fixture);
+  } else if (g_str_equal (mode, "graph-promote-quiescence-held")) {
+    /* A quiescence held elsewhere passes through as BUSY, before the
+     * namespace is read. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    WylFactGraphQuiescenceToken *held = finalized_hold_quiescence (&fixture);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, none);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_BUSY,
+        &committed, finalized_revision, NULL);
+    wyl_fact_graph_quiescence_token_release (held);
+  } else if (g_str_equal (mode, "graph-promote-wrong-revision")) {
+    /* As on Linux, any revision but the FINALIZED one is a refusal. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    const guint64 wrong[] = { selected, selected + 1, selected + 3 };
+    for (guint i = 0; i < G_N_ELEMENTS (wrong); i++) {
+      rc = promote_run (&fixture, &probe, operation, wrong[i], &committed);
+      assert_finalize_points (&probe, none);
+      assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+          &committed, finalized_revision, NULL);
+    }
+  } else if (g_str_equal (mode, "graph-promote-not-finalized")) {
+    /* Precondition: no FINALIZE.  Selected, then FINALIZE pending after a
+     * FINALIZE stopped before its commit: promotion refuses both. */
+    rc = promote_run (&fixture, &probe, operation, selected, &committed);
+    assert_finalize_points (&probe, none);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, selected, &old_main);
+    probe.act_at = FINALIZE_BEFORE_COMMIT;
+    probe.action = FINALIZE_PROBE_FAIL;
+    g_assert_cmpint (finalize_run (&fixture, &probe, operation, selected,
+        &committed), ==, WYRELOG_E_IO);
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    rc = promote_run (&fixture, &probe, operation, selected + 1, &committed);
+    assert_finalize_points (&probe, none);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, selected + 1, &old_main);
+    g_assert_cmpint (finalize_run (&fixture, &probe, operation,
+        selected + 1, &committed), ==, WYRELOG_E_OK);
+    assert_finalize_applied (&fixture, &expect, &committed);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  } else if (g_str_equal (mode, "graph-promote-invalid-input")) {
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_ptr_array_set_size (probe.seen, 0);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        finalized_revision, 0, NULL), ==, WYRELOG_E_INVALID);
+    const gchar *const roots[] = { NULL, "" };
+    for (guint i = 0; i < G_N_ELEMENTS (roots); i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+            (fixture.policy, roots[i], fixture.runtime, operation,
+          finalized_revision, 0, &committed), ==, WYRELOG_E_INVALID);
+      g_assert_null (committed.operation_uuid);
+    }
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+          (fixture.policy, fixture.root, fixture.runtime, NULL,
+        finalized_revision, 0, &committed), ==, WYRELOG_E_INVALID);
+    g_assert_null (committed.operation_uuid);
+    rc = promote_run (&fixture, &probe, operation, 0, &committed);
+    assert_finalize_points (&probe, none);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_INVALID,
+        &committed, finalized_revision, NULL);
+  } else if (g_str_equal (mode, "graph-promote-crash-before-recheck")
+      || g_str_equal (mode, "graph-promote-crash-before-transaction")
+      || g_str_equal (mode, "graph-promote-crash-before-transaction-restart")
+      || g_str_equal (mode, "graph-promote-crash-in-transaction")) {
+    /* Nothing is durable before the commit: a failure at any point leaves
+     * FINALIZED, also across a restart. */
+    gboolean at_recheck = g_str_equal (mode,
+            "graph-promote-crash-before-recheck");
+    gboolean in_transaction = g_str_equal (mode,
+            "graph-promote-crash-in-transaction");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    probe.act_at = at_recheck ? PROMOTE_BEFORE_RECHECK : in_transaction
+        ? PROMOTE_BEFORE_COMPARE : PROMOTE_BEFORE_TRANSACTION;
+    probe.action = FINALIZE_PROBE_FAIL;
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, at_recheck ? to_recheck
+        : in_transaction ? full : to_transaction);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_IO,
+        &committed, finalized_revision, NULL);
+    if (g_str_has_suffix (mode, "-restart")) {
+      promote_restart (&fixture);
+      assert_finalize_applied (&fixture, &expect, NULL);
+    }
+  } else if (g_str_equal (mode, "graph-promote-lost-response")) {
+    /* The commit is durable and its response lost: the call returns IO
+     * with no output, and the policy shows the promotion committed. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    wyl_policy_store_offline_restore_fail_once (fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_finalize_points (&probe, full);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    select_reopen_policy (&fixture);
+    assert_promote_policy (&fixture, &expect, NULL);
+    /* The store went terminal with the lost response, so the same call
+     * could not read the receipt and unseal: zeta's runtime stays empty and
+     * closed until a restart (or U5-12 and U5-15). */
+    assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_NOT_FOUND);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    assert_promote_policy (&fixture, &expect, NULL);
+    retry = FALSE;
+  } else if (g_str_has_prefix (mode, "graph-promote-journal-changed-")) {
+    /* At the recheck the re-read finds another stored journal at the same
+     * revision; at the transaction the store finds it stale. */
+    gboolean at_recheck = g_str_equal (mode,
+            "graph-promote-journal-changed-before-recheck");
+    g_assert_true (at_recheck || g_str_equal (mode,
+        "graph-promote-journal-changed-before-transaction"));
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_autoptr (GBytes) original = NULL;
+    g_autoptr (GBytes) changed = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&finalized,
+        &original), ==, WYRELOG_E_OK);
+    g_auto (WylFactOfflineRestoreJournal) other = { 0 };
+    finalized_copy (&finalized, &other);
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (other.graphs, 0);
+    graph->logical_bytes++;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&other,
+        &changed), ==, WYRELOG_E_OK);
+    FinalizedJournalRewrite rewrite = {
+      .fixture = &fixture, .operation = operation, .blob = changed,
+    };
+    probe.act_at = at_recheck ? PROMOTE_BEFORE_RECHECK
+        : PROMOTE_BEFORE_TRANSACTION;
+    probe.action = FINALIZE_PROBE_CALL;
+    probe.call = finalized_rewrite_journal;
+    probe.call_data = &rewrite;
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    assert_finalize_points (&probe, at_recheck ? to_recheck : to_transaction);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    /* Nothing was unsealed: zeta's runtime stays empty and closed. */
+    assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    assert_restore_journal_unchanged (fixture.policy, operation, changed,
+        finalized_revision);
+    assert_finalize_records (&fixture, &expect);
+    rewrite.blob = original;
+    finalized_rewrite_journal (&rewrite);
+    assert_finalize_applied (&fixture, &expect, NULL);
+  } else if (g_str_has_prefix (mode, "graph-promote-row-changed-")) {
+    /* At the recheck the re-read finds the row changed; at the transaction
+     * the store's row identity, which includes the evidence, does. */
+    gboolean at_recheck = g_str_equal (mode,
+            "graph-promote-row-changed-before-recheck");
+    g_assert_true (at_recheck || g_str_equal (mode,
+        "graph-promote-row-changed-before-transaction"));
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_autoptr (GBytes) rewritten = darwin_flip_evidence (stored,
+            replacement_uuid, 48);
+    FinalizedRowRewrite rewrite = {
+      .fixture = &fixture, .evidence = rewritten,
+    };
+    probe.act_at = at_recheck ? PROMOTE_BEFORE_RECHECK
+        : PROMOTE_BEFORE_TRANSACTION;
+    probe.action = FINALIZE_PROBE_CALL;
+    probe.call = finalized_rewrite_row;
+    probe.call_data = &rewrite;
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    assert_finalize_points (&probe, at_recheck ? to_recheck : to_transaction);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    /* Nothing was unsealed: zeta's runtime stays empty and closed. */
+    assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    assert_finalize_journal (&fixture, &expect, finalized_revision, NULL);
+    wyl_policy_graph_restore_replacement_record_free (companion_row
+          (&fixture, operation, "selected_pending_cleanup", rewritten));
+    darwin_rewrite_selected_evidence (&fixture, TRUE, stored, FALSE, NULL);
+    assert_finalize_applied (&fixture, &expect, NULL);
+  } else if (g_str_equal (mode, "graph-promote-substituted-main")
+      || g_str_equal (mode, "graph-promote-substituted-main-in-transaction")) {
+    /* Before the call the TERMINAL proof refuses; at the transaction the
+     * effect's TERMINAL proof does, and the transaction rolls back. */
+    gboolean before = g_str_equal (mode, "graph-promote-substituted-main");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    if (before) {
+      companion_substitute (main_path, parked_path);
+    } else {
+      probe.act_at = PROMOTE_BEFORE_TRANSACTION;
+      probe.action = FINALIZE_PROBE_SUBSTITUTE;
+      probe.target_path = main_path;
+    }
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, before ? none : to_transaction);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    companion_unsubstitute (main_path, parked_path);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, finalized_revision, NULL);
+  } else if (g_str_equal (mode, "graph-promote-main-bytes")
+      || g_str_equal (mode, "graph-promote-main-bytes-in-transaction")) {
+    /* TERMINAL proves the new main by device, inode and size only, so both
+     * TERMINAL proofs pass; the in-transaction compare refuses the changed
+     * byte, before the read point, and the transaction rolls back. */
+    gboolean before = g_str_equal (mode, "graph-promote-main-bytes");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    if (before) {
+      darwin_flip_file_byte (main_path, 4096);
+    } else {
+      probe.act_at = PROMOTE_BEFORE_COMPARE;
+      probe.action = FINALIZE_PROBE_CALL;
+      probe.call = promote_flip_main;
+      probe.call_data = main_path;
+    }
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, full);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, finalized_revision, NULL);
+    darwin_flip_file_byte (main_path, 4096);
+  } else if (g_str_equal (mode, "graph-promote-stray-name")
+      || g_str_equal (mode, "graph-promote-stray-in-transaction")) {
+    gboolean before = g_str_equal (mode, "graph-promote-stray-name");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    if (before) {
+      g_autoptr (GError) error = NULL;
+      g_assert_true (g_file_set_contents (stray_path, "x", 1, &error));
+      g_assert_no_error (error);
+      g_assert_true (wyl_test_secure_regular_file (stray_path, &error));
+      g_assert_no_error (error);
+    } else {
+      probe.act_at = PROMOTE_BEFORE_TRANSACTION;
+      probe.action = FINALIZE_PROBE_STRAY;
+    }
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, before ? none : to_transaction);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, finalized_revision, NULL);
+    g_assert_cmpint (g_remove (stray_path), ==, 0);
+  } else if (g_str_equal (mode, "graph-promote-rollback-reappeared")) {
+    /* A reappeared rollback name makes the shape DUAL, whose witness
+     * refuses an object that is not the old main. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_autoptr (GError) error = NULL;
+    g_assert_true (g_file_set_contents (rollback_path, "x", 1, &error));
+    g_assert_no_error (error);
+    g_assert_true (wyl_test_secure_regular_file (rollback_path, &error));
+    g_assert_no_error (error);
+    const WylFactArtifactInventoryIdentity other =
+        darwin_file_identity (rollback_path);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, none);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, finalized_revision, &other);
+    g_assert_cmpint (g_remove (rollback_path), ==, 0);
+  } else if (g_str_has_prefix (mode, "graph-promote-old-main-returned")
+      || g_str_equal (mode, "graph-promote-old-main-as-lock")) {
+    /* Precondition: FINALIZE refused after linking the proved old main
+     * outside the graph directory, then finalized from TERMINAL.  Renamed
+     * back to the rollback name the old main is proved there by evidence
+     * and the shape is DUAL, an operator wedge, before the transaction or,
+     * renamed at the transaction, inside it; renamed to the lock it is
+     * refused by identity. */
+    gboolean in_transaction = g_str_equal (mode,
+            "graph-promote-old-main-returned-in-transaction");
+    gboolean returned = in_transaction
+        || g_str_equal (mode, "graph-promote-old-main-returned");
+    g_assert_true (returned
+        || g_str_equal (mode, "graph-promote-old-main-as-lock"));
+    probe.act_at = FINALIZE_PROVED;
+    probe.action = FINALIZE_PROBE_LINK;
+    probe.target_path = rollback_path;
+    g_assert_cmpint (finalize_run (&fixture, &probe, operation, selected,
+        &committed), ==, WYRELOG_E_POLICY);
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    g_assert_cmpint (finalize_run (&fixture, &probe, operation,
+        selected + 1, &committed), ==, WYRELOG_E_OK);
+    assert_finalize_applied (&fixture, &expect, &committed);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    const gchar *target = returned ? rollback_path : lock_path;
+    if (in_transaction) {
+      probe.act_at = PROMOTE_BEFORE_TRANSACTION;
+      probe.action = FINALIZE_PROBE_PARK;
+      probe.target_path = linked_path;
+      probe.parked_path = rollback_path;
+    } else {
+      g_assert_cmpint (g_rename (linked_path, target), ==, 0);
+    }
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, in_transaction ? to_transaction : none);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    if (returned)
+      g_assert_cmpuint (probe.witness_hits, >, 0);
+    else
+      g_assert_cmpuint (probe.witness_hits, ==, 0);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, finalized_revision, returned ? &old_main : NULL);
+    const WylFactArtifactInventoryIdentity at_target =
+        darwin_file_identity (target);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
+        &at_target));
+    g_assert_cmpint (g_rename (target, linked_path), ==, 0);
+  } else if (g_str_equal (mode, "graph-promote-foreign-lock")) {
+    /* TERMINAL allows a lock beside the main that is not the old main, and
+     * the unseal opens zeta with it present. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_autoptr (GError) error = NULL;
+    g_assert_true (g_file_set_contents (lock_path, "x", 1, &error));
+    g_assert_no_error (error);
+    g_assert_true (wyl_test_secure_regular_file (lock_path, &error));
+    g_assert_no_error (error);
+    const WylFactArtifactInventoryIdentity lock =
+        darwin_file_identity (lock_path);
+    assert_promoted (&fixture, &probe, &expect);
+    const WylFactArtifactInventoryIdentity at_lock =
+        darwin_file_identity (lock_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&lock,
+        &at_lock));
+    g_assert_cmpint (g_remove (lock_path), ==, 0);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "graph-promote-shape-busy")
+      || g_str_equal (mode, "graph-promote-shape-not-found")
+      || g_str_equal (mode, "graph-promote-compare-busy")) {
+    /* A locator BUSY or NOT_FOUND after FINALIZED is a refusal, never a
+     * retry: at the TERMINAL proof before the transaction, or at the main
+     * read inside it. */
+    gboolean at_shape = !g_str_equal (mode, "graph-promote-compare-busy");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    probe.act_at = at_shape ? "darwin-selected-cleanup-terminal"
+        : SELECT_MAIN_READ_POINT;
+    probe.action = FINALIZE_PROBE_RETURN;
+    probe.returned_rc = g_str_equal (mode, "graph-promote-shape-not-found")
+        ? WYRELOG_E_NOT_FOUND : WYRELOG_E_BUSY;
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpuint (probe.hits, ==, 1);
+    assert_finalize_points (&probe, at_shape ? none : full);
+    assert_finalize_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, finalized_revision, NULL);
+  } else if (g_str_has_prefix (mode, "graph-promote-evidence-other-")) {
+    /* The row and the restore_selected record agree on evidence naming
+     * another volume, graph directory or artifact.  TERMINAL reads no old
+     * evidence, so the in-transaction compare is what refuses, before the
+     * main read, and the transaction rolls back. */
+    gsize offset = g_str_equal (mode, "graph-promote-evidence-other-volume")
+        ? 24 : g_str_equal (mode, "graph-promote-evidence-other-graph")
+        ? 40 : 48;
+    g_assert_true (g_str_equal (mode, "graph-promote-evidence-other-volume")
+        || g_str_equal (mode, "graph-promote-evidence-other-graph")
+        || g_str_equal (mode, "graph-promote-evidence-other-artifact"));
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_autoptr (GBytes) rewritten = darwin_flip_evidence (stored,
+            replacement_uuid, offset);
+    darwin_rewrite_selected_evidence (&fixture, TRUE, rewritten, TRUE,
+        rewritten);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    assert_finalize_points (&probe, full);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    FinalizeExpect rewritten_expect = expect;
+    rewritten_expect.stored = rewritten;
+    assert_finalize_refused (&fixture, &rewritten_expect, rc,
+        WYRELOG_E_POLICY, &committed, finalized_revision, NULL);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "graph-promote-selected-evidence-diverged")
+      || g_str_equal (mode, "graph-promote-selected-without-evidence")
+      || g_str_equal (mode, "graph-promote-row-without-evidence")) {
+    /* The record the old evidence is rebuilt from must carry the row's
+     * evidence, and the row must carry it: refused before the namespace is
+     * read. */
+    gboolean row_too = g_str_equal (mode,
+            "graph-promote-row-without-evidence");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    g_autoptr (GBytes) rewritten = g_str_equal (mode,
+            "graph-promote-selected-evidence-diverged")
+        ? darwin_flip_evidence (stored, replacement_uuid, 48) : NULL;
+    darwin_rewrite_selected_evidence (&fixture, row_too, NULL, TRUE,
+        rewritten);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, none);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    assert_finalize_journal (&fixture, &expect, finalized_revision, NULL);
+    wyl_policy_graph_restore_replacement_record_free (companion_row
+          (&fixture, operation, "selected_pending_cleanup",
+        row_too ? NULL : stored));
+    assert_select_zeta_record (&fixture, replacement_uuid,
+        WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED, rewritten);
+    g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
+    if (row_too) {
+      /* Refused before the quiescence, not by a quiescence held
+       * elsewhere. */
+      WylFactGraphQuiescenceToken *held =
+          finalized_hold_quiescence (&fixture);
+      rc = promote_run (&fixture, &probe, operation, finalized_revision,
+              &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      assert_finalize_points (&probe, none);
+      g_assert_null (committed.operation_uuid);
+      wyl_fact_graph_quiescence_token_release (held);
+    }
+    retry = FALSE;
+  } else {
+    g_assert_not_reached ();
+  }
+  if (retry) {
+    /* With the namespace restored promotion commits from the stored
+     * FINALIZED journal. */
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    assert_promoted (&fixture, &probe, &expect);
   }
   wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
     (NULL, NULL);
@@ -21760,6 +22561,122 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-finalized-substituted-main",
       "proof-substituted-main", test_graph_commit_finalized_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote",
+      "graph-promote", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-compare-busy",
+      "graph-promote-compare-busy", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-crash-before-recheck",
+      "graph-promote-crash-before-recheck", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-crash-before-transaction",
+      "graph-promote-crash-before-transaction",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-crash-before-transaction-restart",
+      "graph-promote-crash-before-transaction-restart",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-crash-in-transaction",
+      "graph-promote-crash-in-transaction", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-evidence-other-artifact",
+      "graph-promote-evidence-other-artifact", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-evidence-other-graph",
+      "graph-promote-evidence-other-graph", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-evidence-other-volume",
+      "graph-promote-evidence-other-volume", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-foreign-lock",
+      "graph-promote-foreign-lock", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-invalid-input",
+      "graph-promote-invalid-input", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-journal-changed-before-recheck",
+      "graph-promote-journal-changed-before-recheck",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-journal-changed-before-transaction",
+      "graph-promote-journal-changed-before-transaction",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-lost-response",
+      "graph-promote-lost-response", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-main-bytes",
+      "graph-promote-main-bytes", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-main-bytes-in-transaction",
+      "graph-promote-main-bytes-in-transaction",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-not-finalized",
+      "graph-promote-not-finalized", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-old-main-as-lock",
+      "graph-promote-old-main-as-lock", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-old-main-returned",
+      "graph-promote-old-main-returned", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-old-main-returned-in-transaction",
+      "graph-promote-old-main-returned-in-transaction",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-quiescence-held",
+      "graph-promote-quiescence-held", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-restart",
+      "graph-promote-restart", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-rollback-reappeared",
+      "graph-promote-rollback-reappeared", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-row-changed-before-recheck",
+      "graph-promote-row-changed-before-recheck",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-row-changed-before-transaction",
+      "graph-promote-row-changed-before-transaction",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-row-without-evidence",
+      "graph-promote-row-without-evidence", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-selected-evidence-diverged",
+      "graph-promote-selected-evidence-diverged",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-selected-without-evidence",
+      "graph-promote-selected-without-evidence",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-shape-busy",
+      "graph-promote-shape-busy", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-shape-not-found",
+      "graph-promote-shape-not-found", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-stray-in-transaction",
+      "graph-promote-stray-in-transaction", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-stray-name",
+      "graph-promote-stray-name", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-substituted-main",
+      "graph-promote-substituted-main", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-substituted-main-in-transaction",
+      "graph-promote-substituted-main-in-transaction",
+      test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-promote-wrong-revision",
+      "graph-promote-wrong-revision", test_graph_commit_promote_macos);
   g_test_add_data_func ("/fact-offline-backup-source/macos/commit-publish",
       "published", test_graph_commit_publish_macos);
   g_test_add_data_func

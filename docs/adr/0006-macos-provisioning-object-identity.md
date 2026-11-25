@@ -373,11 +373,12 @@ evidence and advances the replacement row, and selection (see "Restore
 replacement evidence") then takes the restore to `selected_pending_cleanup`,
 and `FINALIZE` (see "Restore replacement evidence") then takes it to
 `FINALIZED`, which the terminal proof (see "Restore replacement evidence")
-then proves; `RETIRE_STAGE`, promotion and the resume dispatcher still
-refuse, so a macOS graph restore stops after that proof. None of it is
-reachable while macOS commit admission refuses; these steps are proved by
-tests that reach the decision directly, and the companion step, selection,
-`FINALIZE` and the terminal proof by tests that call them directly.
+proves, and promotion (see "Restore replacement evidence") then commits it.
+`RETIRE_STAGE` and the resume dispatcher still refuse, and the published
+proof is not built on macOS. None of it is reachable while macOS commit
+admission refuses; these steps are proved by tests that reach the decision
+directly, and the companion step, selection, `FINALIZE`, the terminal proof
+and promotion by tests that call them directly.
 
 ## Restore replacement evidence
 
@@ -426,7 +427,10 @@ advanced before the evidence column existed, and it refuses such a
 selection. Selection copies the row's
 evidence into the `restore_selected` provisioning row in the same
 transaction, the replacement row's selection update refuses a missing or
-different copy, and promotion leaves it unchanged. Policy keeps the envelope
+different copy, and promotion's phase update keeps the evidence column, so
+the `ACTIVE` record carries the replacement's version 1 evidence bound to
+the replacement UUID. Store open, backup, unseal and a later restore read
+that record. Policy keeps the envelope
 opaque throughout; the caller decodes it against the replacement UUID before
 persisting it. The provisioning insert guard names only replacement columns
 that every released replacement table has, so no trigger refers to the new
@@ -546,12 +550,61 @@ of the journal or the row between the reads
 (`check_finalized_persisted`) gives `BUSY`. A remount or reboot after
 `FINALIZE` changes the device number the `TERMINAL` inventory compares, so
 the proof then refuses as an operator wedge (`POLICY`). The daemon's resume
-handler reaches the proof only for a journal that direct calls produced,
-and promotion still refuses (#1303 U5-11), so a `FINALIZED` macOS journal is
-the end of the direct-call path for now. For such a journal the resume
-handler on macOS runs the proof before promotion refuses: it takes the root
-writer lease, quiesces the graph and reads the main, so it can return the
-proof's `BUSY` or `IO` before that `POLICY`.
+handler reaches the proof only for a journal that direct calls produced. It
+reaches promotion only through the promote resume dispatcher, which still
+refuses on macOS (#1303 U5-15), so promotion runs by direct call only. For
+such a journal the resume handler on macOS runs the proof before that
+dispatcher refuses: it takes the root writer lease, quiesces the graph and
+reads the main, so it can return the proof's `BUSY` or `IO` before that
+`POLICY`.
+
+The macOS promotion (`wyl_fact_offline_restore_graph_commit_promote_run`)
+takes a `FINALIZED` restore to its committed receipt. Under its own root
+writer lease and quiescence, with the journal predicate of the Linux step,
+it refuses any revision but the `FINALIZED` one (`POLICY`), and a quiescence
+held elsewhere passes through as `BUSY`. It refuses a row without evidence
+before the graph is opened. It rebuilds the old main's evidence from the
+`restore_selected` record under its own lease, which must be the graph's
+only record and carry the row's evidence. A diverged or missing
+`restore_selected` evidence is refused before the namespace is read: by that
+load, or, on the missing-closed quiescence path, already by the store's
+selection postcondition, which the quiescence's reacquire proof runs. It
+then requires `TERMINAL` and fails fast otherwise: `DUAL`, the old main
+proved back at the rollback name, is an operator wedge. A recheck
+(`check_finalized_persisted`) gives `BUSY` for a journal or row changed
+since it was loaded. One fenced policy transaction then requires the stored
+journal to be the loaded one byte for byte and the row to be the loaded one,
+evidence included (a store `STALE` gives `BUSY`), runs the selection
+postcondition and the schema check, and runs the effect. The effect requires
+the row's evidence to be the loaded bytes, proves `TERMINAL` again and
+compares the stored replacement evidence through a fresh descriptor, the
+only read of the main. The compare runs inside the transaction, unlike the
+compare of the earlier steps, which run before theirs: promotion makes the
+evidence `ACTIVE` and cannot be undone, so no byte of the main may change
+between the compare and the commit, and nothing up to the commit is accepted
+by device and inode alone. The cost is that the compare holds the graph
+authority mutex and the store connection mutex for a full SHA-256 read of
+the main, and every store call in the process waits for it. The store then
+promotes the schema, publishes the journal, activates the graph, moves the
+`restore_selected` record to `ACTIVE` with its evidence and the row to
+`verified`, takes the tenant through `unsealing` to `active`, and
+terminalizes: history, receipt and terminal guard, then the replacement row,
+the claim and the journal are deleted. Promotion changes no file. The graph
+is unsealed afterwards through the `ACTIVE` evidence; the existing macOS
+unseal coverage is in `tests/test-fact-graph-seal.c`. Every locator refusal
+is a policy refusal. If the commit is durable and its response is lost, the
+call returns `IO` and the store goes terminal, so the same call cannot read
+the receipt and does not unseal. After a reopen the policy shows the
+promotion committed (the receipt at the selected revision plus four, the
+journal, row and claim gone, the `ACTIVE` record with the replacement
+evidence, the graph active and unsealed in policy), the runtime stays closed
+in that process until boot opens the graph through the `ACTIVE` evidence,
+and a retry gives `NOT_FOUND` and changes nothing. A direct caller resolves
+the lost response by reading the receipt; the published proof, which
+resolves it in process on Linux, is not built on macOS (#1303 U5-12). A
+remount or reboot after `FINALIZE` changes the device number the `TERMINAL`
+inventory compares, so promotion then refuses as an operator wedge
+(`POLICY`).
 
 | Durable observation | Required recovery result |
 | --- | --- |
@@ -562,7 +615,9 @@ proof's `BUSY` or `IO` before that `POLICY`.
 | `companion_synced`, the old `ACTIVE` evidence does not rebuild from the replacement evidence and the journal (macOS) | Fail closed at selection before the namespace is read; the old record stays; operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` not begun (macOS) | `FINALIZE` requires `DUAL`, the old main proved at the rollback name by the old evidence rebuilt from the `restore_selected` evidence and the journal; a mismatch, an absent rollback name or a changed device is an operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
-| `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal; promotion and every replay refuse (#1303 U5-11); a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge. |
+| `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal. Promotion requires `TERMINAL` before and inside its transaction and the replacement compare inside it, then commits; a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge, and a journal or row changed since it was loaded is `BUSY`. |
+| Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed, a retry gives `NOT_FOUND`, and the graph stays closed in that process until boot opens it through the `ACTIVE` evidence. |
+| `ACTIVE` after promotion (macOS) | The record carries the replacement's version 1 evidence bound to the replacement UUID; unseal, store open, backup and a later restore read it. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
 | `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |

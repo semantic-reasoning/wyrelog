@@ -6566,6 +6566,277 @@ darwin_finalized_prove_terminal (wyl_policy_store_t *policy,
   wyl_policy_graph_restore_replacement_record_free (row);
   return rc;
 }
+
+typedef struct
+{
+  WylFactGraphResolver *resolver;
+  WylFactGraphDirectory *directory;
+  WylFactRootWriterLease *lease;
+  WylFactGraphRuntimeManager *runtime;
+  const WylFactGraphKey *key;
+  const WylFactOfflineRestoreJournal *journal;
+  const GraphProvenance *provenance;
+  GBytes *evidence;
+  const WylFactGraphDarwinOperationEvidence *expected;
+} DarwinPromoteEffect;
+
+/* Inside the fenced promote transaction, after the store's selection
+ * postcondition and schema check: the row carries the bytes the call loaded,
+ * the namespace is still TERMINAL, and the replacement evidence is compared
+ * on a fresh descriptor.  This is the only read of the main, so nothing up
+ * to the commit is accepted by device and inode alone.  The compare holds
+ * the graph authority and store connection mutexes for a full SHA-256 read
+ * of the main, which every store call in the process waits for; unlike the
+ * earlier steps, which compare before their transaction, promotion makes
+ * the evidence ACTIVE and cannot be undone, so no byte may change between
+ * the compare and the commit.  Nothing on disk changes, and nothing here
+ * reenters the store. */
+static wyrelog_error_t
+darwin_promote_effect
+  (const WylPolicyGraphRestoreReplacementRecord *current,
+    gpointer user_data)
+{
+  DarwinPromoteEffect *effect = user_data;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (effect->journal->graphs, 0);
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (effect->lease, effect->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (effect->runtime, effect->key);
+  if (rc == WYRELOG_E_OK && (current->darwin_operation_evidence == NULL
+      || !evidence_equal (current->darwin_operation_evidence,
+      effect->evidence)))
+    rc = WYRELOG_E_POLICY;
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (effect->resolver, effect->directory, effect->lease,
+            effect->provenance->uuid, &effect->provenance->evidence,
+            effect->journal->operation_uuid, current->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_finalize_checkpoint ("finalize-darwin-promote-before-compare");
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (effect->directory, current->replacement_uuid,
+            &graph->staged_main_identity, graph->logical_bytes,
+            graph->checksum, effect->expected));
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (effect->lease,
+            effect->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (effect->runtime, effect->key);
+  return rc;
+}
+
+/* The macOS promotion of a FINALIZED selected graph restore (ADR 0006,
+ * "Restore replacement evidence").  The prologue, the journal predicate
+ * (a revision mismatch is POLICY), the quiescence and the unseal tail copy
+ * the Linux ones; the unifdef views of this file keep the Linux body
+ * unchanged, so the copy may drift, and the bind-wiring guard requires a
+ * call of each authority helper here.  A row without evidence is refused
+ * before the graph is opened.  The old main's evidence is rebuilt from the
+ * restore_selected record under this call's lease, and the namespace must
+ * be TERMINAL: DUAL is an operator wedge.  A journal or row changed since
+ * it was loaded is BUSY, at the recheck or by the store's STALE.  The
+ * transaction's effect proves TERMINAL again and compares the replacement
+ * evidence; the store then promotes the restore_selected record to ACTIVE
+ * with its evidence and terminalizes.  No file changes.  Every locator
+ * refusal is POLICY; IO and NOMEM pass. */
+static wyrelog_error_t
+darwin_promote_selected (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  WylFactRootWriterLease *lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphKey key = { 0 };
+  WylFactGraphQuiescenceToken *quiescence = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            operation_uuid, &row);
+  const WylFactOfflineRestoreJournalGraph *graph =
+      journal.graphs != NULL && journal.graphs->len == 1
+      ? g_ptr_array_index (journal.graphs, 0) : NULL;
+  if (rc == WYRELOG_E_OK
+      && (journal.revision != expected_revision
+      || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !journal.replacement_selected_pending_cleanup
+      || journal.policy_generation_published
+      || journal.lifecycle_handoff_complete || graph == NULL || row == NULL
+      || !g_str_equal (row->phase, "selected_pending_cleanup")
+      || graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || !graph->transition_terminal || !graph->replay_preflighted
+      || g_strcmp0 (journal.operation_uuid, row->operation_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, row->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->store_uuid, row->store_uuid) != 0
+      || g_strcmp0 (graph->old_provisioning_uuid,
+      row->old_provisioning_uuid) != 0
+      || journal.destination_tenant_lifecycle_generation !=
+      row->tenant_lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation !=
+      row->tenant_reconciliation_generation
+      || graph->destination_lifecycle_generation !=
+      row->graph_lifecycle_generation
+      || graph->destination_reconciliation_generation !=
+      row->graph_reconciliation_generation))
+    rc = WYRELOG_E_POLICY;
+  /* ADR 0006: a row without evidence is refused before the old evidence,
+   * the namespace or the main is read. */
+  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL
+      || g_bytes_get_size (row->darwin_operation_evidence)
+      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, TRUE, &key, drain_timeout_us,
+            &quiescence);
+  WylFactGraphLocator locator = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal (wyl_fact_graph_resolver_open_directory
+              (&resolver, &locator, FALSE, &directory));
+  wyl_fact_graph_locator_clear (&locator);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK) {
+    directory.checkpoint = finalize_checkpoint;
+    directory.checkpoint_data = finalize_checkpoint_data;
+  }
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  GraphProvenance provenance = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_provenance_load (policy, &journal, row, &provenance);
+  /* Fail fast: the effect proves TERMINAL again inside the transaction. */
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (&resolver, &directory, lease, provenance.uuid,
+            &provenance.evidence, operation_uuid, row->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  WylFactGraphDarwinOperationEvidence expected = { 0 };
+  if (rc == WYRELOG_E_OK)
+    memcpy (expected.bytes, g_bytes_get_data (row->darwin_operation_evidence,
+        NULL), sizeof expected.bytes);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_finalize_checkpoint ("finalize-darwin-promote-before-recheck");
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = check_finalized_persisted (policy, operation_uuid, encoded, row,
+            &journal);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_finalize_checkpoint
+          ("finalize-darwin-promote-before-transaction");
+#endif
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyOfflineRestoreRecord before = {
+      .operation_uuid = journal.operation_uuid,
+      .tenant_id = journal.tenant_id,
+      .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH,
+      .selected_graph_id = journal.selected_graph_id,
+      .revision = journal.revision,
+      .graph_count = 1,
+      .journal_blob = encoded,
+    };
+    memcpy (before.manifest_sha256, journal.manifest_sha256, 32);
+    DarwinPromoteEffect effect = {
+      .resolver = &resolver, .directory = &directory, .lease = lease,
+      .runtime = runtime, .key = &key, .journal = &journal,
+      .provenance = &provenance, .evidence = row->darwin_operation_evidence,
+      .expected = &expected,
+    };
+    WylPolicyOfflineRestoreStoreResult result =
+        WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    rc = wyl_policy_store_graph_restore_selected_promote_with_effect
+          (policy, row, &before, darwin_promote_effect, &effect, &result);
+    if (rc == WYRELOG_E_OK
+        && result != WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
+      rc = WYRELOG_E_BUSY;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_policy_published (&journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_lifecycle_handoff (&journal);
+    if (rc == WYRELOG_E_OK) {
+      *out_committed = journal;
+      memset (&journal, 0, sizeof journal);
+    }
+  }
+  wyl_fact_graph_directory_clear (&directory);
+  g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            out_committed->tenant_id, out_committed->selected_graph_id,
+            drain_timeout_us);
+  else {
+    WylPolicyOfflineRestoreReceipt *receipt = NULL;
+    wyrelog_error_t receipt_rc =
+        wyl_policy_store_offline_restore_receipt_lookup (policy,
+            operation_uuid, &receipt);
+    if (receipt_rc == WYRELOG_E_OK && receipt != NULL
+        && receipt->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+        && receipt->final_revision == expected_revision + 2
+        && g_strcmp0 (receipt->terminal_state, "committed") == 0)
+      (void) restore_unseal_graph (policy, fact_root, runtime,
+          journal.tenant_id, journal.selected_graph_id,
+          drain_timeout_us);
+    wyl_policy_offline_restore_receipt_free (receipt);
+  }
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  return rc;
+}
 #endif
 
 static gboolean
@@ -8340,6 +8611,12 @@ promote_selected_terminal_effect
 }
 #endif
 
+#ifdef __APPLE__
+static wyrelog_error_t darwin_promote_selected (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
+#endif
 wyrelog_error_t
 wyl_fact_offline_restore_graph_commit_promote_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
@@ -8353,6 +8630,10 @@ wyl_fact_offline_restore_graph_commit_promote_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_promote_selected (policy, fact_root, runtime, operation_uuid,
+             expected_revision, drain_timeout_us, out_committed);
+#else
 #ifndef __linux__
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
@@ -8490,5 +8771,6 @@ wyl_fact_offline_restore_graph_commit_promote_run
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear (out_committed);
   return rc;
+#endif
 #endif
 }
