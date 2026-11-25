@@ -598,13 +598,32 @@ the receipt and does not unseal. After a reopen the policy shows the
 promotion committed (the receipt at the selected revision plus four, the
 journal, row and claim gone, the `ACTIVE` record with the replacement
 evidence, the graph active and unsealed in policy), the runtime stays closed
-in that process until boot opens the graph through the `ACTIVE` evidence,
-and a retry gives `NOT_FOUND` and changes nothing. A direct caller resolves
-the lost response by reading the receipt; the published proof, which
-resolves it in process on Linux, is not built on macOS (#1303 U5-12). A
-remount or reboot after `FINALIZE` changes the device number the `TERMINAL`
-inventory compares, so promotion then refuses as an operator wedge
-(`POLICY`).
+in that process until the published proof or boot opens the graph through
+the `ACTIVE` evidence, and a retry gives `NOT_FOUND` and changes nothing.
+The macOS published proof
+(`wyl_fact_offline_restore_graph_commit_published_prove_terminal`, #1303
+U5-12) resolves the lost response in process. A direct caller must pass the
+current `FINALIZED` journal; any other journal is `POLICY` before the store
+is read. The proof reads only the receipt and the graph's authority before
+the unseal; the unseal reads the `ACTIVE` evidence and opens the main by
+identity. No receipt is `POLICY`, with no lease, quiescence or namespace
+read: promotion terminalizes in its own transaction, so no macOS store holds
+a published journal without a receipt, and the Linux "published, no receipt"
+branch has no macOS counterpart. A receipt that does not name the journal's
+operation, tenant, graph and manifest at its revision plus two is `POLICY`.
+The receipt is terminal and outlives the graph's later lifecycle, so the
+graph must still be active and unsealed in policy, as promotion left it: a
+graph sealed since is a stale replay (`POLICY`), and nothing is unsealed.
+Otherwise the proof returns the journal marked published and handed off and
+unseals the graph, in the same process after a reopen or after a restart; a
+ready runtime is accepted, so a replay changes nothing. No `TERMINAL` proof
+or byte compare follows the receipt: the graph is live, and a WAL and writes
+are legitimate. Store errors pass through, so before a reopen the proof
+returns `IO`. An unseal that refuses a substituted main returns `POLICY` and
+leaves the runtime entry evicted and closed. The resume dispatcher still
+refuses on macOS (#1303 U5-15). A remount or reboot after `FINALIZE` changes
+the device number the `TERMINAL` inventory compares, so promotion then
+refuses as an operator wedge (`POLICY`).
 
 | Durable observation | Required recovery result |
 | --- | --- |
@@ -616,7 +635,8 @@ inventory compares, so promotion then refuses as an operator wedge
 | `selected_pending_cleanup`, `FINALIZE` not begun (macOS) | `FINALIZE` requires `DUAL`, the old main proved at the rollback name by the old evidence rebuilt from the `restore_selected` evidence and the journal; a mismatch, an absent rollback name or a changed device is an operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
 | `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal. Promotion requires `TERMINAL` before and inside its transaction and the replacement compare inside it, then commits; a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge, and a journal or row changed since it was loaded is `BUSY`. |
-| Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed, a retry gives `NOT_FOUND`, and the graph stays closed in that process until boot opens it through the `ACTIVE` evidence. |
+| Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed and a retry gives `NOT_FOUND`; the published proof matches the receipt to the `FINALIZED` journal and unseals through the `ACTIVE` evidence, in process after a reopen or after a restart. |
+| Committed receipt (macOS) | The published proof requires the `FINALIZED` journal, a matching committed receipt and the graph still active and unsealed in policy; it reads only the receipt and the graph's authority before the unseal, and the unseal reads the `ACTIVE` evidence and opens the main by identity. No receipt, a mismatch or a graph sealed since is `POLICY`, and nothing is unsealed. |
 | `ACTIVE` after promotion (macOS) | The record carries the replacement's version 1 evidence bound to the replacement UUID; unseal, store open, backup and a later restore read it. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |

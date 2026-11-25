@@ -170,10 +170,15 @@ restore (#1303 U5-11):
   ``row->darwin_operation_evidence == NULL`` test precedes its first
   wyl_fact_graph_resolver_open;
 - darwin_promote_effect calls evidence_equal before its shape and the
-  shape before the compare, calls no wyl_policy_store_* function and no
-  selected provenance load, and mutates nothing: none of the Darwin or
-  Linux cleanup execute, the capture, the setter, the sync, the mark, or
-  the journal attempt begin or completion.
+  shape before the compare, calls no wyl_policy_store_* function, no
+  selected provenance load and none of check_finalized_persisted,
+  check_policy, check_persisted, graph_provenance_load,
+  restore_unseal_graph or graph_commit_quiesce, reaches no local helper
+  whose body, or whose own local helpers' bodies, call a
+  wyl_policy_store_* or wyl_fact_offline_restore_journal_store_* function,
+  and mutates nothing: none of the Darwin or Linux cleanup execute, the
+  capture, the setter, the sync, the mark, or the journal attempt begin or
+  completion.
 
 Both have route rows: darwin_promote_selected calls each authority helper
 of the Linux promotion it copies (the lease acquisition, the policy bind,
@@ -182,6 +187,40 @@ graph_commit_quiesce and check_runtime), the selected provenance load,
 check_finalized_persisted, the receipt lookup and restore_unseal_graph;
 darwin_promote_effect calls the lease authorization, check_runtime, the
 Darwin cleanup shape and the compare.
+
+Published rules (check_published_rules), for the macOS published proof of
+a promoted restore (#1303 U5-12):
+
+- wyl_fact_offline_restore_graph_commit_published_prove_terminal has
+  exactly one ``#ifdef __APPLE__`` arm, which calls
+  darwin_published_prove_terminal exactly once and none of the receipt
+  lookup, the graph authority read, restore_unseal_graph, the store
+  published proof, the Darwin cleanup shape or the compare itself; its
+  ``#else`` arm calls none of darwin_published_prove_terminal, the Darwin
+  cleanup shape, the compare, the rebind or the selected provenance load
+  (the Linux receipt lookup, unseal and published proof stay allowed);
+- darwin_published_prove_terminal calls the receipt lookup, the graph
+  authority read and restore_unseal_graph exactly once each, and none of
+  the store published proof, the row load, the journal load, the selected
+  provenance load, graph_provenance_load, the Darwin or Linux cleanup
+  shape, the compare, the rebind or the dual witness: each reads a state
+  promotion deleted, or re-proves a namespace that is now live;
+- it mutates nothing: none of the store promotion, the store selection,
+  the FINALIZE begin or completion, the setter, the sync, the mark, the
+  capture, the Darwin or Linux cleanup execute, the journal attempt begin
+  or completion, or the journal store CAS;
+- it names replacement_selected_pending_cleanup and
+  WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION before its first
+  receipt lookup, and tests ``receipt == NULL`` after the lookup and before
+  its first mark_policy_published;
+- its first receipt lookup, mark_policy_published,
+  mark_lifecycle_handoff, graph authority read and restore_unseal_graph
+  come in that order.
+
+Its route row: darwin_published_prove_terminal calls each helper of the
+Linux receipt fast path it copies (the journal encode, the receipt lookup,
+the journal decode, both marks and restore_unseal_graph) and the graph
+authority read.
 
 function_body finds a definition whose return type is on the line before
 its name or on the same line, and skips a declaration: a match whose
@@ -277,6 +316,27 @@ PROMOTE_EFFECT = "darwin_promote_effect"
 PROMOTE_CALL = "wyl_policy_store_graph_restore_selected_promote_with_effect"
 LINUX_PROMOTE_EFFECT = "promote_selected_terminal_effect"
 UNSEAL_CALL = "restore_unseal_graph"
+PUBLISHED_RUN = (
+    "wyl_fact_offline_restore_graph_commit_published_prove_terminal"
+)
+DARWIN_PUBLISHED = "darwin_published_prove_terminal"
+RECEIPT_CALL = "wyl_policy_store_offline_restore_receipt_lookup"
+STORE_PUBLISHED_CALL = "wyl_policy_store_graph_restore_published_prove"
+ROW_LOAD = "wyl_policy_store_graph_restore_replacement_load"
+JOURNAL_LOAD = "wyl_fact_offline_restore_journal_store_load"
+MARK_PUBLISHED = "wyl_fact_offline_restore_journal_mark_policy_published"
+MARK_HANDOFF = "wyl_fact_offline_restore_journal_mark_lifecycle_handoff"
+AUTHORITY_CALL = "wyl_policy_store_read_graph_authority"
+# Local helpers that read or write the store: the promote effect runs
+# inside the store transaction and must call none of them.
+REENTRANT_HELPERS = ("check_finalized_persisted", "check_policy",
+                     "check_persisted", "graph_provenance_load",
+                     "graph_selected_provenance_load", UNSEAL_CALL,
+                     "graph_commit_quiesce")
+STORE_ENTRY = re.compile(
+    r"(?<![\w])(?:wyl_policy_store_\w+"
+    r"|wyl_fact_offline_restore_journal_store_\w+)\s*\("
+)
 
 
 @dataclass(frozen=True)
@@ -386,6 +446,10 @@ ROUTE_RULES = (
                "check_runtime",
                "wyl_fact_graph_restore_darwin_selected_cleanup_shape_open",
                COMPARE_CALL)),
+    RouteRule("darwin_published_prove_terminal",
+              ("wyl_fact_offline_restore_journal_encode", RECEIPT_CALL,
+               "wyl_fact_offline_restore_journal_decode", MARK_PUBLISHED,
+               MARK_HANDOFF, AUTHORITY_CALL, "restore_unseal_graph")),
 )
 
 
@@ -885,6 +949,35 @@ def names(text: str, name: str) -> bool:
                      text) is not None
 
 
+C_KEYWORDS = frozenset(("if", "for", "while", "switch", "return", "sizeof",
+                        "defined"))
+
+
+def store_reaching_helper(source: str, body: str,
+                          chain: tuple[str, ...],
+                          visited: set[str] | None = None,
+                          ) -> tuple[str, ...] | None:
+    """The call chain from ``chain[-1]`` to the first local helper whose
+    body calls the store, or None.  Identifiers not defined in ``source``
+    are skipped."""
+    visited = set(chain) if visited is None else visited
+    for name in re.findall(r"(?<![\w])([A-Za-z_]\w*)\s*\(", body):
+        if name in C_KEYWORDS or name in visited:
+            continue
+        visited.add(name)
+        try:
+            helper = function_body(source, name)
+        except ContractError:
+            continue
+        if STORE_ENTRY.search(helper) is not None:
+            return chain + (name,)
+        found = store_reaching_helper(source, helper, chain + (name,),
+                                      visited)
+        if found is not None:
+            return found
+    return None
+
+
 def check_promote_rules(source: str) -> None:
     body = function_body(source, PROMOTE_RUN)
     arms = apple_arms(body)
@@ -1000,6 +1093,18 @@ def check_promote_rules(source: str) -> None:
             f"E_PROMOTE_EFFECT_REENTERS: {PROMOTE_EFFECT} runs inside the"
             " store transaction and must not reenter the store"
         )
+    for helper in REENTRANT_HELPERS:
+        if count_calls(effect, helper) != 0:
+            raise ContractError(
+                f"E_PROMOTE_EFFECT_REENTERS: {PROMOTE_EFFECT} calls {helper},"
+                " which reenters the store"
+            )
+    chain = store_reaching_helper(source, effect, (PROMOTE_EFFECT,))
+    if chain is not None:
+        raise ContractError(
+            f"E_PROMOTE_EFFECT_REENTERS: {PROMOTE_EFFECT} reaches the store"
+            f" through {' -> '.join(chain)}"
+        )
     for call in (CLEANUP_EXECUTE_CALL, LINUX_CLEANUP_EXECUTE_CALL,
                  CAPTURE_CALL, SETTER_CALL, SYNC_CALL, MARK_CALL,
                  JOURNAL_BEGIN_CALL, JOURNAL_COMPLETE_CALL):
@@ -1008,6 +1113,90 @@ def check_promote_rules(source: str) -> None:
                 f"E_PROMOTE_EFFECT_MUTATES: {PROMOTE_EFFECT} calls {call}, but"
                 " promotion changes no file"
             )
+
+
+def check_published_rules(source: str) -> None:
+    body = function_body(source, PUBLISHED_RUN)
+    arms = apple_arms(body)
+    if len(arms) != 1:
+        raise ContractError(
+            f"E_PUBLISHED_ARMS: {PUBLISHED_RUN} has {len(arms)}"
+            " #ifdef __APPLE__ arms, expected 1"
+        )
+    apple, other = arms[0]
+    if count_calls(apple, DARWIN_PUBLISHED) != 1:
+        raise ContractError(
+            f"E_PUBLISHED_ROUTE: the Darwin arm of {PUBLISHED_RUN} must call"
+            f" {DARWIN_PUBLISHED} exactly once"
+        )
+    for call in (RECEIPT_CALL, AUTHORITY_CALL, UNSEAL_CALL,
+                 STORE_PUBLISHED_CALL, CLEANUP_SHAPE_CALL, COMPARE_CALL):
+        if count_calls(apple, call) != 0:
+            raise ContractError(
+                f"E_PUBLISHED_DIRECT: the Darwin arm of {PUBLISHED_RUN} calls"
+                f" {call} instead of {DARWIN_PUBLISHED}"
+            )
+    for call in (DARWIN_PUBLISHED, CLEANUP_SHAPE_CALL, COMPARE_CALL,
+                 REBIND_CALL, SELECTED_PROVENANCE):
+        if names(other, call):
+            raise ContractError(
+                f"E_PUBLISHED_LEAK: the #else arm of {PUBLISHED_RUN} names"
+                f" {call}"
+            )
+    body = function_body(source, DARWIN_PUBLISHED)
+    for call in (RECEIPT_CALL, AUTHORITY_CALL, UNSEAL_CALL):
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_PUBLISHED_CALLS: {DARWIN_PUBLISHED} must call {call}"
+                " exactly once"
+            )
+    for call in (STORE_PUBLISHED_CALL, ROW_LOAD, JOURNAL_LOAD,
+                 SELECTED_PROVENANCE, "graph_provenance_load",
+                 CLEANUP_SHAPE_CALL, LINUX_CLEANUP_SHAPE_CALL, COMPARE_CALL,
+                 REBIND_CALL, DUAL_WITNESS_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_PUBLISHED_CALLS: {DARWIN_PUBLISHED} calls {call}, which"
+                " reads a state promotion deleted or re-proves a live"
+                " namespace"
+            )
+    for call in (PROMOTE_CALL, SELECT_CALL, BEGIN_CALL, COMPLETE_CALL,
+                 SETTER_CALL, SYNC_CALL, MARK_CALL, CAPTURE_CALL,
+                 CLEANUP_EXECUTE_CALL, LINUX_CLEANUP_EXECUTE_CALL,
+                 JOURNAL_BEGIN_CALL, JOURNAL_COMPLETE_CALL,
+                 "wyl_fact_offline_restore_journal_store_cas"):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_PUBLISHED_MUTATES: {DARWIN_PUBLISHED} calls {call}, but"
+                " the proof changes nothing before the unseal"
+            )
+    looked_up = first_call(body, RECEIPT_CALL)
+    for name in ("replacement_selected_pending_cleanup",
+                 "WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION"):
+        named = re.search(r"(?<![\w])" + name + r"(?![\w])", body)
+        if named is None or named.start() > looked_up:
+            raise ContractError(
+                f"E_PUBLISHED_FINALIZED: {DARWIN_PUBLISHED} must require the"
+                f" FINALIZED journal ({name}) before its receipt lookup"
+            )
+    marked = first_call(body, MARK_PUBLISHED)
+    missing = re.search(r"\breceipt\s*==\s*NULL", body[looked_up:])
+    if (missing is None or marked < 0
+            or looked_up + missing.start() > marked):
+        raise ContractError(
+            f"E_PUBLISHED_NO_RECEIPT: {DARWIN_PUBLISHED} must refuse a"
+            " missing receipt after its lookup and before marking the"
+            " journal published"
+        )
+    order = [first_call(body, call) for call in
+             (RECEIPT_CALL, MARK_PUBLISHED, MARK_HANDOFF, AUTHORITY_CALL,
+              UNSEAL_CALL)]
+    if order != sorted(order):
+        raise ContractError(
+            f"E_PUBLISHED_ORDER: {DARWIN_PUBLISHED} must look up the"
+            " receipt, mark the journal published and handed off, read the"
+            " graph authority and unseal in that order"
+        )
 
 
 def check_source(source: str) -> None:
@@ -1021,6 +1210,7 @@ def check_source(source: str) -> None:
     check_finalize_rules(source)
     check_terminal_rules(source)
     check_promote_rules(source)
+    check_published_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -1908,6 +2098,139 @@ static wyrelog_error_t darwin_promote_selected (wyl_policy_store_t *policy,
     const gchar *fact_root, WylFactOfflineRestoreJournal *out_committed);
 """
 
+PUBLISHED_RUN_FIXTURE = """\
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
+  wyl_policy_store_t *policy, const gchar *fact_root,
+  WylFactOfflineRestoreJournal *out_committed) {
+  if (policy == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_published_prove_terminal (policy, fact_root, runtime,
+             finalized, drain_timeout_us, out_committed);
+#else
+#ifndef __linux__
+  (void)drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  wyrelog_error_t receipt_rc = wyl_policy_store_offline_restore_receipt_lookup
+        (policy, finalized->operation_uuid, &receipt);
+  if (receipt != NULL) {
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            finalized->tenant_id, finalized->selected_graph_id,
+            drain_timeout_us);
+    return rc;
+  }
+  rc = wyl_policy_store_graph_restore_published_prove(
+    policy, &finalized_record, &published);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_selected_cleanup_shape_open(
+      &resolver, &directory, lease, graph->old_provisioning_uuid,
+      terminal.operation_uuid, row->replacement_uuid,
+      &graph->expected_main_identity, &graph->staged_main_identity, &shape);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            finalized->tenant_id, finalized->selected_graph_id,
+            drain_timeout_us);
+  return rc;
+#endif
+#endif
+}
+"""
+
+# The real body of the Darwin published proof.
+DARWIN_PUBLISHED_FIXTURE = """\
+static wyrelog_error_t
+darwin_published_prove_terminal (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_autoptr (GBytes) finalized_blob = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (finalized,
+          &finalized_blob);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      finalized->graphs != NULL && finalized->graphs->len == 1
+      ? g_ptr_array_index (finalized->graphs, 0) : NULL;
+  if (finalized->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || finalized->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || finalized->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !finalized->replacement_selected_pending_cleanup
+      || finalized->policy_generation_published
+      || finalized->lifecycle_handoff_complete || graph == NULL
+      || graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      || !graph->transition_terminal || !graph->replay_preflighted)
+    return WYRELOG_E_POLICY;
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  rc = wyl_policy_store_offline_restore_receipt_lookup (policy,
+          finalized->operation_uuid, &receipt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (receipt == NULL)
+    return WYRELOG_E_POLICY;
+  guint64 terminal_revision = receipt->final_revision;
+  gboolean matches = receipt->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+      && g_strcmp0 (receipt->tenant_id, finalized->tenant_id) == 0
+      && g_strcmp0 (receipt->selected_graph_id,
+          finalized->selected_graph_id) == 0
+      && receipt->final_revision == finalized->revision + 2
+      && receipt->graph_count == 1
+      && g_strcmp0 (receipt->terminal_state, "committed") == 0
+      && memcmp (receipt->manifest_sha256, finalized->manifest_sha256,
+          sizeof receipt->manifest_sha256) == 0;
+  wyl_policy_offline_restore_receipt_free (receipt);
+  if (!matches)
+    return WYRELOG_E_POLICY;
+  g_auto (WylFactOfflineRestoreJournal) terminal = { 0 };
+  rc = wyl_fact_offline_restore_journal_decode (finalized_blob, &terminal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_mark_policy_published (&terminal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_mark_lifecycle_handoff (&terminal);
+  if (rc == WYRELOG_E_OK && terminal.revision != terminal_revision)
+    rc = WYRELOG_E_POLICY;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_read_graph_authority (policy, finalized->tenant_id,
+            finalized->selected_graph_id, &authority);
+  if (rc == WYRELOG_E_OK
+      && (authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      || authority->sealed_compatibility))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_graph_authority_record_free (authority);
+  if (rc == WYRELOG_E_OK) {
+    *out_committed = terminal;
+    memset (&terminal, 0, sizeof terminal);
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_finalize_checkpoint ("finalize-darwin-published-before-unseal");
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            finalized->tenant_id, finalized->selected_graph_id,
+            drain_timeout_us);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  return rc;
+}
+"""
+
+# The real file's forward declaration of the Darwin published proof, which
+# function_body must skip.
+PUBLISHED_DECLARATIONS = """\
+static wyrelog_error_t darwin_published_prove_terminal
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -1943,6 +2266,9 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_promote_run": PROMOTE_RUN_FIXTURE,
     "darwin_promote_selected": DARWIN_PROMOTE_FIXTURE,
     "darwin_promote_effect": DARWIN_PROMOTE_EFFECT_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_published_prove_terminal":
+        PUBLISHED_RUN_FIXTURE,
+    "darwin_published_prove_terminal": DARWIN_PUBLISHED_FIXTURE,
 }
 
 
@@ -1985,6 +2311,8 @@ DT = "darwin_finalized_prove_terminal"
 PR = "wyl_fact_offline_restore_graph_commit_promote_run"
 DP = "darwin_promote_selected"
 PE = "darwin_promote_effect"
+PP = "wyl_fact_offline_restore_graph_commit_published_prove_terminal"
+DB = "darwin_published_prove_terminal"
 FINALIZE_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
     "    rc = darwin_post_publish_refusal\n"
@@ -2171,6 +2499,88 @@ REREAD_LINES = (
     "    if (rc == WYRELOG_E_OK)\n"
     "      rc = check_persisted (policy, operation_uuid, encoded, row,"
     " &journal);\n"
+)
+
+
+PUBLISHED_PREDICATE_LINES = (
+    "  if (finalized->version !="
+    " WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION\n"
+    "      || finalized->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH\n"
+    "      || finalized->decision !="
+    " WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT\n"
+    "      || !finalized->replacement_selected_pending_cleanup\n"
+    "      || finalized->policy_generation_published\n"
+    "      || finalized->lifecycle_handoff_complete || graph == NULL\n"
+    "      || graph->transition_state !=\n"
+    "      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED\n"
+    "      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE\n"
+    "      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE\n"
+    "      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED\n"
+    "      || !graph->transition_terminal || !graph->replay_preflighted)\n"
+    "    return WYRELOG_E_POLICY;\n"
+)
+PUBLISHED_NO_RECEIPT_LINES = (
+    "  if (receipt == NULL)\n"
+    "    return WYRELOG_E_POLICY;\n"
+)
+PUBLISHED_MARK_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_fact_offline_restore_journal_mark_policy_published"
+    " (&terminal);\n"
+)
+PUBLISHED_AUTHORITY_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_policy_store_read_graph_authority (policy,"
+    " finalized->tenant_id,\n"
+    "            finalized->selected_graph_id, &authority);\n"
+)
+PUBLISHED_UNSEAL_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = restore_unseal_graph (policy, fact_root, runtime,\n"
+    "            finalized->tenant_id, finalized->selected_graph_id,\n"
+    "            drain_timeout_us);\n"
+)
+PUBLISHED_ARM_CALL = (
+    "             finalized, drain_timeout_us, out_committed);\n#else"
+)
+
+
+def published_added(call: str):
+    return replace(PUBLISHED_UNSEAL_LINES,
+                   "  if (rc == WYRELOG_E_OK)\n    rc = " + call + ";\n"
+                   + PUBLISHED_UNSEAL_LINES)
+
+
+def effect_peek(helper_bodies: str):
+    """The promote effect calling effect_peek, prepended with its body."""
+    def transform(text: str) -> str:
+        return helper_bodies + text.replace(
+            PROMOTE_EFFECT_SHAPE_LINES,
+            "  if (rc == WYRELOG_E_OK)\n    rc = effect_peek (effect);\n"
+            + PROMOTE_EFFECT_SHAPE_LINES, 1)
+    return transform
+
+
+EFFECT_PEEK_STORE = (
+    "static wyrelog_error_t\n"
+    "effect_peek (DarwinPromoteEffect *effect)\n"
+    "{\n"
+    "  return wyl_policy_store_offline_restore_load (effect->policy,"
+    " NULL, NULL);\n"
+    "}\n"
+)
+EFFECT_PEEK_TRANSITIVE = (
+    "static wyrelog_error_t\n"
+    "effect_peek_inner (DarwinPromoteEffect *effect)\n"
+    "{\n"
+    "  return wyl_policy_store_offline_restore_load (effect->policy,"
+    " NULL, NULL);\n"
+    "}\n"
+    "static wyrelog_error_t\n"
+    "effect_peek (DarwinPromoteEffect *effect)\n"
+    "{\n"
+    "  return effect_peek_inner (effect);\n"
+    "}\n"
 )
 
 
@@ -2903,6 +3313,106 @@ MUTANTS = (
         " (effect->resolver, effect->directory, effect->lease, uuid,"
         " &evidence, operation_uuid, replacement, &old_main, &new_main,"
         " size);\n"), "E_PROMOTE_EFFECT_MUTATES"),
+    ("promote effect: check_finalized_persisted called", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = check_finalized_persisted (policy, operation_uuid, encoded,"
+        " current, journal);\n" + PROMOTE_EFFECT_SHAPE_LINES),
+     "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: check_policy called", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = check_policy (policy, journal, current);\n"
+        + PROMOTE_EFFECT_SHAPE_LINES), "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: ACTIVE provenance loaded", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = graph_provenance_load (policy, journal, current,"
+        " &provenance);\n" + PROMOTE_EFFECT_SHAPE_LINES),
+     "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: unseal called", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = restore_unseal_graph (policy, fact_root, runtime, tenant,"
+        " graph, drain_timeout_us);\n" + PROMOTE_EFFECT_SHAPE_LINES),
+     "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: local helper reads the store", PE,
+     effect_peek(EFFECT_PEEK_STORE), "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: local helper reads the store transitively", PE,
+     effect_peek(EFFECT_PEEK_TRANSITIVE), "E_PROMOTE_EFFECT_REENTERS"),
+    ("published: Apple arm dropped", PP, drop_apple_arm, "E_PUBLISHED_ARMS"),
+    ("published: Apple arm calls the promotion instead", PP, replace(
+        "  return darwin_published_prove_terminal (policy, fact_root,"
+        " runtime,\n",
+        "  return darwin_promote_selected (policy, fact_root, runtime,\n"),
+     "E_PUBLISHED_ROUTE"),
+    ("published: Apple arm looks up the receipt", PP, replace(
+        PUBLISHED_ARM_CALL,
+        "             finalized, drain_timeout_us, out_committed);\n"
+        "  rc = wyl_policy_store_offline_restore_receipt_lookup (policy,"
+        " finalized->operation_uuid, &receipt);\n#else"),
+     "E_PUBLISHED_DIRECT"),
+    ("published: Apple arm unseals", PP, replace(
+        PUBLISHED_ARM_CALL,
+        "             finalized, drain_timeout_us, out_committed);\n"
+        "  rc = restore_unseal_graph (policy, fact_root, runtime, tenant,"
+        " graph, drain_timeout_us);\n#else"), "E_PUBLISHED_DIRECT"),
+    ("published: Linux arm calls the Darwin proof", PP, replace(
+        "  return rc;\n#endif",
+        "  rc = darwin_published_prove_terminal (policy, fact_root, runtime,"
+        " finalized, drain_timeout_us, out_committed);\n"
+        "  return rc;\n#endif"), "E_PUBLISHED_LEAK"),
+    ("darwin published: receipt lookup dropped", DB, replace(
+        "wyl_policy_store_offline_restore_receipt_lookup (",
+        "receipt_unread ("), "E_ROUTE_HELPER"),
+    ("darwin published: handoff mark dropped", DB, replace(
+        "wyl_fact_offline_restore_journal_mark_lifecycle_handoff (",
+        "journal_left_unhanded ("), "E_ROUTE_HELPER"),
+    ("darwin published: graph authority read dropped", DB, replace(
+        "wyl_policy_store_read_graph_authority (",
+        "authority_unread ("), "E_ROUTE_HELPER"),
+    ("darwin published: unseal dropped", DB, replace(
+        "restore_unseal_graph (", "restore_keep_sealed ("), "E_ROUTE_HELPER"),
+    ("darwin published: store published proof added", DB, published_added(
+        "wyl_policy_store_graph_restore_published_prove (policy, &record,"
+        " &published)"), "E_PUBLISHED_CALLS"),
+    ("darwin published: row loaded", DB, published_added(
+        "wyl_policy_store_graph_restore_replacement_load (policy,"
+        " finalized->operation_uuid, &row)"), "E_PUBLISHED_CALLS"),
+    ("darwin published: journal loaded", DB, published_added(
+        "wyl_fact_offline_restore_journal_store_load (policy,"
+        " finalized->operation_uuid, &journal)"), "E_PUBLISHED_CALLS"),
+    ("darwin published: selected provenance loaded", DB, published_added(
+        "graph_selected_provenance_load (policy, finalized, row,"
+        " &provenance)"), "E_PUBLISHED_CALLS"),
+    ("darwin published: TERMINAL proved", DB, published_added(
+        "wyl_fact_graph_restore_darwin_selected_cleanup_shape_open"
+        " (&resolver, &directory, lease, uuid, &evidence, operation_uuid,"
+        " replacement, &old_main, &new_main, size, &shape)"),
+     "E_PUBLISHED_CALLS"),
+    ("darwin published: bytes compared", DB, published_added(
+        "wyl_fact_graph_directory_compare_darwin_replacement_evidence"
+        " (&directory, replacement, &identity, size, checksum, &expected)"),
+     "E_PUBLISHED_CALLS"),
+    ("darwin published: store promotion added", DB, published_added(
+        "wyl_policy_store_graph_restore_selected_promote_with_effect"
+        " (policy, row, &before, darwin_promote_effect, &effect, &result)"),
+     "E_PUBLISHED_MUTATES"),
+    ("darwin published: FINALIZED predicate dropped", DB,
+     replace(PUBLISHED_PREDICATE_LINES, ""), "E_PUBLISHED_FINALIZED"),
+    ("darwin published: FINALIZED predicate after the lookup", DB,
+     move_before(PUBLISHED_PREDICATE_LINES, PUBLISHED_NO_RECEIPT_LINES),
+     "E_PUBLISHED_FINALIZED"),
+    ("darwin published: missing receipt not refused", DB,
+     replace(PUBLISHED_NO_RECEIPT_LINES, ""), "E_PUBLISHED_NO_RECEIPT"),
+    ("darwin published: unseal before the marks", DB,
+     move_before(PUBLISHED_UNSEAL_LINES, PUBLISHED_MARK_LINES),
+     "E_PUBLISHED_ORDER"),
+    ("darwin published: authority read after the unseal", DB,
+     move_before(PUBLISHED_AUTHORITY_LINES,
+                 "  if (rc != WYRELOG_E_OK)\n"
+                 "    wyl_fact_offline_restore_journal_clear"
+                 " (out_committed);\n"), "E_PUBLISHED_ORDER"),
 )
 
 
@@ -2970,6 +3480,32 @@ def self_test() -> None:
     else:
         raise ContractError(
             "self-test mutant survived: declared promote compare"
+        )
+    # The Darwin published proof's forward declaration is skipped too: the
+    # real bodies still pass, and the unseal dropped from its real body
+    # still fails.
+    declared = PUBLISHED_DECLARATIONS + "".join(POSITIVE.values())
+    check_source(declared)
+    dropped = PUBLISHED_DECLARATIONS + "".join(
+        text.replace("restore_unseal_graph (", "restore_keep_sealed (")
+        if name == DB else text
+        for name, text in POSITIVE.items()
+    )
+    if dropped == declared:
+        raise ContractError(
+            "self-test mutant did not apply: declared published unseal"
+        )
+    try:
+        check_source(dropped)
+    except ContractError as error:
+        if not str(error).startswith("E_ROUTE_HELPER:"):
+            raise ContractError(
+                "self-test mutant failed for another reason: declared"
+                f" published unseal: {error}"
+            ) from error
+    else:
+        raise ContractError(
+            "self-test mutant survived: declared published unseal"
         )
 
 
