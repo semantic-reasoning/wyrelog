@@ -1,5 +1,5 @@
 [wrap-git]
 url = https://github.com/semantic-reasoning/wirelog.git
-revision = 9cb295ad49280c2562e29148796d1ac7ec69c2ef
+revision = a782f54cdc13fa36dafb98ec4c80901cf240d3fe
 depth = 1
 diff_files = wirelog/0001-optional-benchmarks.patch, wirelog/0002-easy-snapshot-completeness.patch

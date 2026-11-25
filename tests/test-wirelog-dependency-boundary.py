@@ -36,7 +36,7 @@ if root_meson.count(selector_call) != 1:
 selector_offset = root_meson.index(selector_call)
 for required_input in (
     "cc = meson.get_compiler('c')",
-    "wirelog_version = '>= 0.70.0'",
+    "wirelog_version = '>= 0.72.0'",
     "force_fallback_for = get_option('force_fallback_for')",
     "wrap_mode = get_option('wrap_mode')",
 ):
@@ -235,13 +235,16 @@ wirelog_program_relation_has_input(wirelog_program_t *program,
 
 
 def install_system_provider(scenario_dir, kind):
+    version = "0.71.0" if kind == "old_version" else "0.72.0"
+    if kind == "old_version":
+        kind = "compatible"
     source_dir = scenario_dir / "system-source"
     build_dir = scenario_dir / "system-build"
     prefix = scenario_dir / "system-prefix"
     write(
         source_dir / "meson.build",
-        """project('wirelog-system-fixture', 'c',
-  version : '0.54.0',
+        f"""project('wirelog-system-fixture', 'c',
+  version : '{version}',
   meson_version : '>= 1.1.0',
   default_options : ['c_std=c17'],
 )
@@ -308,7 +311,7 @@ option('benchmarks', type : 'boolean', value : true)
     if kind == "forbidden":
         write(
             fallback / "meson.build",
-            """project('wirelog', 'c', version : '0.54.99')
+            """project('wirelog', 'c', version : '0.72.0')
 error('compatible system selection configured the fallback fixture')
 """,
         )
@@ -316,7 +319,7 @@ error('compatible system selection configured the fallback fixture')
     write(
         fallback / "meson.build",
         """project('wirelog', 'c',
-  version : '0.54.99',
+  version : '0.72.0',
   meson_version : '>= 1.1.0',
   default_options : ['c_std=c17'],
 )
@@ -384,7 +387,7 @@ def prepare_selection_fixture(scenario_dir, system_kind, fallback_kind,
   default_options : ['c_std=c17'],
 )
 cc = meson.get_compiler('c')
-wirelog_version = '>= 0.54.0'
+wirelog_version = '>= 0.72.0'
 force_fallback_for = get_option('force_fallback_for')
 wrap_mode = get_option('wrap_mode')
 subdir('meson/wirelog-dependency')
@@ -537,6 +540,16 @@ with tempfile.TemporaryDirectory(prefix="wyrelog-wirelog-boundary-") as temp:
     )
     successful_scenario(
         base, "compatible-system", "compatible", "forbidden", "system",
+    )
+    # All capabilities are present: version alone must reject this provider.
+    successful_scenario(
+        base, "below-minimum-system", "old_version", "compatible", "fallback",
+        messages=["System Wirelog candidate was not found;"],
+    )
+    setup_failure_scenario(
+        base, "nofallback-below-minimum", "old_version", "compatible",
+        ["--wrap-mode=nofallback"],
+        ["System Wirelog candidate was not found;", NOFALLBACK],
     )
     setup_failure_scenario(
         base, "nofallback-signature", "missing", "compatible",

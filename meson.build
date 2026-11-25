@@ -99,7 +99,7 @@ else
   duckdb_dep = disabler()
 endif
 
-wirelog_version = '>= 0.70.0'
+wirelog_version = '>= 0.72.0'
 libchronoid_version = '>= 1.2.0'
 force_fallback_for = get_option('force_fallback_for')
 wrap_mode = get_option('wrap_mode')
