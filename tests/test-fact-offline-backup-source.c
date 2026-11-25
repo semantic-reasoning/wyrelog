@@ -17481,14 +17481,14 @@ test_graph_commit_publish_macos (gconstpointer data)
         &durable_journal), ==, WYRELOG_E_OK);
     const guint64 durable = committed.revision;
     wyl_fact_offline_restore_journal_clear (&committed);
-    /* Where a macOS graph restore stops: after PUBLISHED_DURABLE only the
-     * companion step runs there, by direct call; selection refuses a
-     * reserved row, and finalize and promotion refuse. */
+    /* After PUBLISHED_DURABLE selection refuses a reserved row, and
+     * finalize and promotion refuse; the select resume dispatcher drives
+     * the companion step and selection, as the daemon's resume handler
+     * does after this dispatcher. */
     wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
         const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
         gint64, WylFactOfflineRestoreJournal *) = {
       wyl_fact_offline_restore_graph_commit_select_replacement_run,
-      wyl_fact_offline_restore_graph_commit_select_resume_run,
       wyl_fact_offline_restore_graph_commit_finalize_run,
       wyl_fact_offline_restore_graph_commit_promote_run,
     };
@@ -17500,6 +17500,20 @@ test_graph_commit_publish_macos (gconstpointer data)
       assert_restore_journal_unchanged (fixture.policy, operation,
           durable_journal, durable);
     }
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, durable,
+        0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, durable + 1);
+    g_assert_cmpuint (committed.version, ==,
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
+    g_assert_true (committed.replacement_selected_pending_cleanup);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    WylPolicyGraphRestoreReplacementRecord *selected = NULL;
+    g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+          (fixture.policy, operation, &selected), ==, WYRELOG_E_OK);
+    g_assert_cmpstr (selected->phase, ==, "selected_pending_cleanup");
+    g_assert_nonnull (selected->darwin_operation_evidence);
+    wyl_policy_graph_restore_replacement_record_free (selected);
   } else {
     g_autoptr (GBytes) publishable_journal = NULL;
     WylFactArtifactInventoryIdentity old_main = { 0 };
@@ -18144,12 +18158,13 @@ test_graph_commit_companion_macos (gconstpointer data)
     /* Selection, finalize, the terminal proof and promotion run by direct
      * call (see test_graph_commit_select_macos,
      * test_graph_commit_finalize_macos, test_graph_commit_finalized_macos
-     * and test_graph_commit_promote_macos); at companion_synced the resume
-     * dispatcher, finalize and promotion refuse. */
+     * and test_graph_commit_promote_macos), and the select resume
+     * dispatcher selects from here (see
+     * test_graph_commit_select_resume_macos); at companion_synced finalize
+     * and promotion refuse. */
     wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
         const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
         gint64, WylFactOfflineRestoreJournal *) = {
-      wyl_fact_offline_restore_graph_commit_select_resume_run,
       wyl_fact_offline_restore_graph_commit_finalize_run,
       wyl_fact_offline_restore_graph_commit_promote_run,
     };
@@ -18344,9 +18359,11 @@ typedef enum
   SELECT_PROBE_SUBSTITUTE,
   SELECT_PROBE_PARK,
   SELECT_PROBE_STRAY,
+  SELECT_PROBE_CALL,
 } SelectProbeAction;
 
-/* Records the commit authority's select-darwin-* points, in order, and
+/* Records the commit authority's select-darwin-* points, in order, counts
+ * the rollback-bound witness passes and the replacement main reads, and
  * performs one action at act_at, which may also name one of the locator's
  * own points: the directory's checkpoint reaches both.  hits counts the
  * passes through act_at, acted on or not. */
@@ -18358,12 +18375,17 @@ typedef struct
   const gchar *act_at;
   SelectProbeAction action;
   wyrelog_error_t returned_rc;
+  void (*call) (gpointer);
+  gpointer call_data;
   guint hits;
+  guint witness_hits;
+  guint main_read_hits;
   GPtrArray *seen;
 } SelectProbe;
 
 #define SELECT_BEFORE_COMPARE "select-darwin-before-compare"
 #define SELECT_BEFORE_COMMIT "select-darwin-before-commit"
+#define SELECT_REPLAY_BEFORE_COMPARE "select-darwin-replay-before-compare"
 #define SELECT_WITNESS_POINT "darwin-restore-witness-rollback-bound"
 #define SELECT_MAIN_READ_POINT "darwin-replacement-main-read"
 
@@ -18373,6 +18395,10 @@ select_probe_checkpoint (const gchar *point, gpointer user_data)
   SelectProbe *probe = user_data;
   if (g_str_has_prefix (point, "select-darwin-"))
     g_ptr_array_add (probe->seen, g_strdup (point));
+  if (g_str_equal (point, SELECT_WITNESS_POINT))
+    probe->witness_hits++;
+  if (g_str_equal (point, SELECT_MAIN_READ_POINT))
+    probe->main_read_hits++;
   if (g_strcmp0 (point, probe->act_at) != 0)
     return WYRELOG_E_OK;
   if (probe->hits++ > 0)
@@ -18392,6 +18418,8 @@ select_probe_checkpoint (const gchar *point, gpointer user_data)
     g_assert_no_error (error);
     g_assert_true (wyl_test_secure_regular_file (probe->stray_path, &error));
     g_assert_no_error (error);
+  } else if (probe->action == SELECT_PROBE_CALL) {
+    probe->call (probe->call_data);
   }
   return WYRELOG_E_OK;
 }
@@ -18404,7 +18432,24 @@ select_run (BackupFixture *fixture, SelectProbe *probe,
 {
   g_ptr_array_set_size (probe->seen, 0);
   probe->hits = 0;
+  probe->witness_hits = 0;
+  probe->main_read_hits = 0;
   return wyl_fact_offline_restore_graph_commit_select_replacement_run
+           (fixture->policy, fixture->root, fixture->runtime, operation,
+             revision, 0, out_committed);
+}
+
+/* One call of the select resume dispatcher, recording its points afresh. */
+static wyrelog_error_t
+select_resume_run (BackupFixture *fixture, SelectProbe *probe,
+    const gchar *operation, guint64 revision,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_ptr_array_set_size (probe->seen, 0);
+  probe->hits = 0;
+  probe->witness_hits = 0;
+  probe->main_read_hits = 0;
+  return wyl_fact_offline_restore_graph_commit_select_resume_run
            (fixture->policy, fixture->root, fixture->runtime, operation,
              revision, 0, out_committed);
 }
@@ -18560,14 +18605,16 @@ assert_select_applied (BackupFixture *fixture, const SelectExpect *expect,
 
 /* Once selected, a macOS restore waits for FINALIZE, which runs by direct
  * call at the selected revision (see test_graph_commit_finalize_macos):
- * selection at either revision, the resume dispatcher and promotion refuse,
- * finalize at the published revision refuses, and none of them changes
- * anything. */
+ * selection at either revision and promotion refuse, finalize at the
+ * published revision refuses, the select resume dispatcher is stale at the
+ * published revision and replays the selected one, returning the stored
+ * journal, and none of them changes anything. */
 static void
 assert_select_stopped (BackupFixture *fixture, SelectProbe *probe,
     const SelectExpect *expect, GBytes *stored)
 {
   const gchar *const none[] = { NULL };
+  const gchar *const replayed[] = { SELECT_REPLAY_BEFORE_COMPARE, NULL };
   WylFactOfflineRestoreJournal committed = { 0 };
   for (guint64 revision = expect->durable; revision <= expect->durable + 1;
       revision++) {
@@ -18577,21 +18624,24 @@ assert_select_stopped (BackupFixture *fixture, SelectProbe *probe,
     g_assert_null (committed.operation_uuid);
     assert_select_applied (fixture, expect, NULL, stored);
   }
-  wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
-      const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
-      gint64, WylFactOfflineRestoreJournal *) = {
-    wyl_fact_offline_restore_graph_commit_select_resume_run,
-    wyl_fact_offline_restore_graph_commit_promote_run,
-  };
-  for (guint i = 0; i < G_N_ELEMENTS (refused); i++)
-    for (guint64 revision = expect->durable;
-        revision <= expect->durable + 1; revision++) {
-      g_assert_cmpint (refused[i] (fixture->policy, fixture->root,
-          fixture->runtime, expect->operation, revision, 0, &committed), ==,
-          WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_select_applied (fixture, expect, NULL, stored);
-    }
+  g_assert_cmpint (select_resume_run (fixture, probe, expect->operation,
+      expect->durable, &committed), ==, WYRELOG_E_BUSY);
+  assert_select_points (probe, none);
+  g_assert_null (committed.operation_uuid);
+  assert_select_applied (fixture, expect, NULL, stored);
+  g_assert_cmpint (select_resume_run (fixture, probe, expect->operation,
+      expect->durable + 1, &committed), ==, WYRELOG_E_OK);
+  assert_select_points (probe, replayed);
+  assert_select_applied (fixture, expect, &committed, stored);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  for (guint64 revision = expect->durable;
+      revision <= expect->durable + 1; revision++) {
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+          (fixture->policy, fixture->root, fixture->runtime,
+        expect->operation, revision, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_select_applied (fixture, expect, NULL, stored);
+  }
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
         (fixture->policy, fixture->root, fixture->runtime, expect->operation,
       expect->durable, 0, &committed), ==, WYRELOG_E_POLICY);
@@ -19304,10 +19354,10 @@ assert_terminal_proved (BackupFixture *fixture, FinalizeProbe *probe,
 
 /* Once FINALIZED a macOS restore waits for promotion, which runs by direct
  * call at the FINALIZED revision (see test_graph_commit_promote_macos):
- * FINALIZE at each revision from the selected one, selection, the resume
- * dispatcher and promotion at any earlier revision refuse without reaching
- * a point, and the terminal proof returns the stored journal.  Nothing
- * changes. */
+ * FINALIZE at each revision from the selected one, selection and promotion
+ * at any earlier revision refuse without reaching a point, the select
+ * resume dispatcher is stale before the FINALIZED revision and refuses it,
+ * and the terminal proof returns the stored journal.  Nothing changes. */
 static void
 assert_finalize_stopped (BackupFixture *fixture, FinalizeProbe *probe,
     const FinalizeExpect *expect)
@@ -19322,20 +19372,19 @@ assert_finalize_stopped (BackupFixture *fixture, FinalizeProbe *probe,
     g_assert_cmpuint (probe->witness_hits, ==, 0);
     g_assert_null (committed.operation_uuid);
   }
-  wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
-      const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
-      gint64, WylFactOfflineRestoreJournal *) = {
-    wyl_fact_offline_restore_graph_commit_select_replacement_run,
-    wyl_fact_offline_restore_graph_commit_select_resume_run,
-  };
-  for (guint i = 0; i < G_N_ELEMENTS (refused); i++)
-    for (guint64 revision = expect->selected - 1;
-        revision <= expect->selected + 2; revision++) {
-      g_assert_cmpint (refused[i] (fixture->policy, fixture->root,
-          fixture->runtime, expect->operation, revision, 0, &committed), ==,
-          WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-    }
+  for (guint64 revision = expect->selected - 1;
+      revision <= expect->selected + 2; revision++) {
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_select_replacement_run
+          (fixture->policy, fixture->root, fixture->runtime,
+        expect->operation, revision, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+          (fixture->policy, fixture->root, fixture->runtime,
+        expect->operation, revision, 0, &committed), ==,
+        revision < expect->selected + 2 ? WYRELOG_E_BUSY : WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+  }
   for (guint64 revision = expect->selected - 1;
       revision <= expect->selected + 1; revision++) {
     g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
@@ -20417,6 +20466,690 @@ test_graph_commit_finalized_macos (gconstpointer data)
     assert_terminal_proved (&fixture, &probe, &expect);
   }
   wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (NULL, NULL);
+  g_ptr_array_unref (probe.seen);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+#define SELECT_TERMINAL_POINT "darwin-selected-cleanup-terminal"
+/* Witness passes, as measured: each proof of the old main at the rollback
+ * name passes the point four times, and a fresh call proves it in the
+ * selection prologue, in its transaction and in the replay. */
+#define SELECT_RESUME_REPLAY_WITNESS 4
+#define SELECT_RESUME_FRESH_WITNESS (3 * SELECT_RESUME_REPLAY_WITNESS)
+
+/* zeta's runtime after the dispatcher: an EMPTY entry, also after a
+ * restart, with admission closed, no operation and no engine call. */
+static void
+assert_select_resume_runtime (BackupFixture *fixture)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (fixture->runtime, &key, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EMPTY);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_false (status.operation_active);
+  g_assert_cmpuint (status.active_engine_calls, ==, 0);
+  g_assert_cmpuint (status.waiting_engine_calls, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
+}
+
+/* The evidence the dispatcher's companion step stored: the row at phase
+ * carries it, it decodes against the replacement and names the object at
+ * the main name.  Returns it. */
+static GBytes *
+select_resume_evidence (BackupFixture *fixture, const gchar *operation,
+    const gchar *phase, const gchar *main_path)
+{
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture->policy, operation, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (row->phase, ==, phase);
+  g_assert_nonnull (row->darwin_operation_evidence);
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (row->darwin_operation_evidence,
+          &length);
+  g_assert_cmpuint (length, ==,
+      WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE);
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      row->replacement_uuid, &decoded), ==, WYRELOG_E_OK);
+  guint64 artifact = 0;
+  for (gsize i = 48; i < 56; i++)
+    artifact = (artifact << 8) | bytes[i];
+  GStatBuf st;
+  g_assert_cmpint (g_stat (main_path, &st), ==, 0);
+  g_assert_cmpuint (artifact, ==, (guint64) st.st_ino);
+  GBytes *evidence = g_bytes_ref (row->darwin_operation_evidence);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  return evidence;
+}
+
+/* A replay at the selected revision: OK at its one point, one witness pass
+ * per proof, one main read, and the stored journal returned unchanged. */
+static void
+assert_select_resume_replayed (BackupFixture *fixture, SelectProbe *probe,
+    const SelectExpect *expect, GBytes *stored)
+{
+  const gchar *const replayed[] = { SELECT_REPLAY_BEFORE_COMPARE, NULL };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (select_resume_run (fixture, probe, expect->operation,
+      expect->durable + 1, &committed), ==, WYRELOG_E_OK);
+  assert_select_points (probe, replayed);
+  g_assert_cmpuint (probe->witness_hits, ==, SELECT_RESUME_REPLAY_WITNESS);
+  g_assert_cmpuint (probe->main_read_hits, ==, 1);
+  g_assert_cmpuint (committed.revision, ==, expect->durable + 1);
+  assert_select_applied (fixture, expect, &committed, stored);
+  wyl_fact_offline_restore_journal_clear (&committed);
+}
+#endif
+
+/* macOS (#1303 U5-13): the select resume dispatcher, on a graph restore at
+ * PUBLISHED_DURABLE, runs the companion step for a reserved row and
+ * selection for a companion_synced one, then replays the selected journal;
+ * on a selected journal it only replays.  The replay is read-only under its
+ * own lease and quiescence: it refuses a row without evidence before the
+ * graph is opened, rebuilds the old main's evidence from the
+ * restore_selected record, requires DUAL, compares the replacement evidence
+ * on a fresh descriptor and re-reads the journal and row.
+ *
+ * Per mode: setup | code | state afterwards (d is the published revision,
+ * s = d + 1 the selected one) | the retry.  Unless stated, a replay mode
+ * starts selected at s by direct calls, leaves it unchanged and its retry
+ * is a replay at s.
+ *
+ *   resume
+ *     reserved | OK | selected at s | stale at d, replay, FINALIZE at s
+ *   from-synced
+ *     companion_synced | OK | selected at s | replay
+ *   synced-without-evidence
+ *     companion_synced without evidence | POLICY | d | none
+ *   crash-in-select
+ *     reserved; selection stopped before its commit | IO | d,
+ *     companion_synced | d, then replay
+ *   crash-in-replay
+ *     companion_synced; the replay stopped before its compare | IO | s
+ *     | stale at d, replay
+ *   lost-response
+ *     companion_synced; the selection commit response lost | IO | s after a
+ *     reopen | stale at d, replay
+ *   lost-response-companion
+ *     reserved; the companion step's first commit response lost | IO | d,
+ *     reserved with evidence after a reopen | d, then replay
+ *   replay
+ *     replayed twice | OK | s | stale at d and s + 1
+ *   replay-quiesce-held
+ *     zeta quiesced by another owner | BUSY | s | released
+ *   replay-restart
+ *     a new runtime manager and a reopened store | OK | s | replay
+ *   replay-terminal, replay-substituted-rollback, replay-substituted-main,
+ *   replay-stray-name, replay-main-bytes
+ *     no rollback name (TERMINAL), a same-bytes object at the rollback or
+ *     main name, a secure facts.duckdb.wal, one main byte flipped | POLICY
+ *     | s | restored
+ *   replay-shape-busy, replay-compare-busy
+ *     the witness or the main read returns BUSY | POLICY | s | replay
+ *   replay-crash-before-compare
+ *     the replay's point fails | IO | s | replay
+ *   replay-row-changed, replay-journal-changed
+ *     the row's evidence or the stored journal rewritten at the replay's
+ *     point | BUSY | rewritten | rewritten back
+ *   replay-row-without-evidence
+ *     the row and record evidence cleared, also with zeta quiesced by
+ *     another owner | POLICY | s | none
+ *   replay-selected-without-evidence, replay-selected-evidence-diverged
+ *     the record evidence cleared or diverged | POLICY | s | none
+ *   replay-evidence-other-volume, -graph, -artifact
+ *     the row and record evidence rewritten alike | POLICY | s | none
+ *   replay-finalize-pending
+ *     FINALIZE stopped before its commit | POLICY at s + 1, BUSY at s
+ *     | s + 1 | none
+ *
+ * A locator refusal is a policy refusal; a stale revision, a changed
+ * journal or row and a quiescence held elsewhere are BUSY. */
+static void
+test_graph_commit_select_resume_macos (gconstpointer data)
+{
+#if !defined(__APPLE__) || !defined(WYL_TEST_HANDLE_SEAMS)
+  (void) data;
+  g_test_skip ("macOS graph restore select resume by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0062";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-select-resume-mac-XXXXXX", &capture,
+      &bundle_root, &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *parked_path = graph_file_path (&fixture, "zeta",
+          "../parked-main.duckdb");
+  g_autofree gchar *stray_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb.wal");
+  const WylFactArtifactInventoryIdentity old_main =
+      darwin_file_identity (main_path);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, decided,
+      0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, decided + 12);
+  g_autoptr (GBytes) durable_journal = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+      &durable_journal), ==, WYRELOG_E_OK);
+  const guint64 durable = committed.revision;
+  const guint64 selected = durable + 1;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  const WylFactArtifactInventoryIdentity new_main =
+      darwin_file_identity (main_path);
+  WylPolicyGraphRestoreReplacementRecord *reserved = companion_row (&fixture,
+          operation, "reserved", NULL);
+  g_autofree gchar *legacy_name = g_strdup_printf ("provision-%s.sqlite",
+          reserved->replacement_uuid);
+  g_autofree gchar *legacy_path = graph_file_path (&fixture, "zeta",
+          legacy_name);
+  g_autofree gchar *replacement_uuid = g_strdup (reserved->replacement_uuid);
+  g_autofree gchar *old_uuid = g_strdup (reserved->old_provisioning_uuid);
+  wyl_policy_graph_restore_replacement_record_free (reserved);
+  g_autoptr (GBytes) old_evidence = NULL;
+  {
+    g_autoptr (GPtrArray) records = NULL;
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+          (fixture.policy, "tenant-a", "zeta", &records), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (records->len, ==, 1);
+    const WylPolicyGraphProvisioningRecord *record =
+        g_ptr_array_index (records, 0);
+    g_assert_cmpstr (record->op_uuid, ==, old_uuid);
+    g_assert_nonnull (record->darwin_operation_evidence);
+    old_evidence = g_bytes_ref (record->darwin_operation_evidence);
+  }
+  g_autofree gchar *alpha = select_provisioning_snapshot (&fixture, "alpha");
+
+  /* The companion step by direct call, except where the dispatcher runs it
+   * or the row must advance without evidence; then selection by direct
+   * call for a replay. */
+  gboolean replay = g_str_has_prefix (mode, "replay");
+  gboolean from_reserved = g_str_equal (mode, "resume")
+      || g_str_equal (mode, "crash-in-select")
+      || g_str_equal (mode, "lost-response-companion");
+  g_autoptr (GBytes) stored = NULL;
+  if (g_str_equal (mode, "synced-without-evidence")) {
+    darwin_force_companion_synced (&fixture);
+  } else if (!from_reserved) {
+    WylPolicyGraphRestoreReplacementRecord *synced = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+          (fixture.policy, fixture.root, fixture.runtime, operation, durable,
+        0, &synced), ==, WYRELOG_E_OK);
+    stored = assert_companion_synced (&fixture, operation, synced,
+            main_path);
+    wyl_policy_graph_restore_replacement_record_free (synced);
+  }
+  g_autoptr (GBytes) selected_journal = NULL;
+  if (replay) {
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_select_replacement_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, durable,
+        0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, selected);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &selected_journal), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  }
+
+  SelectProbe probe = {
+    .parked_path = parked_path, .stray_path = stray_path,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  wyl_fact_offline_restore_graph_commit_select_set_checkpoint_for_test
+    (select_probe_checkpoint, &probe);
+  const SelectExpect expect = {
+    .operation = operation, .durable_journal = durable_journal,
+    .durable = durable, .old_uuid = old_uuid, .old_evidence = old_evidence,
+    .replacement_uuid = replacement_uuid, .legacy_path = legacy_path,
+    .main_path = main_path, .rollback_path = rollback_path,
+    .old_main = &old_main, .new_main = &new_main, .alpha = alpha,
+  };
+  const gchar *const full[] = {
+    SELECT_BEFORE_COMPARE, SELECT_BEFORE_COMMIT,
+    SELECT_REPLAY_BEFORE_COMPARE, NULL,
+  };
+  const gchar *const selection[] = {
+    SELECT_BEFORE_COMPARE, SELECT_BEFORE_COMMIT, NULL,
+  };
+  const gchar *const replayed[] = { SELECT_REPLAY_BEFORE_COMPARE, NULL };
+  const gchar *const none[] = { NULL };
+  wyrelog_error_t rc;
+  /* Whether the mode ends selected at s with the stored evidence, so a
+   * replay at s succeeds. */
+  gboolean retry = TRUE;
+
+  if (g_str_equal (mode, "resume") || g_str_equal (mode, "from-synced")) {
+    /* The companion step for a reserved row, selection, then the replay of
+     * what selection committed, in one call. */
+    rc = select_resume_run (&fixture, &probe, operation, durable,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    assert_select_points (&probe, full);
+    g_assert_cmpuint (probe.witness_hits, ==, SELECT_RESUME_FRESH_WITNESS);
+    g_assert_cmpuint (probe.main_read_hits, ==, 2);
+    g_assert_cmpuint (committed.revision, ==, selected);
+    if (stored == NULL)
+      stored = select_resume_evidence (&fixture, operation,
+              "selected_pending_cleanup", main_path);
+    assert_select_applied (&fixture, &expect, &committed, stored);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    if (g_str_equal (mode, "resume")) {
+      /* The published revision is stale now; the selected one replays,
+       * and its output is what FINALIZE takes. */
+      rc = select_resume_run (&fixture, &probe, operation, durable,
+              &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+      assert_select_points (&probe, none);
+      g_assert_null (committed.operation_uuid);
+      assert_select_applied (&fixture, &expect, NULL, stored);
+      assert_select_resume_replayed (&fixture, &probe, &expect, stored);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          selected, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, selected + 2);
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (committed.graphs, 0);
+      g_assert_cmpint (graph->transition_state, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+      wyl_fact_offline_restore_journal_clear (&committed);
+      g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
+      retry = FALSE;
+    }
+  } else if (g_str_equal (mode, "synced-without-evidence")) {
+    /* ADR 0006: selection refuses before anything is read. */
+    rc = select_resume_run (&fixture, &probe, operation, durable,
+            &committed);
+    assert_select_points (&probe, none);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_POLICY,
+        &committed, NULL, &new_main, rollback_path);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "crash-in-select")) {
+    /* The companion step is durable; selection is not. */
+    probe.act_at = SELECT_BEFORE_COMMIT;
+    probe.action = SELECT_PROBE_FAIL;
+    rc = select_resume_run (&fixture, &probe, operation, durable,
+            &committed);
+    assert_select_points (&probe, selection);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    stored = select_resume_evidence (&fixture, operation,
+            "companion_synced", main_path);
+    assert_select_refused (&fixture, &expect, rc, WYRELOG_E_IO, &committed,
+        stored, &new_main, rollback_path);
+    probe.act_at = NULL;
+    probe.action = SELECT_PROBE_NONE;
+    g_assert_cmpint (select_resume_run (&fixture, &probe, operation,
+        durable, &committed), ==, WYRELOG_E_OK);
+    assert_select_points (&probe, full);
+    g_assert_cmpuint (probe.main_read_hits, ==, 2);
+    assert_select_applied (&fixture, &expect, &committed, stored);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  } else if (g_str_equal (mode, "crash-in-replay")
+      || g_str_equal (mode, "lost-response")) {
+    /* Selection is durable before the caller hears of it; the published
+     * revision is then stale. */
+    if (g_str_equal (mode, "crash-in-replay")) {
+      probe.act_at = SELECT_REPLAY_BEFORE_COMPARE;
+      probe.action = SELECT_PROBE_FAIL;
+    } else {
+      wyl_policy_store_offline_restore_fail_once (fixture.policy,
+          WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    }
+    rc = select_resume_run (&fixture, &probe, operation, durable,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_select_points (&probe, g_str_equal (mode, "crash-in-replay")
+        ? full : selection);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    if (g_str_equal (mode, "lost-response"))
+      select_reopen_policy (&fixture);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+    probe.act_at = NULL;
+    probe.action = SELECT_PROBE_NONE;
+    g_assert_cmpint (select_resume_run (&fixture, &probe, operation,
+        durable, &committed), ==, WYRELOG_E_BUSY);
+    assert_select_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+  } else if (g_str_equal (mode, "lost-response-companion")) {
+    /* The companion step's first commit stores the evidence on the
+     * reserved row; with its response lost the call stops there, and the
+     * next one compares that evidence and never recaptures it. */
+    wyl_policy_store_offline_restore_fail_once (fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    rc = select_resume_run (&fixture, &probe, operation, durable,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_select_points (&probe, none);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    select_reopen_policy (&fixture);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        durable_journal, durable);
+    stored = companion_stored_evidence (&fixture, operation);
+    g_assert_cmpint (select_resume_run (&fixture, &probe, operation,
+        durable, &committed), ==, WYRELOG_E_OK);
+    assert_select_points (&probe, full);
+    g_assert_cmpuint (probe.main_read_hits, ==, 2);
+    assert_select_applied (&fixture, &expect, &committed, stored);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  } else if (g_str_equal (mode, "replay")) {
+    /* Read-only: a second replay finds what the first one did, and any
+     * other revision is stale. */
+    for (guint i = 0; i < 2; i++) {
+      assert_select_resume_replayed (&fixture, &probe, &expect, stored);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          selected_journal, selected);
+    }
+    for (guint64 revision = durable; revision <= selected + 1;
+        revision += 2) {
+      rc = select_resume_run (&fixture, &probe, operation, revision,
+              &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+      assert_select_points (&probe, none);
+      g_assert_cmpuint (probe.main_read_hits, ==, 0);
+      g_assert_null (committed.operation_uuid);
+      assert_select_applied (&fixture, &expect, NULL, stored);
+    }
+  } else if (g_str_equal (mode, "replay-quiesce-held")) {
+    /* A quiescence held elsewhere passes through as BUSY, before the
+     * namespace is read. */
+    WylFactGraphQuiescenceToken *held = finalized_hold_quiescence (&fixture);
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    assert_select_points (&probe, none);
+    g_assert_cmpuint (probe.witness_hits, ==, 0);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    wyl_fact_graph_quiescence_token_release (held);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-restart")) {
+    /* No open graph: the quiescence takes the missing-closed path. */
+    g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
+        ==, WYRELOG_E_OK);
+    select_reopen_policy (&fixture);
+    assert_select_resume_replayed (&fixture, &probe, &expect, stored);
+  } else if (g_str_equal (mode, "replay-terminal")) {
+    /* With no rollback name the shape is TERMINAL, which only FINALIZE
+     * leaves: an operator wedge until the name is back. */
+    g_assert_cmpint (g_rename (rollback_path, parked_path), ==, 0);
+    probe.act_at = SELECT_TERMINAL_POINT;
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    g_assert_cmpuint (probe.hits, ==, 1);
+    assert_select_points (&probe, none);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        selected_journal, selected);
+    g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (g_rename (parked_path, rollback_path), ==, 0);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-substituted-rollback")
+      || g_str_equal (mode, "replay-substituted-main")
+      || g_str_equal (mode, "replay-stray-name")) {
+    const gchar *target = g_str_equal (mode, "replay-substituted-rollback")
+        ? rollback_path : main_path;
+    gboolean stray = g_str_equal (mode, "replay-stray-name");
+    if (stray) {
+      g_autoptr (GError) error = NULL;
+      g_assert_true (g_file_set_contents (stray_path, "x", 1, &error));
+      g_assert_no_error (error);
+      g_assert_true (wyl_test_secure_regular_file (stray_path, &error));
+      g_assert_no_error (error);
+    } else {
+      companion_substitute (target, parked_path);
+    }
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_select_points (&probe, none);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        selected_journal, selected);
+    if (stray)
+      g_assert_cmpint (g_remove (stray_path), ==, 0);
+    else
+      companion_unsubstitute (target, parked_path);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-main-bytes")) {
+    /* DUAL proves the new main by device, inode and size only; the compare
+     * is what refuses a changed byte, before the read point. */
+    darwin_flip_file_byte (main_path, 4096);
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_select_points (&probe, replayed);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    darwin_flip_file_byte (main_path, 4096);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-shape-busy")
+      || g_str_equal (mode, "replay-compare-busy")) {
+    /* A locator BUSY after SYNC_PUBLISH_DIR is a refusal, never a retry. */
+    gboolean at_shape = g_str_equal (mode, "replay-shape-busy");
+    probe.act_at = at_shape ? SELECT_WITNESS_POINT : SELECT_MAIN_READ_POINT;
+    probe.action = SELECT_PROBE_RETURN;
+    probe.returned_rc = WYRELOG_E_BUSY;
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    g_assert_cmpuint (probe.hits, ==, 1);
+    assert_select_points (&probe, at_shape ? none : replayed);
+    g_assert_cmpuint (probe.main_read_hits, ==, at_shape ? 0 : 1);
+    g_assert_null (committed.operation_uuid);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-crash-before-compare")) {
+    probe.act_at = SELECT_REPLAY_BEFORE_COMPARE;
+    probe.action = SELECT_PROBE_FAIL;
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_select_points (&probe, replayed);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-row-changed")) {
+    /* The compare holds against the row as loaded; the final re-read finds
+     * the row changed since, which is stale. */
+    g_autoptr (GBytes) rewritten = darwin_flip_evidence (stored,
+            replacement_uuid, 48);
+    FinalizedRowRewrite rewrite = {
+      .fixture = &fixture, .evidence = rewritten,
+    };
+    probe.act_at = SELECT_REPLAY_BEFORE_COMPARE;
+    probe.action = SELECT_PROBE_CALL;
+    probe.call = finalized_rewrite_row;
+    probe.call_data = &rewrite;
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    assert_select_points (&probe, replayed);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        selected_journal, selected);
+    wyl_policy_graph_restore_replacement_record_free (companion_row
+          (&fixture, operation, "selected_pending_cleanup", rewritten));
+    darwin_rewrite_selected_evidence (&fixture, TRUE, stored, FALSE, NULL);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-journal-changed")) {
+    /* The compare holds against the journal as loaded; the final re-read
+     * finds another stored journal at the same revision, which is stale. */
+    g_auto (WylFactOfflineRestoreJournal) other = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+          (selected_journal, &other), ==, WYRELOG_E_OK);
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (other.graphs, 0);
+    graph->logical_bytes++;
+    g_autoptr (GBytes) changed = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&other,
+        &changed), ==, WYRELOG_E_OK);
+    FinalizedJournalRewrite rewrite = {
+      .fixture = &fixture, .operation = operation, .blob = changed,
+    };
+    probe.act_at = SELECT_REPLAY_BEFORE_COMPARE;
+    probe.action = SELECT_PROBE_CALL;
+    probe.call = finalized_rewrite_journal;
+    probe.call_data = &rewrite;
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    assert_select_points (&probe, replayed);
+    g_assert_cmpuint (probe.main_read_hits, ==, 1);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation, changed,
+        selected);
+    rewrite.blob = selected_journal;
+    finalized_rewrite_journal (&rewrite);
+    assert_select_applied (&fixture, &expect, NULL, stored);
+  } else if (g_str_equal (mode, "replay-row-without-evidence")
+      || g_str_equal (mode, "replay-selected-without-evidence")
+      || g_str_equal (mode, "replay-selected-evidence-diverged")) {
+    /* The row must carry the evidence, and the record the old evidence is
+     * rebuilt from must carry the row's: refused before the namespace is
+     * read. */
+    gboolean row_too = g_str_equal (mode, "replay-row-without-evidence");
+    g_autoptr (GBytes) rewritten = g_str_equal (mode,
+            "replay-selected-evidence-diverged")
+        ? darwin_flip_evidence (stored, replacement_uuid, 48) : NULL;
+    darwin_rewrite_selected_evidence (&fixture, row_too, NULL, TRUE,
+        rewritten);
+    for (guint i = 0; i < (row_too ? 2u : 1u); i++) {
+      /* The second time with zeta quiesced by another owner: the row is
+       * refused before the quiescence. */
+      WylFactGraphQuiescenceToken *held = i == 0 ? NULL
+          : finalized_hold_quiescence (&fixture);
+      rc = select_resume_run (&fixture, &probe, operation, selected,
+              &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      assert_select_points (&probe, none);
+      g_assert_cmpuint (probe.witness_hits, ==, 0);
+      g_assert_cmpuint (probe.main_read_hits, ==, 0);
+      g_assert_null (committed.operation_uuid);
+      g_clear_pointer (&held, wyl_fact_graph_quiescence_token_release);
+    }
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        selected_journal, selected);
+    wyl_policy_graph_restore_replacement_record_free (companion_row
+          (&fixture, operation, "selected_pending_cleanup",
+        row_too ? NULL : stored));
+    assert_select_zeta_record (&fixture, replacement_uuid,
+        WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED, rewritten);
+    retry = FALSE;
+  } else if (g_str_has_prefix (mode, "replay-evidence-other-")) {
+    /* The row and the restore_selected record agree on evidence naming
+     * another volume, graph directory or artifact.  The volume and graph
+     * IDs are rebuilt into the old main's evidence, which the rollback
+     * witness refuses at its first pass; the artifact ID is replaced by the
+     * rebuild, so the witness passes and the compare refuses it, before the
+     * main read. */
+    gsize offset = g_str_equal (mode, "replay-evidence-other-volume") ? 24
+        : g_str_equal (mode, "replay-evidence-other-graph") ? 40 : 48;
+    g_assert_true (g_str_equal (mode, "replay-evidence-other-volume")
+        || g_str_equal (mode, "replay-evidence-other-graph")
+        || g_str_equal (mode, "replay-evidence-other-artifact"));
+    gboolean artifact = offset == 48;
+    g_autoptr (GBytes) rewritten = darwin_flip_evidence (stored,
+            replacement_uuid, offset);
+    darwin_rewrite_selected_evidence (&fixture, TRUE, rewritten, TRUE,
+        rewritten);
+    rc = select_resume_run (&fixture, &probe, operation, selected,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_select_points (&probe, artifact ? replayed : none);
+    g_assert_cmpuint (probe.witness_hits, ==,
+        artifact ? SELECT_RESUME_REPLAY_WITNESS : 1);
+    g_assert_cmpuint (probe.main_read_hits, ==, 0);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        selected_journal, selected);
+    wyl_policy_graph_restore_replacement_record_free (companion_row
+          (&fixture, operation, "selected_pending_cleanup", rewritten));
+    assert_select_zeta_record (&fixture, replacement_uuid,
+        WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED, rewritten);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "replay-finalize-pending")) {
+    /* FINALIZE pending is FINALIZE's to resume: the replay refuses it, and
+     * the selected revision is stale. */
+    FinalizeProbe finalize = {
+      .act_at = FINALIZE_BEFORE_COMMIT, .action = FINALIZE_PROBE_FAIL,
+      .seen = g_ptr_array_new_with_free_func (g_free),
+    };
+    wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+      (finalize_probe_checkpoint, &finalize);
+    g_assert_cmpint (finalize_run (&fixture, &finalize, operation, selected,
+        &committed), ==, WYRELOG_E_IO);
+    wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+      (NULL, NULL);
+    g_ptr_array_unref (finalize.seen);
+    g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (pending.revision, ==, selected + 1);
+    g_autoptr (GBytes) pending_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&pending,
+        &pending_journal), ==, WYRELOG_E_OK);
+    const wyrelog_error_t expected[] = { WYRELOG_E_POLICY, WYRELOG_E_BUSY };
+    const guint64 revisions[] = { selected + 1, selected };
+    for (guint i = 0; i < G_N_ELEMENTS (revisions); i++) {
+      rc = select_resume_run (&fixture, &probe, operation, revisions[i],
+              &committed);
+      g_assert_cmpint (rc, ==, expected[i]);
+      assert_select_points (&probe, none);
+      g_assert_cmpuint (probe.witness_hits, ==, 0);
+      g_assert_cmpuint (probe.main_read_hits, ==, 0);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, selected + 1);
+    }
+    wyl_policy_graph_restore_replacement_record_free (companion_row
+          (&fixture, operation, "selected_pending_cleanup", stored));
+    retry = FALSE;
+  } else {
+    g_assert_not_reached ();
+  }
+  if (retry) {
+    /* The refusal changed nothing: with the namespace restored a replay at
+     * the selected revision returns the stored journal. */
+    probe.act_at = NULL;
+    probe.action = SELECT_PROBE_NONE;
+    assert_select_resume_replayed (&fixture, &probe, &expect, stored);
+  }
+  assert_select_resume_runtime (&fixture);
+  g_autofree gchar *alpha_after = select_provisioning_snapshot (&fixture,
+          "alpha");
+  g_assert_cmpstr (alpha_after, ==, alpha);
+  wyl_fact_offline_restore_graph_commit_select_set_checkpoint_for_test
     (NULL, NULL);
   g_ptr_array_unref (probe.seen);
   g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
@@ -22864,6 +23597,87 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-select-old-evidence-other-volume",
       "old-evidence-other-volume", test_graph_commit_select_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume",
+      "resume", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-crash-in-replay",
+      "crash-in-replay", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-crash-in-select",
+      "crash-in-select", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-from-synced",
+      "from-synced", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-lost-response",
+      "lost-response", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-lost-response-companion",
+      "lost-response-companion", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay",
+      "replay", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-compare-busy",
+      "replay-compare-busy", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-crash-before-compare",
+      "replay-crash-before-compare", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-evidence-other-artifact",
+      "replay-evidence-other-artifact", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-evidence-other-graph",
+      "replay-evidence-other-graph", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-evidence-other-volume",
+      "replay-evidence-other-volume", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-finalize-pending",
+      "replay-finalize-pending", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-journal-changed",
+      "replay-journal-changed", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-main-bytes",
+      "replay-main-bytes", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-quiesce-held",
+      "replay-quiesce-held", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-restart",
+      "replay-restart", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-row-changed",
+      "replay-row-changed", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-row-without-evidence",
+      "replay-row-without-evidence", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-selected-evidence-diverged",
+      "replay-selected-evidence-diverged", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-selected-without-evidence",
+      "replay-selected-without-evidence", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-shape-busy",
+      "replay-shape-busy", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-stray-name",
+      "replay-stray-name", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-substituted-main",
+      "replay-substituted-main", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-substituted-rollback",
+      "replay-substituted-rollback", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-replay-terminal",
+      "replay-terminal", test_graph_commit_select_resume_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-select-resume-synced-without-evidence",
+      "synced-without-evidence", test_graph_commit_select_resume_macos);
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-select-shape-busy",
       "shape-busy", test_graph_commit_select_macos);

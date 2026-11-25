@@ -373,12 +373,15 @@ evidence and advances the replacement row, and selection (see "Restore
 replacement evidence") then takes the restore to `selected_pending_cleanup`,
 and `FINALIZE` (see "Restore replacement evidence") then takes it to
 `FINALIZED`, which the terminal proof (see "Restore replacement evidence")
-proves, and promotion (see "Restore replacement evidence") then commits it.
-`RETIRE_STAGE` and the resume dispatcher still refuse, and the published
-proof is not built on macOS. None of it is reachable while macOS commit
-admission refuses; these steps are proved by tests that reach the decision
-directly, and the companion step, selection, `FINALIZE`, the terminal proof
-and promotion by tests that call them directly.
+proves, and promotion (see "Restore replacement evidence") then commits it,
+which the published proof resolves after a lost response. The select resume
+dispatcher drives the companion step and selection and replays a selected
+restore; the `FINALIZE` and promote resume dispatchers still refuse (#1303
+U5-14, U5-15), and so does `RETIRE_STAGE`. None of it is reachable while
+macOS commit admission refuses; these steps are proved by tests that reach
+the decision directly, and the companion step, selection, the select resume
+dispatcher, `FINALIZE`, the terminal proof, promotion and the published
+proof by tests that call them directly.
 
 ## Restore replacement evidence
 
@@ -482,6 +485,29 @@ that premise while it still can: it rebuilds the old evidence from those
 values and refuses unless the result equals the stored bytes of the record
 it is about to delete.
 
+The macOS select resume dispatcher
+(`wyl_fact_offline_restore_graph_commit_select_resume_run`, #1303 U5-13)
+shares its loop with Linux. From `PUBLISHED_DURABLE` it runs the companion
+step for a `reserved` row and selection for a `companion_synced` one, each
+the public step above, and then replays the selected journal; on a selected
+journal it only replays. The replay is read-only under its own root writer
+lease and quiescence, and copies the authority checks of the Linux replay:
+a journal or row other than the one the loop loaded is stale (`BUSY`). It
+refuses a row without evidence before the graph is opened, rebuilds the old
+main's evidence from the `restore_selected` record and requires `DUAL`:
+`TERMINAL` with a fresh selected journal, which only `FINALIZE` leaves, is an
+operator wedge. `DUAL` proves the new main by device, inode and logical size
+only, so the replay compares the stored replacement evidence through a fresh
+descriptor, and a journal or row changed during that compare gives `BUSY`.
+Every locator refusal is a policy refusal. A stale revision is `BUSY`;
+`FINALIZE` pending or `FINALIZED` is `POLICY`, as on Linux. A remount or
+reboot after selection changes the device number the witness compares, so
+the replay then refuses as an operator wedge (`POLICY`). The loop is shared,
+so a call from a `reserved` row reads the main four times: the companion
+step's capture and compare, selection's compare and the replay's compare,
+which right after a selection in the same call proves again what selection
+just compared.
+
 The macOS `FINALIZE` step takes a `selected_pending_cleanup` restore to
 `FINALIZED`. Under the root writer lease and quiescence, with the journal
 predicate of the Linux step, it refuses a row without evidence before it
@@ -549,7 +575,12 @@ of the new main's bytes. Every locator refusal is a policy refusal. A change
 of the journal or the row between the reads
 (`check_finalized_persisted`) gives `BUSY`. A remount or reboot after
 `FINALIZE` changes the device number the `TERMINAL` inventory compares, so
-the proof then refuses as an operator wedge (`POLICY`). The daemon's resume
+the proof then refuses as an operator wedge (`POLICY`). For a journal at
+`PUBLISHED_DURABLE` that direct calls produced, the daemon's resume handler
+on macOS now takes the restore through the companion step and selection to
+`selected_pending_cleanup`, deleting the old `ACTIVE` record, and then the
+`FINALIZE` resume dispatcher refuses (`POLICY`, #1303 U5-14); none of this is
+reachable while macOS commit admission refuses. The daemon's resume
 handler reaches the proof only for a journal that direct calls produced. It
 reaches promotion only through the promote resume dispatcher, which still
 refuses on macOS (#1303 U5-15), so promotion runs by direct call only. For
@@ -620,10 +651,10 @@ ready runtime is accepted, so a replay changes nothing. No `TERMINAL` proof
 or byte compare follows the receipt: the graph is live, and a WAL and writes
 are legitimate. Store errors pass through, so before a reopen the proof
 returns `IO`. An unseal that refuses a substituted main returns `POLICY` and
-leaves the runtime entry evicted and closed. The resume dispatcher still
-refuses on macOS (#1303 U5-15). A remount or reboot after `FINALIZE` changes
-the device number the `TERMINAL` inventory compares, so promotion then
-refuses as an operator wedge (`POLICY`).
+leaves the runtime entry evicted and closed. The promote resume dispatcher
+still refuses on macOS (#1303 U5-15). A remount or reboot after `FINALIZE`
+changes the device number the `TERMINAL` inventory compares, so promotion
+then refuses as an operator wedge (`POLICY`).
 
 | Durable observation | Required recovery result |
 | --- | --- |
@@ -632,6 +663,7 @@ refuses as an operator wedge (`POLICY`).
 | `companion_synced`, evidence absent (macOS) | Fail closed at the companion step, at mark and at selection; no recapture; operator wedge. |
 | `companion_synced`, evidence present, the old evidence rebuilds from it, the namespace and compare hold (macOS) | Select: copy the evidence into `restore_selected`, delete the old `ACTIVE` record and advance the row, in one transaction. |
 | `companion_synced`, the old `ACTIVE` evidence does not rebuild from the replacement evidence and the journal (macOS) | Fail closed at selection before the namespace is read; the old record stays; operator wedge. |
+| `selected_pending_cleanup`, `FINALIZE` not begun, replayed by the select resume dispatcher (macOS) | Read-only: `DUAL` and the replacement compare, then the stored journal returned byte for byte; `TERMINAL`, a mismatch or a row without evidence is `POLICY`, and a journal or row changed during the proof is `BUSY`. |
 | `selected_pending_cleanup`, `FINALIZE` not begun (macOS) | `FINALIZE` requires `DUAL`, the old main proved at the rollback name by the old evidence rebuilt from the `restore_selected` evidence and the journal; a mismatch, an absent rollback name or a changed device is an operator wedge. |
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
 | `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal. Promotion requires `TERMINAL` before and inside its transaction and the replacement compare inside it, then commits; a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge, and a journal or row changed since it was loaded is `BUSY`. |

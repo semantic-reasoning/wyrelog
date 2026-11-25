@@ -222,6 +222,49 @@ Linux receipt fast path it copies (the journal encode, the receipt lookup,
 the journal decode, both marks and restore_unseal_graph) and the graph
 authority read.
 
+Select resume rules (check_select_resume_rules), for the macOS arm of the
+select resume dispatcher (#1303 U5-13), which shares its loop with Linux:
+
+- in wyl_fact_offline_restore_graph_commit_select_resume_run the first
+  conditional is exactly ``#if !defined(__linux__) && !defined(__APPLE__)``,
+  no ``#ifndef __linux__`` remains, and that gate's true arm returns
+  WYRELOG_E_POLICY and calls neither step nor either prove;
+- the gate's ``#else`` holds no conditional but one ``#ifdef __APPLE__``
+  arm, which calls darwin_selected_namespace_prove exactly once and
+  selected_replacement_namespace_prove never; that arm's ``#else`` calls
+  selected_replacement_namespace_prove exactly once and never names the
+  Darwin prove, and the body calls the Darwin prove exactly once;
+- the body calls the public companion step and selection exactly once
+  each, and none of their Darwin bodies, the selected provenance load, the
+  Darwin or Linux cleanup shape, the compare, the capture, the setter, the
+  sync or the store selection directly;
+- darwin_selected_namespace_prove calls the selected provenance load, the
+  Darwin cleanup shape and the compare exactly once each, in that order,
+  and none of graph_provenance_load, the rebind, the Linux cleanup shape,
+  the dual witness, check_policy or check_persisted;
+- it mutates nothing: none of the Darwin or Linux cleanup execute, the
+  capture, the setter, the sync, the mark, the store selection, the
+  FINALIZE begin or completion, the store promotion, the journal attempt
+  begin or completion, the replacement selected mark, the journal store
+  CAS or restore_unseal_graph;
+- it tests ``shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL`` and
+  never names the TERMINAL shape;
+- each call of wyl_fact_graph_resolver_open_directory, the Darwin cleanup
+  shape and the compare is the immediate argument of
+  darwin_post_publish_refusal;
+- each graph_commit_quiesce call passes ``row, TRUE,`` (the v3 reacquire
+  proof);
+- its ``row->darwin_operation_evidence == NULL`` test precedes its first
+  wyl_fact_graph_resolver_open, and its last check_finalized_persisted
+  follows the compare.
+
+Its route row: darwin_selected_namespace_prove calls each authority helper
+of the Linux prove it copies (the lease acquisition, the policy bind, the
+journal and row loads, the offline restore record load,
+selected_replacement_snapshot_valid, row_equal, the lease authorization of
+the resolver, graph_commit_quiesce and check_runtime), the selected
+provenance load and check_finalized_persisted.
+
 function_body finds a definition whose return type is on the line before
 its name or on the same line, and skips a declaration: a match whose
 parameter list reaches a ``;`` before the next ``{``.  It counts braces
@@ -333,6 +376,11 @@ REENTRANT_HELPERS = ("check_finalized_persisted", "check_policy",
                      "check_persisted", "graph_provenance_load",
                      "graph_selected_provenance_load", UNSEAL_CALL,
                      "graph_commit_quiesce")
+SELECT_RESUME_RUN = "wyl_fact_offline_restore_graph_commit_select_resume_run"
+DARWIN_SELECTED_PROVE = "darwin_selected_namespace_prove"
+LINUX_SELECTED_PROVE = "selected_replacement_namespace_prove"
+REPLAY_GATE = "#if !defined(__linux__) && !defined(__APPLE__)"
+OPEN_DIRECTORY_CALL = "wyl_fact_graph_resolver_open_directory"
 STORE_ENTRY = re.compile(
     r"(?<![\w])(?:wyl_policy_store_\w+"
     r"|wyl_fact_offline_restore_journal_store_\w+)\s*\("
@@ -450,6 +498,14 @@ ROUTE_RULES = (
               ("wyl_fact_offline_restore_journal_encode", RECEIPT_CALL,
                "wyl_fact_offline_restore_journal_decode", MARK_PUBLISHED,
                MARK_HANDOFF, AUTHORITY_CALL, "restore_unseal_graph")),
+    RouteRule(DARWIN_SELECTED_PROVE,
+              ("wyl_fact_root_writer_lease_acquire",
+               "wyl_policy_store_bind_fact_root_authorized", JOURNAL_LOAD,
+               ROW_LOAD, "wyl_policy_store_offline_restore_load",
+               "selected_replacement_snapshot_valid", "row_equal",
+               "wyl_fact_root_writer_lease_authorizes_resolver",
+               "graph_commit_quiesce", "check_runtime", SELECTED_PROVENANCE,
+               PERSISTED_FINALIZED)),
 )
 
 
@@ -1199,6 +1255,182 @@ def check_published_rules(source: str) -> None:
         )
 
 
+def gate_arms(body: str) -> tuple[str, str, str | None] | None:
+    """The first ``#if``-family line of ``body``, its true arm and its
+    ``#else`` arm (None without one), up to the matching ``#endif``."""
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*#\s*if", line):
+            break
+    else:
+        return None
+    true_arm: list[str] = []
+    else_arm: list[str] | None = None
+    current = true_arm
+    depth = 0
+    for line in lines[index + 1:]:
+        if re.match(r"^\s*#\s*if", line):
+            depth += 1
+        elif re.match(r"^\s*#\s*endif", line):
+            if depth == 0:
+                return (lines[index].strip(), "\n".join(true_arm),
+                        None if else_arm is None else "\n".join(else_arm))
+            depth -= 1
+        elif depth == 0 and re.match(r"^\s*#\s*elif", line):
+            raise ContractError(
+                f"E_SELECT_RESUME_GATE: an #elif chain in {SELECT_RESUME_RUN}"
+                " is not judged"
+            )
+        elif depth == 0 and re.match(r"^\s*#\s*else\s*$", line):
+            else_arm = []
+            current = else_arm
+            continue
+        current.append(line)
+    raise ContractError(
+        f"E_SELECT_RESUME_GATE: the gate of {SELECT_RESUME_RUN} has no #endif"
+    )
+
+
+def check_select_resume_rules(source: str) -> None:
+    body = function_body(source, SELECT_RESUME_RUN)
+    split = gate_arms(body)
+    if (split is None or split[0] != REPLAY_GATE or split[2] is None
+            or re.search(r"^\s*#\s*ifndef\s+__linux__\b", body, re.M)):
+        raise ContractError(
+            f"E_SELECT_RESUME_GATE: the first conditional of"
+            f" {SELECT_RESUME_RUN} must be {REPLAY_GATE!r} with an #else,"
+            " and no #ifndef __linux__ may remain"
+        )
+    _, refused, shared = split
+    if (re.search(r"\breturn\s+WYRELOG_E_POLICY\s*;", refused) is None
+            or any(count_calls(refused, call) != 0 for call in
+                   (COMPANION_RECOVER, SELECT_RUN, DARWIN_SELECTED_PROVE,
+                    LINUX_SELECTED_PROVE))):
+        raise ContractError(
+            f"E_SELECT_RESUME_GATE: the true arm of the gate of"
+            f" {SELECT_RESUME_RUN} must only return WYRELOG_E_POLICY"
+        )
+    conditionals = [line.strip() for line in shared.splitlines()
+                    if re.match(r"^\s*#\s*if", line)]
+    arms = apple_arms(shared)
+    if len(arms) != 1 or conditionals != ["#ifdef __APPLE__"]:
+        raise ContractError(
+            f"E_SELECT_RESUME_ARMS: the #else of the gate of"
+            f" {SELECT_RESUME_RUN} must hold one #ifdef __APPLE__ arm and no"
+            " other conditional"
+        )
+    apple, other = arms[0]
+    if (count_calls(apple, DARWIN_SELECTED_PROVE) != 1
+            or count_calls(apple, LINUX_SELECTED_PROVE) != 0):
+        raise ContractError(
+            f"E_SELECT_RESUME_ROUTE: the Darwin arm of {SELECT_RESUME_RUN}"
+            f" must call {DARWIN_SELECTED_PROVE} exactly once and"
+            f" {LINUX_SELECTED_PROVE} never"
+        )
+    if (count_calls(other, LINUX_SELECTED_PROVE) != 1
+            or names(other, DARWIN_SELECTED_PROVE)
+            or count_calls(body, DARWIN_SELECTED_PROVE) != 1):
+        raise ContractError(
+            f"E_SELECT_RESUME_LEAK: the #else arm of the Darwin arm of"
+            f" {SELECT_RESUME_RUN} must call {LINUX_SELECTED_PROVE} exactly"
+            f" once and never name {DARWIN_SELECTED_PROVE}, which the body"
+            " calls exactly once"
+        )
+    for call in (COMPANION_RECOVER, SELECT_RUN):
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_SELECT_RESUME_STEPS: {SELECT_RESUME_RUN} must call {call}"
+                " exactly once"
+            )
+    for call in (DARWIN_COMPANION, DARWIN_SELECT, SELECTED_PROVENANCE,
+                 CLEANUP_SHAPE_CALL, COMPARE_CALL, SELECT_CALL, SYNC_CALL,
+                 SETTER_CALL, CAPTURE_CALL, LINUX_CLEANUP_SHAPE_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_SELECT_RESUME_DIRECT: {SELECT_RESUME_RUN} calls {call}"
+                " instead of a step or a prove"
+            )
+    body = function_body(source, DARWIN_SELECTED_PROVE)
+    ordered = (SELECTED_PROVENANCE, CLEANUP_SHAPE_CALL, COMPARE_CALL)
+    for call in ordered:
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_SELECTED_PROVE_CALLS: {DARWIN_SELECTED_PROVE} must call"
+                f" {call} exactly once"
+            )
+    for call in ("graph_provenance_load", REBIND_CALL,
+                 LINUX_CLEANUP_SHAPE_CALL, DUAL_WITNESS_CALL, "check_policy",
+                 "check_persisted"):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_SELECTED_PROVE_CALLS: {DARWIN_SELECTED_PROVE} calls {call}"
+            )
+    order = [first_call(body, call) for call in ordered]
+    if order != sorted(order):
+        raise ContractError(
+            f"E_SELECTED_PROVE_ORDER: {DARWIN_SELECTED_PROVE} must load the"
+            " selected provenance, prove the cleanup shape and compare in"
+            " that order"
+        )
+    for call in (CLEANUP_EXECUTE_CALL, LINUX_CLEANUP_EXECUTE_CALL,
+                 CAPTURE_CALL, SETTER_CALL, SYNC_CALL, MARK_CALL, SELECT_CALL,
+                 BEGIN_CALL, COMPLETE_CALL, PROMOTE_CALL, JOURNAL_BEGIN_CALL,
+                 JOURNAL_COMPLETE_CALL,
+                 "wyl_fact_offline_restore_journal_mark_replacement_selected",
+                 "wyl_fact_offline_restore_journal_store_cas", UNSEAL_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_SELECTED_PROVE_MUTATES: {DARWIN_SELECTED_PROVE} calls"
+                f" {call}, but the replay is read-only"
+            )
+    if (re.search(r"\bshape\s*!=\s*"
+                  r"WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL\b",
+                  body) is None
+            or re.search(r"\bWYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL"
+                         r"\b", body) is not None):
+        raise ContractError(
+            f"E_SELECTED_PROVE_SHAPE: {DARWIN_SELECTED_PROVE} must refuse"
+            " every shape but DUAL and never accept TERMINAL"
+        )
+    for call in (OPEN_DIRECTORY_CALL, CLEANUP_SHAPE_CALL, COMPARE_CALL):
+        mapped = re.findall(r"(?<![\w])darwin_post_publish_refusal\s*\(\s*"
+                            r"\(?\s*" + re.escape(call) + r"\s*\(", body)
+        calls = count_calls(body, call)
+        if calls == 0 or len(mapped) != calls:
+            raise ContractError(
+                f"E_SELECTED_PROVE_REFUSAL: each {call} call in"
+                f" {DARWIN_SELECTED_PROVE} must be the immediate argument of"
+                " darwin_post_publish_refusal"
+            )
+    quiesced = [body[match.end():body.find(";", match.end())] for match in
+                re.finditer(r"(?<![\w])graph_commit_quiesce\s*\(", body)]
+    if not quiesced or any(
+            re.search(r"(?<![\w])row\s*,\s*TRUE\s*,", args) is None
+            for args in quiesced):
+        raise ContractError(
+            f"E_SELECTED_PROVE_QUIESCE: {DARWIN_SELECTED_PROVE} must quiesce"
+            " with row, TRUE (the v3 reacquire proof)"
+        )
+    evidence = re.search(
+        r"\brow->darwin_operation_evidence\s*==\s*NULL", body
+    )
+    opened = first_call(body, "wyl_fact_graph_resolver_open")
+    if evidence is None or opened < 0 or evidence.start() > opened:
+        raise ContractError(
+            f"E_SELECTED_PROVE_EARLY_EVIDENCE: {DARWIN_SELECTED_PROVE} must"
+            " refuse a row without evidence before its first"
+            " wyl_fact_graph_resolver_open"
+        )
+    persisted = [match.start() for match in re.finditer(
+        r"(?<![\w])" + PERSISTED_FINALIZED + r"\s*\(", body)]
+    if not persisted or persisted[-1] < first_call(body, COMPARE_CALL):
+        raise ContractError(
+            f"E_SELECTED_PROVE_PERSISTED: {DARWIN_SELECTED_PROVE} must"
+            f" re-prove the persisted state with {PERSISTED_FINALIZED} after"
+            " the compare"
+        )
+
+
 def check_source(source: str) -> None:
     source = strip_comments(source)
     for rule in ARM_RULES:
@@ -1211,6 +1443,7 @@ def check_source(source: str) -> None:
     check_terminal_rules(source)
     check_promote_rules(source)
     check_published_rules(source)
+    check_select_resume_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -2231,6 +2464,281 @@ static wyrelog_error_t darwin_published_prove_terminal
     WylFactOfflineRestoreJournal *out_committed);
 """
 
+# The real body of the select resume dispatcher.
+SELECT_RESUME_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_select_resume_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\\0'
+      || runtime == NULL || operation_uuid == NULL || *operation_uuid == '\\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#if !defined(__linux__) && !defined(__APPLE__)
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  gint64 deadline = 0;
+  if (drain_timeout_us > 0) {
+    gint64 now = g_get_monotonic_time ();
+    deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
+        now + drain_timeout_us;
+  }
+  guint64 revision = expected_revision;
+  g_autoptr (GBytes) expected_state = NULL;
+  for (guint step = 0; step < 3; step++) {
+    g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+    WylPolicyGraphRestoreReplacementRecord *row = NULL;
+    WylPolicyOfflineRestoreRecord *record = NULL;
+    g_autoptr (GBytes) canonical = NULL;
+    wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load
+          (policy, operation_uuid, &journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_graph_restore_replacement_load (policy,
+              operation_uuid, &row);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+              &record);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+    if (rc == WYRELOG_E_OK && (journal.revision != revision
+        || record->revision != revision
+        || record->scope != WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+        || !g_bytes_equal (canonical, record->journal_blob)
+        || (expected_state != NULL
+        && !g_bytes_equal (canonical, expected_state))))
+      rc = WYRELOG_E_BUSY;
+    wyl_policy_offline_restore_record_free (record);
+    if (rc != WYRELOG_E_OK) {
+      wyl_policy_graph_restore_replacement_record_free (row);
+      return rc;
+    }
+    if (journal.version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION) {
+      gboolean valid = selected_replacement_snapshot_valid (&journal, row,
+              revision);
+      if (!valid) {
+        wyl_policy_graph_restore_replacement_record_free (row);
+        return WYRELOG_E_POLICY;
+      }
+      gint64 remaining = drain_timeout_us;
+      if (deadline > 0) {
+        remaining = deadline - g_get_monotonic_time ();
+        if (remaining <= 0) {
+          wyl_policy_graph_restore_replacement_record_free (row);
+          return WYRELOG_E_BUSY;
+        }
+      }
+#ifdef __APPLE__
+      rc = darwin_selected_namespace_prove (policy, fact_root, runtime,
+              operation_uuid, revision, remaining, canonical, row);
+#else
+      rc = selected_replacement_namespace_prove (policy, fact_root, runtime,
+              operation_uuid, revision, remaining, canonical, row);
+#endif
+      wyl_policy_graph_restore_replacement_record_free (row);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      *out_committed = journal;
+      memset (&journal, 0, sizeof journal);
+      return WYRELOG_E_OK;
+    }
+    if (!commit_snapshot_valid (&journal, row, revision)) {
+      wyl_policy_graph_restore_replacement_record_free (row);
+      return WYRELOG_E_POLICY;
+    }
+    gint64 remaining = drain_timeout_us;
+    if (deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0) {
+        wyl_policy_graph_restore_replacement_record_free (row);
+        return WYRELOG_E_BUSY;
+      }
+    }
+    if (g_str_equal (row->phase, "reserved")) {
+      g_autofree gchar *replacement_uuid = g_strdup (row->replacement_uuid);
+      WylPolicyGraphRestoreReplacementRecord *synced = NULL;
+      rc = wyl_fact_offline_restore_graph_commit_companion_recover
+            (policy, fact_root, runtime, operation_uuid, revision, remaining,
+              &synced);
+      if (rc == WYRELOG_E_OK
+          && (synced == NULL || !g_str_equal (synced->phase,
+          "companion_synced")
+          || g_strcmp0 (synced->replacement_uuid, replacement_uuid) != 0))
+        rc = WYRELOG_E_POLICY;
+      wyl_policy_graph_restore_replacement_record_free (synced);
+      wyl_policy_graph_restore_replacement_record_free (row);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      continue;
+    }
+    wyl_policy_graph_restore_replacement_record_free (row);
+    g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+    rc = wyl_fact_offline_restore_graph_commit_select_replacement_run
+          (policy, fact_root, runtime, operation_uuid, revision, remaining,
+            &selected);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (selected.revision != revision + 1
+        || selected.version !=
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+        || !selected.replacement_selected_pending_cleanup)
+      return WYRELOG_E_POLICY;
+    g_clear_pointer (&expected_state, g_bytes_unref);
+    rc = wyl_fact_offline_restore_journal_encode (&selected,
+            &expected_state);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    revision = selected.revision;
+  }
+  return WYRELOG_E_POLICY;
+#endif
+}
+"""
+
+# The real body of the Darwin selected namespace prove.
+DARWIN_SELECTED_PROVE_FIXTURE = """\
+static wyrelog_error_t
+darwin_selected_namespace_prove (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 timeout_us, GBytes *expected_journal,
+    const WylPolicyGraphRestoreReplacementRecord *expected_row)
+{
+  WylFactRootWriterLease *lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphKey key = { 0 };
+  WylFactGraphQuiescenceToken *quiescence = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy, operation_uuid,
+            &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            operation_uuid, &row);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
+  if (rc == WYRELOG_E_OK && (journal.revision != expected_revision
+      || !selected_replacement_snapshot_valid (&journal, row,
+      expected_revision)
+      || !g_bytes_equal (encoded, expected_journal)
+      || !row_equal (row, expected_row)))
+    rc = WYRELOG_E_BUSY;
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+            &record);
+  if (rc == WYRELOG_E_OK && (record->revision != expected_revision
+      || record->scope != WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+      || !g_bytes_equal (encoded, record->journal_blob)))
+    rc = WYRELOG_E_BUSY;
+  wyl_policy_offline_restore_record_free (record);
+  /* ADR 0006: a row without evidence is refused before the old evidence,
+   * the namespace or the main is read. */
+  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL
+      || g_bytes_get_size (row->darwin_operation_evidence)
+      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, TRUE, &key, timeout_us,
+            &quiescence);
+  WylFactGraphLocator locator = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal (wyl_fact_graph_resolver_open_directory
+              (&resolver, &locator, FALSE, &directory));
+  wyl_fact_graph_locator_clear (&locator);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK) {
+    directory.checkpoint = select_checkpoint;
+    directory.checkpoint_data = select_checkpoint_data;
+  }
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  const WylFactOfflineRestoreJournalGraph *graph = journal.graphs != NULL
+      && journal.graphs->len == 1 ? g_ptr_array_index (journal.graphs, 0)
+      : NULL;
+  if (rc == WYRELOG_E_OK && graph == NULL)
+    rc = WYRELOG_E_POLICY;
+  GraphProvenance provenance = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_provenance_load (policy, &journal, row, &provenance);
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (&resolver, &directory, lease, provenance.uuid,
+            &provenance.evidence, operation_uuid, row->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL)
+    rc = WYRELOG_E_POLICY;
+  WylFactGraphDarwinOperationEvidence expected = { 0 };
+  if (rc == WYRELOG_E_OK)
+    memcpy (expected.bytes, g_bytes_get_data (row->darwin_operation_evidence,
+        NULL), sizeof expected.bytes);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_select_checkpoint ("select-darwin-replay-before-compare");
+#endif
+  /* DUAL proves the new main by device, inode and size only: the only
+   * proof of its bytes and evidence. */
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &expected));
+  /* The compare is a full read under the lease; the journal and row must
+   * still be the ones it proved.  The helper checks no transition state,
+   * so it fits a SELECTED journal. */
+  if (rc == WYRELOG_E_OK)
+    rc = check_finalized_persisted (policy, operation_uuid, expected_journal,
+            expected_row, &journal);
+  wyl_fact_graph_directory_clear (&directory);
+  g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  return rc;
+}
+"""
+
+# The real file's forward declaration of the Darwin selected namespace
+# prove, which function_body must skip.
+SELECTED_PROVE_DECLARATIONS = """\
+static wyrelog_error_t darwin_selected_namespace_prove
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 timeout_us,
+    GBytes *expected_journal,
+    const WylPolicyGraphRestoreReplacementRecord *expected_row);
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -2269,6 +2777,9 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_published_prove_terminal":
         PUBLISHED_RUN_FIXTURE,
     "darwin_published_prove_terminal": DARWIN_PUBLISHED_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_select_resume_run":
+        SELECT_RESUME_RUN_FIXTURE,
+    "darwin_selected_namespace_prove": DARWIN_SELECTED_PROVE_FIXTURE,
 }
 
 
@@ -2313,6 +2824,8 @@ DP = "darwin_promote_selected"
 PE = "darwin_promote_effect"
 PP = "wyl_fact_offline_restore_graph_commit_published_prove_terminal"
 DB = "darwin_published_prove_terminal"
+SR = "wyl_fact_offline_restore_graph_commit_select_resume_run"
+SP = "darwin_selected_namespace_prove"
 FINALIZE_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
     "    rc = darwin_post_publish_refusal\n"
@@ -2543,6 +3056,87 @@ PUBLISHED_UNSEAL_LINES = (
 PUBLISHED_ARM_CALL = (
     "             finalized, drain_timeout_us, out_committed);\n#else"
 )
+
+
+SELECT_RESUME_GATE_LINE = "#if !defined(__linux__) && !defined(__APPLE__)\n"
+SELECT_RESUME_REFUSAL_LINES = (
+    "  (void) drain_timeout_us;\n"
+    "  return WYRELOG_E_POLICY;\n"
+    "#else\n"
+)
+SELECT_RESUME_DARWIN_LINES = (
+    "      rc = darwin_selected_namespace_prove (policy, fact_root, runtime,\n"
+    "              operation_uuid, revision, remaining, canonical, row);\n"
+)
+SELECT_RESUME_LINUX_LINES = (
+    "      rc = selected_replacement_namespace_prove (policy, fact_root,"
+    " runtime,\n"
+    "              operation_uuid, revision, remaining, canonical, row);\n"
+)
+SELECT_RESUME_ARM_LINES = (
+    "#ifdef __APPLE__\n" + SELECT_RESUME_DARWIN_LINES + "#else\n"
+    + SELECT_RESUME_LINUX_LINES + "#endif\n"
+)
+SELECT_RESUME_STEP_LINES = (
+    "    rc = wyl_fact_offline_restore_graph_commit_select_replacement_run\n"
+)
+SELECTED_PROVE_PROVENANCE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = graph_selected_provenance_load (policy, &journal, row,"
+    " &provenance);\n"
+)
+SELECTED_PROVE_SHAPE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open\n"
+    "              (&resolver, &directory, lease, provenance.uuid,\n"
+    "            &provenance.evidence, operation_uuid,"
+    " row->replacement_uuid,\n"
+    "            &graph->expected_main_identity,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, &shape));\n"
+)
+SELECTED_PROVE_DUAL_LINES = (
+    "  if (rc == WYRELOG_E_OK\n"
+    "      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL)\n"
+    "    rc = WYRELOG_E_POLICY;\n"
+)
+SELECTED_PROVE_COMPARE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_directory_compare_darwin_replacement_evidence\n"
+    "              (&directory, row->replacement_uuid,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, graph->checksum, &expected));\n"
+)
+SELECTED_PROVE_OPEN_LINES = (
+    "    rc = darwin_post_publish_refusal"
+    " (wyl_fact_graph_resolver_open_directory\n"
+    "              (&resolver, &locator, FALSE, &directory));\n"
+)
+SELECTED_PROVE_EVIDENCE_LINES = (
+    "  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL\n"
+    "      || g_bytes_get_size (row->darwin_operation_evidence)\n"
+    "      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))\n"
+    "    rc = WYRELOG_E_POLICY;\n"
+)
+SELECTED_PROVE_KEY_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_fact_graph_key_init (&key, journal.tenant_id,\n"
+    "            journal.selected_graph_id);\n"
+)
+SELECTED_PROVE_PERSISTED_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = check_finalized_persisted (policy, operation_uuid,"
+    " expected_journal,\n"
+    "            expected_row, &journal);\n"
+)
+
+
+def selected_added(call: str):
+    return replace(SELECTED_PROVE_COMPARE_LINES,
+                   SELECTED_PROVE_COMPARE_LINES
+                   + "  if (rc == WYRELOG_E_OK)\n    rc = " + call + ";\n")
 
 
 def published_added(call: str):
@@ -3413,6 +4007,127 @@ MUTANTS = (
                  "  if (rc != WYRELOG_E_OK)\n"
                  "    wyl_fact_offline_restore_journal_clear"
                  " (out_committed);\n"), "E_PUBLISHED_ORDER"),
+    ("select resume: gate back to #ifndef __linux__", SR, replace(
+        SELECT_RESUME_GATE_LINE, "#ifndef __linux__\n"),
+     "E_SELECT_RESUME_GATE"),
+    ("select resume: gate refusal returns OK", SR, replace(
+        SELECT_RESUME_REFUSAL_LINES,
+        "  (void) drain_timeout_us;\n  return WYRELOG_E_OK;\n#else\n"),
+     "E_SELECT_RESUME_GATE"),
+    ("select resume: #ifndef __linux__ inside the shared arm", SR, replace(
+        SELECT_RESUME_STEP_LINES, "#ifndef __linux__\n    (void) deadline;\n"
+        "#endif\n" + SELECT_RESUME_STEP_LINES), "E_SELECT_RESUME_GATE"),
+    ("select resume: gate refusal calls selection", SR, replace(
+        SELECT_RESUME_REFUSAL_LINES,
+        "  (void) drain_timeout_us;\n"
+        "  (void) wyl_fact_offline_restore_graph_commit_select_replacement_run"
+        " (policy, fact_root, runtime, operation_uuid, expected_revision, 0,"
+        " out_committed);\n"
+        "  return WYRELOG_E_POLICY;\n#else\n"), "E_SELECT_RESUME_GATE"),
+    ("select resume: Apple arm dropped", SR, replace(
+        SELECT_RESUME_ARM_LINES, SELECT_RESUME_LINUX_LINES),
+     "E_SELECT_RESUME_ARMS"),
+    ("select resume: another conditional in the shared arm", SR, replace(
+        SELECT_RESUME_STEP_LINES, "#ifdef G_OS_WIN32\n    (void) deadline;\n"
+        "#endif\n" + SELECT_RESUME_STEP_LINES), "E_SELECT_RESUME_ARMS"),
+    ("select resume: Apple arm calls the Linux prove", SR, replace(
+        "      rc = darwin_selected_namespace_prove (",
+        "      rc = selected_replacement_namespace_prove ("),
+     "E_SELECT_RESUME_ROUTE"),
+    ("select resume: Apple arm accepts", SR, replace(
+        SELECT_RESUME_DARWIN_LINES, "      rc = WYRELOG_E_OK;\n"),
+     "E_SELECT_RESUME_ROUTE"),
+    ("select resume: Linux arm calls the Darwin prove", SR, replace(
+        "      rc = selected_replacement_namespace_prove (",
+        "      rc = darwin_selected_namespace_prove ("),
+     "E_SELECT_RESUME_LEAK"),
+    ("select resume: Darwin prove called again in the loop", SR, replace(
+        SELECT_RESUME_STEP_LINES,
+        "    rc = darwin_selected_namespace_prove (policy, fact_root,"
+        " runtime, operation_uuid, revision, remaining, canonical, row);\n"
+        + SELECT_RESUME_STEP_LINES), "E_SELECT_RESUME_LEAK"),
+    ("select resume: companion step dropped", SR, replace(
+        "rc = wyl_fact_offline_restore_graph_commit_companion_recover\n",
+        "rc = companion_left_alone\n"), "E_SELECT_RESUME_STEPS"),
+    ("select resume: loop selects directly as well", SR, replace(
+        SELECT_RESUME_STEP_LINES,
+        "    rc = darwin_select_replacement (policy, fact_root, runtime,"
+        " operation_uuid, revision, remaining, &selected);\n"
+        + SELECT_RESUME_STEP_LINES), "E_SELECT_RESUME_DIRECT"),
+    ("select resume: loop compares directly", SR, replace(
+        SELECT_RESUME_STEP_LINES,
+        "    rc = wyl_fact_graph_directory_compare_darwin_replacement_evidence"
+        " (&directory, replacement_uuid, &identity, size, checksum,"
+        " &expected);\n" + SELECT_RESUME_STEP_LINES),
+     "E_SELECT_RESUME_DIRECT"),
+    ("selected prove: final recheck dropped", SP, replace(
+        "check_finalized_persisted (", "check_nothing_persisted ("),
+     "E_ROUTE_HELPER"),
+    ("selected prove: ACTIVE provenance instead", SP, replace(
+        "graph_selected_provenance_load (", "graph_provenance_load ("),
+     "E_ROUTE_HELPER"),
+    ("selected prove: snapshot predicate dropped", SP, replace(
+        "selected_replacement_snapshot_valid (", "snapshot_assumed ("),
+     "E_ROUTE_HELPER"),
+    ("selected prove: provenance loaded twice", SP, replace(
+        SELECTED_PROVE_PROVENANCE_LINES,
+        SELECTED_PROVE_PROVENANCE_LINES + SELECTED_PROVE_PROVENANCE_LINES),
+     "E_SELECTED_PROVE_CALLS"),
+    ("selected prove: compare dropped", SP, replace(
+        SELECTED_PROVE_COMPARE_LINES, ""), "E_SELECTED_PROVE_CALLS"),
+    ("selected prove: check_persisted added", SP, selected_added(
+        "check_persisted (policy, operation_uuid, encoded, row, &journal)"),
+     "E_SELECTED_PROVE_CALLS"),
+    ("selected prove: check_policy added", SP, selected_added(
+        "check_policy (policy, &journal, row)"), "E_SELECTED_PROVE_CALLS"),
+    ("selected prove: rebind added", SP, selected_added(
+        "wyl_fact_graph_darwin_evidence_rebind (&expected, uuid, old, object,"
+        " &rebuilt)"), "E_SELECTED_PROVE_CALLS"),
+    ("selected prove: compare before the shape", SP, move_before(
+        SELECTED_PROVE_COMPARE_LINES, SELECTED_PROVE_SHAPE_LINES),
+     "E_SELECTED_PROVE_ORDER"),
+    ("selected prove: cleanup executed", SP, selected_added(
+        "wyl_fact_graph_restore_darwin_selected_cleanup_execute (&resolver,"
+        " &directory, lease, uuid, &evidence, operation_uuid, replacement,"
+        " &old_main, &new_main, size)"), "E_SELECTED_PROVE_MUTATES"),
+    ("selected prove: store selection added", SP, selected_added(
+        "wyl_policy_store_graph_restore_select_with_effect (policy, row,"
+        " &before, &after, darwin_companion_effect, &effect, &result)"),
+     "E_SELECTED_PROVE_MUTATES"),
+    ("selected prove: journal CAS added", SP, selected_added(
+        "wyl_fact_offline_restore_journal_store_cas (policy, &before,"
+        " &after)"), "E_SELECTED_PROVE_MUTATES"),
+    ("selected prove: TERMINAL accepted", SP, replace(
+        "shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL",
+        "shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL"),
+     "E_SELECTED_PROVE_SHAPE"),
+    ("selected prove: DUAL test dropped", SP, replace(
+        SELECTED_PROVE_DUAL_LINES, ""), "E_SELECTED_PROVE_SHAPE"),
+    ("selected prove: compare without the refusal mapping", SP, replace(
+        "    rc = darwin_post_publish_refusal\n          ("
+        + COMPARE_CALL + "\n", "    rc = (" + COMPARE_CALL + "\n"),
+     "E_SELECTED_PROVE_REFUSAL"),
+    ("selected prove: shape without the refusal mapping", SP, replace(
+        "    rc = darwin_post_publish_refusal\n          ("
+        + CLEANUP_SHAPE_CALL + "\n", "    rc = (" + CLEANUP_SHAPE_CALL + "\n"),
+     "E_SELECTED_PROVE_REFUSAL"),
+    ("selected prove: open_directory without the refusal mapping", SP,
+     replace(SELECTED_PROVE_OPEN_LINES,
+             "    rc = wyl_fact_graph_resolver_open_directory\n"
+             "              (&resolver, &locator, FALSE, &directory);\n"),
+     "E_SELECTED_PROVE_REFUSAL"),
+    ("selected prove: v2 quiescence", SP, replace(
+        "row, TRUE, &key", "row, FALSE, &key"), "E_SELECTED_PROVE_QUIESCE"),
+    ("selected prove: TRUE passed elsewhere", SP, replace(
+        "operation_uuid, encoded, row, TRUE, &key, timeout_us,",
+        "operation_uuid, encoded, row, FALSE, &key, TRUE,"),
+     "E_SELECTED_PROVE_QUIESCE"),
+    ("selected prove: evidence test after the resolver open", SP,
+     move_before(SELECTED_PROVE_EVIDENCE_LINES, SELECTED_PROVE_KEY_LINES),
+     "E_SELECTED_PROVE_EARLY_EVIDENCE"),
+    ("selected prove: final recheck before the compare", SP, move_before(
+        SELECTED_PROVE_PERSISTED_LINES, SELECTED_PROVE_COMPARE_LINES),
+     "E_SELECTED_PROVE_PERSISTED"),
 )
 
 
@@ -3506,6 +4221,31 @@ def self_test() -> None:
     else:
         raise ContractError(
             "self-test mutant survived: declared published unseal"
+        )
+    # The Darwin selected prove's forward declaration is skipped too: the
+    # real bodies still pass, and the compare dropped from its real body
+    # still fails.
+    declared = SELECTED_PROVE_DECLARATIONS + "".join(POSITIVE.values())
+    check_source(declared)
+    dropped = SELECTED_PROVE_DECLARATIONS + "".join(
+        text.replace(SELECTED_PROVE_COMPARE_LINES, "") if name == SP else text
+        for name, text in POSITIVE.items()
+    )
+    if dropped == declared:
+        raise ContractError(
+            "self-test mutant did not apply: declared selected compare"
+        )
+    try:
+        check_source(dropped)
+    except ContractError as error:
+        if not str(error).startswith("E_SELECTED_PROVE_CALLS:"):
+            raise ContractError(
+                "self-test mutant failed for another reason: declared"
+                f" selected compare: {error}"
+            ) from error
+    else:
+        raise ContractError(
+            "self-test mutant survived: declared selected compare"
         )
 
 
