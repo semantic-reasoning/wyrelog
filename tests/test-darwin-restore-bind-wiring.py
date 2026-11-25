@@ -144,6 +144,45 @@ the journal and row loads, the lease authorization of the resolver, both
 quiescence calls, check_finalized_persisted and check_runtime) and the
 selected provenance load.
 
+Promote rules (check_promote_rules), for the macOS promotion of a FINALIZED
+restore (#1303 U5-11):
+
+- wyl_fact_offline_restore_graph_commit_promote_run has exactly one
+  ``#ifdef __APPLE__`` arm, which calls darwin_promote_selected exactly
+  once and none of the Darwin cleanup shape, the compare, the selected
+  provenance load, the store promotion or the unseal itself; its ``#else``
+  arm calls none of darwin_promote_selected, the Darwin cleanup shape, the
+  compare, the rebind or the selected provenance load, and never names
+  darwin_promote_effect;
+- darwin_promote_selected calls the selected provenance load, the Darwin
+  cleanup shape and the store promotion exactly once each, in that order,
+  before its first restore_unseal_graph; it calls none of the compare,
+  graph_provenance_load, the rebind, the Darwin or Linux cleanup execute,
+  the Linux cleanup shape, the dual witness, the capture, the setter, the
+  sync, the mark, the store selection, the FINALIZE begin or completion,
+  the journal attempt begin or completion, or
+  promote_selected_terminal_effect;
+- its last check_finalized_persisted lies between the shape and the store
+  promotion, which is called as ``(policy, row, ...)`` with
+  darwin_promote_effect;
+- both it and darwin_promote_effect refuse every shape but TERMINAL and
+  never name WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL, and a
+  ``row->darwin_operation_evidence == NULL`` test precedes its first
+  wyl_fact_graph_resolver_open;
+- darwin_promote_effect calls evidence_equal before its shape and the
+  shape before the compare, calls no wyl_policy_store_* function and no
+  selected provenance load, and mutates nothing: none of the Darwin or
+  Linux cleanup execute, the capture, the setter, the sync, the mark, or
+  the journal attempt begin or completion.
+
+Both have route rows: darwin_promote_selected calls each authority helper
+of the Linux promotion it copies (the lease acquisition, the policy bind,
+the journal and row loads, the lease authorization of the resolver,
+graph_commit_quiesce and check_runtime), the selected provenance load,
+check_finalized_persisted, the receipt lookup and restore_unseal_graph;
+darwin_promote_effect calls the lease authorization, check_runtime, the
+Darwin cleanup shape and the compare.
+
 function_body finds a definition whose return type is on the line before
 its name or on the same line, and skips a declaration: a match whose
 parameter list reaches a ``;`` before the next ``{``.  It counts braces
@@ -232,6 +271,12 @@ DARWIN_TERMINAL = "darwin_finalized_prove_terminal"
 PERSISTED_FINALIZED = "check_finalized_persisted"
 JOURNAL_BEGIN_CALL = "wyl_fact_offline_restore_journal_begin_attempt"
 JOURNAL_COMPLETE_CALL = "wyl_fact_offline_restore_journal_complete_attempt"
+PROMOTE_RUN = "wyl_fact_offline_restore_graph_commit_promote_run"
+DARWIN_PROMOTE = "darwin_promote_selected"
+PROMOTE_EFFECT = "darwin_promote_effect"
+PROMOTE_CALL = "wyl_policy_store_graph_restore_selected_promote_with_effect"
+LINUX_PROMOTE_EFFECT = "promote_selected_terminal_effect"
+UNSEAL_CALL = "restore_unseal_graph"
 
 
 @dataclass(frozen=True)
@@ -326,6 +371,21 @@ ROUTE_RULES = (
                "wyl_fact_graph_runtime_manager_quiesce_missing_closed",
                "check_finalized_persisted", "check_runtime",
                "graph_selected_provenance_load")),
+    RouteRule("darwin_promote_selected",
+              ("wyl_fact_root_writer_lease_acquire",
+               "wyl_policy_store_bind_fact_root_authorized",
+               "wyl_fact_offline_restore_journal_store_load",
+               "wyl_policy_store_graph_restore_replacement_load",
+               "wyl_fact_root_writer_lease_authorizes_resolver",
+               "graph_commit_quiesce", "check_runtime",
+               "graph_selected_provenance_load", "check_finalized_persisted",
+               "wyl_policy_store_offline_restore_receipt_lookup",
+               "restore_unseal_graph")),
+    RouteRule("darwin_promote_effect",
+              ("wyl_fact_root_writer_lease_authorizes_resolver",
+               "check_runtime",
+               "wyl_fact_graph_restore_darwin_selected_cleanup_shape_open",
+               COMPARE_CALL)),
 )
 
 
@@ -819,6 +879,137 @@ def check_terminal_rules(source: str) -> None:
         )
 
 
+def names(text: str, name: str) -> bool:
+    """Whether ``name`` appears as a whole identifier, called or not."""
+    return re.search(r"(?<![\w])" + re.escape(name) + r"(?![\w])",
+                     text) is not None
+
+
+def check_promote_rules(source: str) -> None:
+    body = function_body(source, PROMOTE_RUN)
+    arms = apple_arms(body)
+    if len(arms) != 1:
+        raise ContractError(
+            f"E_PROMOTE_ARMS: {PROMOTE_RUN} has {len(arms)}"
+            " #ifdef __APPLE__ arms, expected 1"
+        )
+    apple, other = arms[0]
+    if count_calls(apple, DARWIN_PROMOTE) != 1:
+        raise ContractError(
+            f"E_PROMOTE_ROUTE: the Darwin arm of {PROMOTE_RUN} must call"
+            f" {DARWIN_PROMOTE} exactly once"
+        )
+    for call in (CLEANUP_SHAPE_CALL, COMPARE_CALL, SELECTED_PROVENANCE,
+                 PROMOTE_CALL, UNSEAL_CALL):
+        if count_calls(apple, call) != 0:
+            raise ContractError(
+                f"E_PROMOTE_DIRECT: the Darwin arm of {PROMOTE_RUN} calls"
+                f" {call} instead of {DARWIN_PROMOTE}"
+            )
+    for call in (DARWIN_PROMOTE, CLEANUP_SHAPE_CALL, COMPARE_CALL,
+                 REBIND_CALL, SELECTED_PROVENANCE):
+        if count_calls(other, call) != 0:
+            raise ContractError(
+                f"E_PROMOTE_LEAK: the #else arm of {PROMOTE_RUN} calls"
+                f" {call}"
+            )
+    if names(other, PROMOTE_EFFECT):
+        raise ContractError(
+            f"E_PROMOTE_LEAK: the #else arm of {PROMOTE_RUN} names"
+            f" {PROMOTE_EFFECT}"
+        )
+    body = function_body(source, DARWIN_PROMOTE)
+    ordered = (SELECTED_PROVENANCE, CLEANUP_SHAPE_CALL, PROMOTE_CALL)
+    for call in ordered:
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_PROMOTE_CALLS: {DARWIN_PROMOTE} must call {call}"
+                " exactly once"
+            )
+    for call in (COMPARE_CALL, "graph_provenance_load", REBIND_CALL,
+                 CLEANUP_EXECUTE_CALL, LINUX_CLEANUP_EXECUTE_CALL,
+                 LINUX_CLEANUP_SHAPE_CALL, DUAL_WITNESS_CALL, CAPTURE_CALL,
+                 SETTER_CALL, SYNC_CALL, MARK_CALL, SELECT_CALL, BEGIN_CALL,
+                 COMPLETE_CALL, JOURNAL_BEGIN_CALL, JOURNAL_COMPLETE_CALL,
+                 LINUX_PROMOTE_EFFECT):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_PROMOTE_CALLS: {DARWIN_PROMOTE} calls {call}"
+            )
+    order = [first_call(body, call) for call in ordered + (UNSEAL_CALL,)]
+    if order != sorted(order):
+        raise ContractError(
+            f"E_PROMOTE_ORDER: {DARWIN_PROMOTE} must load the selected"
+            " provenance, prove the cleanup shape, promote and unseal in that"
+            " order"
+        )
+    persisted = [match.start() for match in re.finditer(
+        r"(?<![\w])" + PERSISTED_FINALIZED + r"\s*\(", body)]
+    shaped = first_call(body, CLEANUP_SHAPE_CALL)
+    promoted = first_call(body, PROMOTE_CALL)
+    if not persisted or not shaped < persisted[-1] < promoted:
+        raise ContractError(
+            f"E_PROMOTE_PERSISTED: {DARWIN_PROMOTE} must re-prove the"
+            f" persisted state with {PERSISTED_FINALIZED} after the shape and"
+            " before the store promotion"
+        )
+    call = re.search(r"(?<![\w])" + PROMOTE_CALL + r"\s*\([^;]*;", body)
+    if (re.search(r"promote_with_effect\s*\(\s*policy\s*,\s*row\s*,",
+                  body) is None
+            or call is None or not names(call.group(0), PROMOTE_EFFECT)):
+        raise ContractError(
+            f"E_PROMOTE_EFFECT: {DARWIN_PROMOTE} must promote the loaded row"
+            f" with {PROMOTE_EFFECT}"
+        )
+    effect = function_body(source, PROMOTE_EFFECT)
+    for text, name in ((body, DARWIN_PROMOTE), (effect, PROMOTE_EFFECT)):
+        if (re.search(r"\bshape\s*!=\s*"
+                      r"WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL\b",
+                      text) is None
+                or re.search(
+                    r"\bWYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL\b",
+                    text) is not None):
+            raise ContractError(
+                f"E_PROMOTE_SHAPE: {name} must refuse every shape but"
+                " TERMINAL and never accept DUAL"
+            )
+    evidence = re.search(
+        r"\brow->darwin_operation_evidence\s*==\s*NULL", body
+    )
+    opened = first_call(body, "wyl_fact_graph_resolver_open")
+    if evidence is None or opened < 0 or evidence.start() > opened:
+        raise ContractError(
+            f"E_PROMOTE_EARLY_EVIDENCE: {DARWIN_PROMOTE} must refuse a row"
+            " without evidence before its first wyl_fact_graph_resolver_open"
+        )
+    equal = first_call(effect, "evidence_equal")
+    shaped = first_call(effect, CLEANUP_SHAPE_CALL)
+    if equal < 0 or equal > shaped:
+        raise ContractError(
+            f"E_PROMOTE_EFFECT_EVIDENCE: {PROMOTE_EFFECT} must require the"
+            " loaded row's evidence with evidence_equal before its shape"
+        )
+    if shaped > first_call(effect, COMPARE_CALL):
+        raise ContractError(
+            f"E_PROMOTE_EFFECT_ORDER: {PROMOTE_EFFECT} must prove the shape"
+            " before the compare"
+        )
+    reentry = re.search(r"(?<![\w])wyl_policy_store_\w+\s*\(", effect)
+    if reentry is not None or count_calls(effect, SELECTED_PROVENANCE) != 0:
+        raise ContractError(
+            f"E_PROMOTE_EFFECT_REENTERS: {PROMOTE_EFFECT} runs inside the"
+            " store transaction and must not reenter the store"
+        )
+    for call in (CLEANUP_EXECUTE_CALL, LINUX_CLEANUP_EXECUTE_CALL,
+                 CAPTURE_CALL, SETTER_CALL, SYNC_CALL, MARK_CALL,
+                 JOURNAL_BEGIN_CALL, JOURNAL_COMPLETE_CALL):
+        if count_calls(effect, call) != 0:
+            raise ContractError(
+                f"E_PROMOTE_EFFECT_MUTATES: {PROMOTE_EFFECT} calls {call}, but"
+                " promotion changes no file"
+            )
+
+
 def check_source(source: str) -> None:
     source = strip_comments(source)
     for rule in ARM_RULES:
@@ -829,6 +1020,7 @@ def check_source(source: str) -> None:
     check_select_rules(source)
     check_finalize_rules(source)
     check_terminal_rules(source)
+    check_promote_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -1565,6 +1757,157 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal(
   wyl_policy_store_t *policy, WylFactOfflineRestoreJournal *out_committed);
 """
 
+PROMOTE_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_promote_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (policy == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_promote_selected (policy, fact_root, runtime, operation_uuid,
+             expected_revision, drain_timeout_us, out_committed);
+#else
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  PromoteEffectContext effect = { &resolver, &directory, lease,
+                                  runtime, &key, graph };
+  if (rc == WYRELOG_E_OK)
+    rc = promote_selected_terminal_effect (row, &effect);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_selected_promote_with_effect
+          (policy, row, &before, promote_selected_terminal_effect,
+            &effect, &result);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            out_committed->tenant_id, out_committed->selected_graph_id,
+            drain_timeout_us);
+  return rc;
+#endif
+#endif
+}
+"""
+
+DARWIN_PROMOTE_FIXTURE = """\
+static wyrelog_error_t
+darwin_promote_selected (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            operation_uuid, &row);
+  if (rc == WYRELOG_E_OK && (row->darwin_operation_evidence == NULL
+      || g_bytes_get_size (row->darwin_operation_evidence)
+      != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, TRUE, &key, drain_timeout_us,
+            &quiescence);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_selected_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (&resolver, &directory, lease, provenance.uuid,
+            &provenance.evidence, operation_uuid, row->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = check_finalized_persisted (policy, operation_uuid, encoded, row,
+            &journal);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_graph_restore_selected_promote_with_effect
+          (policy, row, &before, darwin_promote_effect, &effect, &result);
+    if (rc == WYRELOG_E_OK
+        && result != WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
+      rc = WYRELOG_E_BUSY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            out_committed->tenant_id, out_committed->selected_graph_id,
+            drain_timeout_us);
+  else {
+    wyrelog_error_t receipt_rc =
+        wyl_policy_store_offline_restore_receipt_lookup (policy,
+            operation_uuid, &receipt);
+    if (receipt_rc == WYRELOG_E_OK && receipt != NULL)
+      (void) restore_unseal_graph (policy, fact_root, runtime,
+          journal.tenant_id, journal.selected_graph_id,
+          drain_timeout_us);
+  }
+  return rc;
+}
+"""
+
+DARWIN_PROMOTE_EFFECT_FIXTURE = """\
+static wyrelog_error_t
+darwin_promote_effect
+  (const WylPolicyGraphRestoreReplacementRecord *current,
+    gpointer user_data)
+{
+  DarwinPromoteEffect *effect = user_data;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (effect->lease, effect->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (effect->runtime, effect->key);
+  if (rc == WYRELOG_E_OK && (current->darwin_operation_evidence == NULL
+      || !evidence_equal (current->darwin_operation_evidence,
+      effect->evidence)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open
+              (effect->resolver, effect->directory, effect->lease,
+            effect->provenance->uuid, &effect->provenance->evidence,
+            effect->journal->operation_uuid, current->replacement_uuid,
+            &graph->expected_main_identity, &graph->staged_main_identity,
+            graph->logical_bytes, &shape));
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+              (effect->directory, current->replacement_uuid,
+            &graph->staged_main_identity, graph->logical_bytes,
+            graph->checksum, effect->expected));
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (effect->lease,
+            effect->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (effect->runtime, effect->key);
+  return rc;
+}
+"""
+
+# The real file's one-line forward declarator of the Darwin promotion,
+# which function_body must skip.
+PROMOTE_DECLARATIONS = """\
+static wyrelog_error_t darwin_promote_selected (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactOfflineRestoreJournal *out_committed);
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -1597,6 +1940,9 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_finalized_prove_terminal":
         TERMINAL_RUN_FIXTURE,
     "darwin_finalized_prove_terminal": DARWIN_TERMINAL_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_promote_run": PROMOTE_RUN_FIXTURE,
+    "darwin_promote_selected": DARWIN_PROMOTE_FIXTURE,
+    "darwin_promote_effect": DARWIN_PROMOTE_EFFECT_FIXTURE,
 }
 
 
@@ -1636,6 +1982,9 @@ A = "darwin_finalize_effect"
 L = "graph_selected_provenance_load"
 TR = "wyl_fact_offline_restore_graph_commit_finalized_prove_terminal"
 DT = "darwin_finalized_prove_terminal"
+PR = "wyl_fact_offline_restore_graph_commit_promote_run"
+DP = "darwin_promote_selected"
+PE = "darwin_promote_effect"
 FINALIZE_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
     "    rc = darwin_post_publish_refusal\n"
@@ -1713,6 +2062,61 @@ TERMINAL_EARLY_EVIDENCE_LINES = FINALIZE_EARLY_EVIDENCE_LINES
 TERMINAL_RESOLVER_OPEN_LINES = FINALIZE_RESOLVER_OPEN_LINES
 TERMINAL_SHAPE_TEST = (
     "shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL"
+)
+PROMOTE_PROVENANCE_LINES = TERMINAL_PROVENANCE_LINES
+PROMOTE_SHAPE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open\n"
+    "              (&resolver, &directory, lease, provenance.uuid,\n"
+    "            &provenance.evidence, operation_uuid,"
+    " row->replacement_uuid,\n"
+    "            &graph->expected_main_identity,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, &shape));\n"
+)
+PROMOTE_RECHECK_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = check_finalized_persisted (policy, operation_uuid, encoded,"
+    " row,\n"
+    "            &journal);\n"
+)
+PROMOTE_STORE_LINES = (
+    "  if (rc == WYRELOG_E_OK) {\n"
+    "    rc = wyl_policy_store_graph_restore_selected_promote_with_effect\n"
+    "          (policy, row, &before, darwin_promote_effect, &effect,"
+    " &result);\n"
+)
+PROMOTE_UNSEAL_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = restore_unseal_graph (policy, fact_root, runtime,\n"
+    "            out_committed->tenant_id, out_committed->selected_graph_id,\n"
+    "            drain_timeout_us);\n"
+)
+PROMOTE_EFFECT_SHAPE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open\n"
+    "              (effect->resolver, effect->directory, effect->lease,\n"
+    "            effect->provenance->uuid, &effect->provenance->evidence,\n"
+    "            effect->journal->operation_uuid, current->replacement_uuid,\n"
+    "            &graph->expected_main_identity,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, &shape));\n"
+)
+PROMOTE_EFFECT_COMPARE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_directory_compare_darwin_replacement_evidence\n"
+    "              (effect->directory, current->replacement_uuid,\n"
+    "            &graph->staged_main_identity, graph->logical_bytes,\n"
+    "            graph->checksum, effect->expected));\n"
+)
+PROMOTE_EFFECT_EVIDENCE_LINES = (
+    "  if (rc == WYRELOG_E_OK && (current->darwin_operation_evidence == NULL\n"
+    "      || !evidence_equal (current->darwin_operation_evidence,\n"
+    "      effect->evidence)))\n"
+    "    rc = WYRELOG_E_POLICY;\n"
 )
 SELECT_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
@@ -2353,6 +2757,152 @@ MUTANTS = (
     ("darwin terminal: check_runtime dropped", DT, replace(
         "    rc = check_runtime (runtime, &key);\n",
         "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("promote: Apple arm dropped", PR, drop_apple_arm, "E_PROMOTE_ARMS"),
+    ("promote: Darwin step called twice", PR, replace(
+        "             expected_revision, drain_timeout_us, out_committed);\n"
+        "#else",
+        "             expected_revision, drain_timeout_us, out_committed);\n"
+        "  rc = darwin_promote_selected (policy, fact_root, runtime,"
+        " operation_uuid, expected_revision, drain_timeout_us,"
+        " out_committed);\n#else"), "E_PROMOTE_ROUTE"),
+    ("promote: Apple arm calls the store promotion", PR, replace(
+        "             expected_revision, drain_timeout_us, out_committed);\n"
+        "#else",
+        "             expected_revision, drain_timeout_us, out_committed);\n"
+        "  rc = wyl_policy_store_graph_restore_selected_promote_with_effect"
+        " (policy, row, &before, darwin_promote_effect, &effect,"
+        " &result);\n#else"), "E_PROMOTE_DIRECT"),
+    ("promote: Linux arm calls the Darwin step", PR, replace(
+        "  return rc;\n#endif",
+        "  rc = darwin_promote_selected (policy, fact_root, runtime,"
+        " operation_uuid, expected_revision, drain_timeout_us,"
+        " out_committed);\n  return rc;\n#endif"), "E_PROMOTE_LEAK"),
+    ("promote: Linux arm passes the Darwin effect", PR, replace(
+        "          (policy, row, &before, promote_selected_terminal_effect,",
+        "          (policy, row, &before, darwin_promote_effect,"),
+     "E_PROMOTE_LEAK"),
+    ("darwin promote: provenance load dropped", DP,
+     replace(PROMOTE_PROVENANCE_LINES, ""), "E_ROUTE_HELPER"),
+    ("darwin promote: ACTIVE loader swapped in", DP, replace(
+        "    rc = graph_selected_provenance_load (policy,",
+        "    rc = graph_provenance_load (policy,"), "E_ROUTE_HELPER"),
+    ("darwin promote: ACTIVE loader beside", DP, replace(
+        PROMOTE_PROVENANCE_LINES,
+        PROMOTE_PROVENANCE_LINES
+        + "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n"), "E_PROMOTE_CALLS"),
+    ("darwin promote: rebind called directly", DP, replace(
+        PROMOTE_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_darwin_evidence_rebind (&expected, uuid,"
+        " old_uuid, object, &rebuilt);\n" + PROMOTE_SHAPE_LINES),
+     "E_PROMOTE_CALLS"),
+    ("darwin promote: shape dropped", DP,
+     replace(PROMOTE_SHAPE_LINES, ""), "E_PROMOTE_CALLS"),
+    ("darwin promote: shape after the store promotion", DP,
+     move_before(PROMOTE_SHAPE_LINES, PROMOTE_UNSEAL_LINES),
+     "E_PROMOTE_ORDER"),
+    ("darwin promote: recheck dropped", DP,
+     replace(PROMOTE_RECHECK_LINES, ""), "E_ROUTE_HELPER"),
+    ("darwin promote: recheck before the shape", DP,
+     move_before(PROMOTE_RECHECK_LINES, PROMOTE_SHAPE_LINES),
+     "E_PROMOTE_PERSISTED"),
+    ("darwin promote: recheck after the store promotion", DP,
+     move_before(PROMOTE_RECHECK_LINES, PROMOTE_UNSEAL_LINES),
+     "E_PROMOTE_PERSISTED"),
+    ("darwin promote: Linux effect passed", DP, replace(
+        "darwin_promote_effect, &effect,",
+        "promote_selected_terminal_effect, &effect,"), "E_PROMOTE_EFFECT"),
+    ("darwin promote: current row passed", DP, replace(
+        "          (policy, row, &before, darwin_promote_effect,",
+        "          (policy, current, &before, darwin_promote_effect,"),
+     "E_PROMOTE_EFFECT"),
+    ("darwin promote: DUAL accepted", DP, replace(
+        TERMINAL_SHAPE_TEST,
+        "shape == WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID"),
+     "E_PROMOTE_SHAPE"),
+    ("darwin promote: DUAL named", DP, replace(
+        TERMINAL_SHAPE_TEST,
+        TERMINAL_SHAPE_TEST
+        + "\n      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL"),
+     "E_PROMOTE_SHAPE"),
+    ("darwin promote: early row-evidence refusal dropped", DP,
+     replace(FINALIZE_EARLY_EVIDENCE_LINES, ""), "E_PROMOTE_EARLY_EVIDENCE"),
+    ("darwin promote: row-evidence refusal after the resolver open", DP,
+     move_before(FINALIZE_RESOLVER_OPEN_LINES, FINALIZE_EARLY_EVIDENCE_LINES),
+     "E_PROMOTE_EARLY_EVIDENCE"),
+    ("darwin promote: cleanup executed", DP, replace(
+        PROMOTE_RECHECK_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_restore_darwin_selected_cleanup_execute"
+        " (&resolver, &directory, lease, uuid, &evidence, operation_uuid,"
+        " replacement, &old_main, &new_main, size);\n"
+        + PROMOTE_RECHECK_LINES), "E_PROMOTE_CALLS"),
+    ("darwin promote: FINALIZE completion added", DP, replace(
+        PROMOTE_RECHECK_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_policy_store_graph_restore_selected_finalize_with_effect"
+        " (policy, row, &before, &after, darwin_finalize_effect, &effect,"
+        " &result);\n" + PROMOTE_RECHECK_LINES), "E_PROMOTE_CALLS"),
+    ("darwin promote: compare added", DP, replace(
+        PROMOTE_RECHECK_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_directory_compare_darwin_replacement_evidence"
+        " (&directory, row->replacement_uuid, &identity, size, checksum,"
+        " &expected);\n" + PROMOTE_RECHECK_LINES), "E_PROMOTE_CALLS"),
+    ("darwin promote: unseal dropped", DP, replace(
+        "restore_unseal_graph (", "restore_keep_sealed ("), "E_ROUTE_HELPER"),
+    ("darwin promote: receipt lookup dropped", DP, replace(
+        "wyl_policy_store_offline_restore_receipt_lookup (",
+        "receipt_unread ("), "E_ROUTE_HELPER"),
+    ("darwin promote: unseal before the store promotion", DP, replace(
+        PROMOTE_STORE_LINES,
+        "  rc = restore_unseal_graph (policy, fact_root, runtime, tenant,"
+        " graph, drain_timeout_us);\n" + PROMOTE_STORE_LINES),
+     "E_PROMOTE_ORDER"),
+    ("promote effect: compare dropped", PE,
+     replace(PROMOTE_EFFECT_COMPARE_LINES, ""), "E_ROUTE_HELPER"),
+    ("promote effect: shape dropped", PE,
+     replace(PROMOTE_EFFECT_SHAPE_LINES, ""), "E_ROUTE_HELPER"),
+    ("promote effect: Linux shape swapped in", PE, replace(
+        "          (wyl_fact_graph_restore_darwin_selected_cleanup_shape_open"
+        "\n",
+        "          (wyl_fact_graph_restore_selected_cleanup_shape_open\n"),
+     "E_ROUTE_HELPER"),
+    ("promote effect: check_runtime dropped", PE, replace(
+        "    rc = check_runtime (effect->runtime, effect->key);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("promote effect: compare before the shape", PE,
+     move_before(PROMOTE_EFFECT_COMPARE_LINES, PROMOTE_EFFECT_SHAPE_LINES),
+     "E_PROMOTE_EFFECT_ORDER"),
+    ("promote effect: evidence check dropped", PE,
+     replace(PROMOTE_EFFECT_EVIDENCE_LINES, ""),
+     "E_PROMOTE_EFFECT_EVIDENCE"),
+    ("promote effect: row reloaded", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_policy_store_graph_restore_replacement_load (policy,"
+        " operation_uuid, &row);\n" + PROMOTE_EFFECT_SHAPE_LINES),
+     "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: selected provenance reloaded", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = graph_selected_provenance_load (policy, journal, current,"
+        " &provenance);\n" + PROMOTE_EFFECT_SHAPE_LINES),
+     "E_PROMOTE_EFFECT_REENTERS"),
+    ("promote effect: DUAL accepted", PE, replace(
+        TERMINAL_SHAPE_TEST,
+        "shape == WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID"),
+     "E_PROMOTE_SHAPE"),
+    ("promote effect: cleanup executed beside the shape", PE, replace(
+        PROMOTE_EFFECT_SHAPE_LINES,
+        PROMOTE_EFFECT_SHAPE_LINES
+        + "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = wyl_fact_graph_restore_darwin_selected_cleanup_execute"
+        " (effect->resolver, effect->directory, effect->lease, uuid,"
+        " &evidence, operation_uuid, replacement, &old_main, &new_main,"
+        " size);\n"), "E_PROMOTE_EFFECT_MUTATES"),
 )
 
 
@@ -2397,6 +2947,30 @@ def self_test() -> None:
             ) from error
     else:
         raise ContractError("self-test mutant survived: declared compare")
+    # The Darwin promotion's forward declaration is skipped as well: the
+    # real bodies still pass, and the effect's compare dropped still fails.
+    declared = PROMOTE_DECLARATIONS + "".join(POSITIVE.values())
+    check_source(declared)
+    dropped = PROMOTE_DECLARATIONS + "".join(
+        text.replace(PROMOTE_EFFECT_COMPARE_LINES, "") if name == PE else text
+        for name, text in POSITIVE.items()
+    )
+    if dropped == declared:
+        raise ContractError(
+            "self-test mutant did not apply: declared promote compare"
+        )
+    try:
+        check_source(dropped)
+    except ContractError as error:
+        if not str(error).startswith("E_ROUTE_HELPER:"):
+            raise ContractError(
+                "self-test mutant failed for another reason: declared"
+                f" promote compare: {error}"
+            ) from error
+    else:
+        raise ContractError(
+            "self-test mutant survived: declared promote compare"
+        )
 
 
 def main(argv: list[str]) -> int:
