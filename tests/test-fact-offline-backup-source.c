@@ -20875,7 +20875,8 @@ test_graph_commit_promote_macos (gconstpointer data)
     assert_promote_policy (&fixture, &expect, NULL);
     /* The store went terminal with the lost response, so the same call
      * could not read the receipt and unseal: zeta's runtime stays empty and
-     * closed until a restart (or U5-12 and U5-15). */
+     * closed until a restart or the published proof
+     * (commit-published-lost-response). */
     assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
         WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
     rc = promote_run (&fixture, &probe, operation, finalized_revision,
@@ -21203,6 +21204,487 @@ test_graph_commit_promote_macos (gconstpointer data)
     probe.act_at = NULL;
     probe.action = FINALIZE_PROBE_NONE;
     assert_promoted (&fixture, &probe, &expect);
+  }
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (NULL, NULL);
+  g_ptr_array_unref (probe.seen);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+#define PUBLISHED_BEFORE_UNSEAL "finalize-darwin-published-before-unseal"
+
+/* One direct call of the published proof, recording its points afresh.
+ * The witness and main read counters see only the restore path's directory
+ * checkpoints, and the unseal's directory has none, so their zero checks
+ * here are vacuous for the unseal's own read: they are not evidence that
+ * the unseal reads nothing. */
+static wyrelog_error_t
+published_run (BackupFixture *fixture, FinalizeProbe *probe,
+    const WylFactOfflineRestoreJournal *finalized,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_ptr_array_set_size (probe->seen, 0);
+  probe->hits = 0;
+  probe->witness_hits = 0;
+  probe->main_read_hits = 0;
+  wyrelog_error_t rc =
+      wyl_fact_offline_restore_graph_commit_published_prove_terminal
+        (fixture->policy, fixture->root, fixture->runtime, finalized, 0,
+          out_committed);
+  g_assert_cmpuint (probe->witness_hits, ==, 0);
+  g_assert_cmpuint (probe->main_read_hits, ==, 0);
+  return rc;
+}
+
+/* FINALIZED, then promoted with the commit response lost: the commit is
+ * durable, the call returned IO with no output, and zeta's runtime is
+ * empty and closed.  The store is terminal, so nothing of the policy is
+ * read here: every lookup would be IO until a reopen. */
+static void
+published_lost_response (BackupFixture *fixture, FinalizeProbe *probe,
+    const FinalizeExpect *expect, WylFactOfflineRestoreJournal *out_finalized)
+{
+  finalized_setup (fixture, probe, expect, out_finalized);
+  wyl_policy_store_offline_restore_fail_once (fixture->policy,
+      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (promote_run (fixture, probe, expect->operation,
+      expect->selected + 2, &committed), ==, WYRELOG_E_IO);
+  g_assert_null (committed.operation_uuid);
+  g_assert_null (committed.graphs);
+  assert_promote_runtime (fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+}
+
+/* On an open store: the promotion committed in policy, zeta's runtime
+ * still empty and closed, and committed, when given, empty. */
+static void
+assert_published_closed (BackupFixture *fixture, const FinalizeExpect *expect,
+    const WylFactOfflineRestoreJournal *committed)
+{
+  assert_promote_policy (fixture, expect, NULL);
+  assert_promote_runtime (fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+  if (committed != NULL) {
+    g_assert_null (committed->operation_uuid);
+    g_assert_null (committed->graphs);
+  }
+}
+
+/* zeta has no runtime entry. */
+static void
+assert_published_no_entry (BackupFixture *fixture)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (fixture->runtime, &key, &status), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
+}
+
+/* The published proof of finalized: OK at its one point, the committed
+ * journal four past the selected revision, and zeta READY. */
+static void
+assert_published (BackupFixture *fixture, FinalizeProbe *probe,
+    const FinalizeExpect *expect,
+    const WylFactOfflineRestoreJournal *finalized)
+{
+  const gchar *const unsealed[] = { PUBLISHED_BEFORE_UNSEAL, NULL };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (published_run (fixture, probe, finalized, &committed), ==,
+      WYRELOG_E_OK);
+  assert_finalize_points (probe, unsealed);
+  assert_promote_applied (fixture, expect, &committed);
+  wyl_fact_offline_restore_journal_clear (&committed);
+}
+#endif
+
+/* macOS (#1303 U5-12): the published proof, called directly with the
+ * FINALIZED journal of a promoted graph restore, requires that journal to
+ * be FINALIZED, reads the committed receipt and nothing else of the
+ * restore, requires it to match the journal, requires zeta ACTIVE and
+ * unsealed in policy, returns the journal published and handed off, and
+ * unseals zeta through the ACTIVE evidence.  Promotion terminalizes in its
+ * own transaction, so no receipt means not promoted: POLICY, with no lease,
+ * no quiescence and no namespace read.
+ *
+ * Per mode: setup | code | state afterwards (sel is the selected revision,
+ * sel+2 FINALIZED, sel+4 the committed receipt) | the retry, if any.
+ * Unless stated, setup is a promotion whose commit response was lost and a
+ * reopened store, a refusal leaves the promotion committed with zeta empty
+ * and closed, and the retry is the proof of the FINALIZED journal.  The
+ * only point is the one before the unseal.
+ *
+ *   published
+ *     promoted; proved twice, then on a reopened store | OK | promoted,
+ *     READY; the first output is promotion's | -
+ *   published-lost-response
+ *     before the reopen; after it, twice; promotion | IO; OK, OK;
+ *     NOT_FOUND | promoted, READY | -
+ *   published-lost-response-restart
+ *     a new runtime manager and a reopened store | OK | promoted | -
+ *   published-no-receipt, published-no-receipt-quiescence-held
+ *     FINALIZED only, also with zeta quiesced by another owner | POLICY
+ *     | sel+2 | promotion, then the proof
+ *   published-receipt-mismatch
+ *     a revision, manifest, graph or tenant the receipt does not name
+ *     | POLICY | yes
+ *   published-not-finalized-input
+ *     a v2 journal, FINALIZE pending | POLICY | yes
+ *   published-crash-before-unseal
+ *     a failure before the unseal | IO | yes
+ *   published-substituted-main
+ *     a same-bytes object at the main name | POLICY, zeta EVICTED and
+ *     closed | restored
+ *   published-invalid-input
+ *     NULL or empty arguments, revision 0 or past G_MAXINT64-2 | INVALID
+ *     | yes
+ *   published-stale-replay
+ *     zeta sealed in policy after the promotion | POLICY | unsealed again
+ *   published-quiescence-held
+ *     zeta quiesced by another owner | BUSY | released */
+static void
+test_graph_commit_published_macos (gconstpointer data)
+{
+#if !defined(__APPLE__) || !defined(WYL_TEST_HANDLE_SEAMS)
+  (void) data;
+  g_test_skip ("macOS graph restore published proof");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0061";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-published-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *parked_path = graph_file_path (&fixture, "zeta",
+          "../parked-main.duckdb");
+  g_autofree gchar *linked_path = graph_file_path (&fixture, "zeta",
+          "../linked-main.duckdb");
+  g_autofree gchar *stray_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb.wal");
+  WylFactArtifactInventoryIdentity old_main = { 0 };
+  g_autoptr (GBytes) selected_journal = NULL;
+  g_autoptr (GBytes) stored = NULL;
+  const guint64 selected = darwin_graph_commit_selected (&fixture, &capture,
+          bundle, operation, &old_main, &selected_journal, &stored);
+  const WylFactArtifactInventoryIdentity new_main =
+      darwin_file_identity (main_path);
+  WylPolicyGraphRestoreReplacementRecord *row = companion_row (&fixture,
+          operation, "selected_pending_cleanup", stored);
+  g_autofree gchar *legacy_name = g_strdup_printf ("provision-%s.sqlite",
+          row->replacement_uuid);
+  g_autofree gchar *legacy_path = graph_file_path (&fixture, "zeta",
+          legacy_name);
+  g_autofree gchar *replacement_uuid = g_strdup (row->replacement_uuid);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  g_autofree gchar *alpha = select_provisioning_snapshot (&fixture, "alpha");
+
+  FinalizeProbe probe = {
+    .parked_path = parked_path, .linked_path = linked_path,
+    .stray_path = stray_path,
+    .seen = g_ptr_array_new_with_free_func (g_free),
+  };
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (finalize_probe_checkpoint, &probe);
+  const FinalizeExpect expect = {
+    .operation = operation, .selected_journal = selected_journal,
+    .selected = selected, .replacement_uuid = replacement_uuid,
+    .stored = stored, .legacy_path = legacy_path, .main_path = main_path,
+    .rollback_path = rollback_path, .old_main = &old_main,
+    .new_main = &new_main, .alpha = alpha,
+  };
+  const gchar *const unsealed[] = { PUBLISHED_BEFORE_UNSEAL, NULL };
+  const gchar *const none[] = { NULL };
+  const guint64 finalized_revision = selected + 2;
+  g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  wyrelog_error_t rc;
+  gboolean retry = TRUE;
+
+  if (g_str_equal (mode, "published")) {
+    /* After a promotion that unsealed zeta, the proof accepts the READY
+     * runtime, returns promotion's output, and is idempotent, also on a
+     * reopened store. */
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    WylFactOfflineRestoreJournal promoted = { 0 };
+    g_assert_cmpint (promote_run (&fixture, &probe, operation,
+        finalized_revision, &promoted), ==, WYRELOG_E_OK);
+    assert_promote_applied (&fixture, &expect, &promoted);
+    g_autoptr (GBytes) promoted_blob = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&promoted,
+        &promoted_blob), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&promoted);
+    for (guint run = 0; run < 3; run++) {
+      if (run == 2)
+        select_reopen_policy (&fixture);
+      rc = published_run (&fixture, &probe, &finalized, &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+      assert_finalize_points (&probe, unsealed);
+      assert_promote_applied (&fixture, &expect, &committed);
+      if (run == 0) {
+        g_autoptr (GBytes) committed_blob = NULL;
+        g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+              (&committed, &committed_blob), ==, WYRELOG_E_OK);
+        g_assert_true (g_bytes_equal (committed_blob, promoted_blob));
+      }
+      wyl_fact_offline_restore_journal_clear (&committed);
+    }
+    retry = FALSE;
+  } else if (g_str_equal (mode, "published-lost-response")) {
+    /* In process: before a reopen the terminal store fails the receipt
+     * lookup, which passes through as IO with nothing unsealed.  After it
+     * the proof matches the receipt and unseals zeta from the ACTIVE
+     * evidence, and a replay accepts the READY runtime.  Promotion then
+     * finds no journal. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    select_reopen_policy (&fixture);
+    assert_published_closed (&fixture, &expect, NULL);
+    assert_published (&fixture, &probe, &expect, &finalized);
+    assert_published (&fixture, &probe, &expect, &finalized);
+    rc = promote_run (&fixture, &probe, operation, finalized_revision,
+            &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_NOT_FOUND);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    assert_promote_applied (&fixture, &expect, NULL);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "published-lost-response-restart")) {
+    /* After a restart zeta has no runtime entry, and the unseal opens it
+     * from the ACTIVE evidence. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    promote_restart (&fixture);
+    assert_published_no_entry (&fixture);
+    assert_published (&fixture, &probe, &expect, &finalized);
+    retry = FALSE;
+  } else if (g_str_equal (mode, "published-no-receipt")
+      || g_str_equal (mode, "published-no-receipt-quiescence-held")) {
+    /* Not promoted: POLICY before any lease or quiescence, so a quiescence
+     * held elsewhere is not reported as BUSY.  FINALIZE leaves zeta's
+     * entry empty and closed. */
+    gboolean held = g_str_has_suffix (mode, "-quiescence-held");
+    finalized_setup (&fixture, &probe, &expect, &finalized);
+    WylFactGraphQuiescenceToken *token = held
+        ? finalized_hold_quiescence (&fixture) : NULL;
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_finalize_applied (&fixture, &expect, NULL);
+    if (token != NULL)
+      wyl_fact_graph_quiescence_token_release (token);
+    else
+      assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+          WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    assert_promoted (&fixture, &probe, &expect);
+  } else if (g_str_equal (mode, "published-receipt-mismatch")) {
+    /* A journal whose revision, manifest, graph or tenant the receipt does
+     * not name is refused before anything is unsealed. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    for (guint i = 0; i < 4; i++) {
+      g_auto (WylFactOfflineRestoreJournal) other = { 0 };
+      finalized_copy (&finalized, &other);
+      WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (other.graphs, 0);
+      if (i == 0) {
+        other.revision += 2;
+      } else if (i == 1) {
+        other.manifest_sha256[0] ^= 1;
+      } else if (i == 2) {
+        /* alpha stays sealed after zeta's promotion, which the authority
+         * check alone would refuse: unseal it in policy, so the graph
+         * compare is what refuses. */
+        g_assert_cmpint (wyl_policy_store_unseal_fact_graph (fixture.policy,
+            "tenant-a", "alpha"), ==, WYRELOG_E_OK);
+        g_free (other.selected_graph_id);
+        other.selected_graph_id = g_strdup ("alpha");
+        g_free (graph->graph_id);
+        graph->graph_id = g_strdup ("alpha");
+      } else {
+        g_free (other.tenant_id);
+        other.tenant_id = g_strdup ("tenant-b");
+      }
+      rc = published_run (&fixture, &probe, &other, &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      assert_finalize_points (&probe, none);
+      assert_published_closed (&fixture, &expect, &committed);
+    }
+  } else if (g_str_equal (mode, "published-not-finalized-input")) {
+    /* The caller's journal must be FINALIZED v3: here a v2 journal with
+     * the graph FINALIZED, and the v3 journal with FINALIZE pending.  The
+     * journal's own encoding refuses every other non-FINALIZED shape, and
+     * marking it published refuses these two as well, so this refusal does
+     * not depend on the proof's own FINALIZED predicate alone. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    for (guint i = 0; i < 2; i++) {
+      g_auto (WylFactOfflineRestoreJournal) other = { 0 };
+      finalized_copy (&finalized, &other);
+      WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (other.graphs, 0);
+      if (i == 0) {
+        other.version = WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION;
+        other.replacement_selected_pending_cleanup = FALSE;
+        g_clear_pointer (&graph->replacement_provisioning_uuid, g_free);
+      } else {
+        graph->transition_state =
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+        graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+        graph->transition_terminal = FALSE;
+      }
+      rc = published_run (&fixture, &probe, &other, &committed);
+      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      assert_finalize_points (&probe, none);
+      assert_published_closed (&fixture, &expect, &committed);
+    }
+  } else if (g_str_equal (mode, "published-crash-before-unseal")) {
+    /* A failure after the output is set and before the unseal clears the
+     * output and unseals nothing; the receipt is unchanged. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    probe.act_at = PUBLISHED_BEFORE_UNSEAL;
+    probe.action = FINALIZE_PROBE_FAIL;
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+    assert_finalize_points (&probe, unsealed);
+    assert_published_closed (&fixture, &expect, &committed);
+  } else if (g_str_equal (mode, "published-substituted-main")) {
+    /* The unseal compares the ACTIVE evidence's identity on a fresh open
+     * and refuses a same-bytes object on a new inode.  The unseal
+     * sequencer evicts the closed entry first, which leaves it EVICTED and
+     * closed.  POLICY, pinned here, is what the U5-15 dispatcher will
+     * see. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    companion_substitute (main_path, parked_path);
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, unsealed);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EVICTED,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    companion_unsubstitute (main_path, parked_path);
+    assert_promote_policy (&fixture, &expect, NULL);
+  } else if (g_str_equal (mode, "published-invalid-input")) {
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    g_ptr_array_set_size (probe.seen, 0);
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_published_prove_terminal
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        NULL), ==, WYRELOG_E_INVALID);
+    const gchar *const roots[] = { NULL, "" };
+    for (guint i = 0; i < G_N_ELEMENTS (roots); i++) {
+      g_assert_cmpint
+        (wyl_fact_offline_restore_graph_commit_published_prove_terminal
+            (fixture.policy, roots[i], fixture.runtime, &finalized, 0,
+          &committed), ==, WYRELOG_E_INVALID);
+      g_assert_null (committed.operation_uuid);
+    }
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_published_prove_terminal
+          (NULL, fixture.root, fixture.runtime, &finalized, 0, &committed),
+        ==, WYRELOG_E_INVALID);
+    g_assert_null (committed.operation_uuid);
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_published_prove_terminal
+          (fixture.policy, fixture.root, NULL, &finalized, 0, &committed),
+        ==, WYRELOG_E_INVALID);
+    g_assert_null (committed.operation_uuid);
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_published_prove_terminal
+          (fixture.policy, fixture.root, fixture.runtime, NULL, 0,
+        &committed), ==, WYRELOG_E_INVALID);
+    g_assert_null (committed.operation_uuid);
+    assert_finalize_points (&probe, none);
+    for (guint i = 0; i < 5; i++) {
+      g_auto (WylFactOfflineRestoreJournal) other = { 0 };
+      finalized_copy (&finalized, &other);
+      if (i == 0)
+        g_clear_pointer (&other.operation_uuid, g_free);
+      else if (i == 1)
+        g_clear_pointer (&other.tenant_id, g_free);
+      else if (i == 2)
+        g_clear_pointer (&other.selected_graph_id, g_free);
+      else
+        other.revision = i == 3 ? 0 : (guint64) G_MAXINT64 - 1;
+      g_assert_cmpint (published_run (&fixture, &probe, &other, &committed),
+          ==, WYRELOG_E_INVALID);
+      assert_finalize_points (&probe, none);
+      g_assert_null (committed.operation_uuid);
+    }
+    assert_published_closed (&fixture, &expect, &committed);
+  } else if (g_str_equal (mode, "published-stale-replay")) {
+    /* The receipt is terminal and outlives the graph's later lifecycle:
+     * zeta sealed in policy after the promotion must not be unsealed by a
+     * replay of the proof. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    g_assert_cmpint (wyl_policy_store_seal_fact_graph (fixture.policy,
+        "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, none);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_promote_runtime (&fixture, WYL_FACT_GRAPH_RUNTIME_EMPTY,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    WylPolicyGraphAuthorityRecord *graph = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        "tenant-a", "zeta", &graph), ==, WYRELOG_E_OK);
+    g_assert_cmpint (graph->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_true (graph->sealed_compatibility);
+    wyl_policy_graph_authority_record_free (graph);
+    g_assert_cmpint (wyl_policy_store_unseal_fact_graph (fixture.policy,
+        "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+    assert_published_closed (&fixture, &expect, NULL);
+  } else if (g_str_equal (mode, "published-quiescence-held")) {
+    /* A quiescence held elsewhere passes through from the unseal
+     * sequencer, after the point, with the output cleared. */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    WylFactGraphQuiescenceToken *held = finalized_hold_quiescence (&fixture);
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    assert_finalize_points (&probe, unsealed);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    wyl_fact_graph_quiescence_token_release (held);
+    assert_published_closed (&fixture, &expect, NULL);
+  } else {
+    g_assert_not_reached ();
+  }
+  if (retry) {
+    probe.act_at = NULL;
+    probe.action = FINALIZE_PROBE_NONE;
+    assert_published (&fixture, &probe, &expect, &finalized);
   }
   wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
     (NULL, NULL);
@@ -22677,6 +23159,43 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-promote-wrong-revision",
       "graph-promote-wrong-revision", test_graph_commit_promote_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published",
+      "published", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-crash-before-unseal",
+      "published-crash-before-unseal", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-invalid-input",
+      "published-invalid-input", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-lost-response",
+      "published-lost-response", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-lost-response-restart",
+      "published-lost-response-restart", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-no-receipt",
+      "published-no-receipt", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-no-receipt-quiescence-held",
+      "published-no-receipt-quiescence-held",
+      test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-not-finalized-input",
+      "published-not-finalized-input", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-quiescence-held",
+      "published-quiescence-held", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-receipt-mismatch",
+      "published-receipt-mismatch", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-stale-replay",
+      "published-stale-replay", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-substituted-main",
+      "published-substituted-main", test_graph_commit_published_macos);
   g_test_add_data_func ("/fact-offline-backup-source/macos/commit-publish",
       "published", test_graph_commit_publish_macos);
   g_test_add_data_func

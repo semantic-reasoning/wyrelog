@@ -1031,7 +1031,14 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
   return rc;
 }
 #endif
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
+#ifdef __APPLE__
+static wyrelog_error_t darwin_published_prove_terminal
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+#endif
 
 wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
   wyl_policy_store_t *policy, const gchar *fact_root,
@@ -1046,6 +1053,10 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
       finalized->selected_graph_id == NULL || finalized->revision == 0 ||
       finalized->revision > G_MAXINT64 - 2 || out_committed == NULL)
     return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_published_prove_terminal (policy, fact_root, runtime,
+             finalized, drain_timeout_us, out_committed);
+#else
 #ifndef __linux__
   (void)drain_timeout_us;
   return WYRELOG_E_POLICY;
@@ -1231,7 +1242,10 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
   }
   return rc;
 #endif
+#endif
 }
+#endif
+#ifdef __linux__
 
 static wyrelog_error_t tenant_reserve_effect(GBytes *canonical_journal,
     const GPtrArray *active_uuids,
@@ -6833,6 +6847,104 @@ darwin_promote_selected (wyl_policy_store_t *policy, const gchar *fact_root,
           drain_timeout_us);
     wyl_policy_offline_restore_receipt_free (receipt);
   }
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  return rc;
+}
+
+/* The macOS published proof of a promoted graph restore (ADR 0006,
+ * "Restore replacement evidence").  A direct caller must pass the current
+ * FINALIZED journal: anything else is refused (POLICY) before the store is
+ * read.  The receipt fast path and the journal round trip copy the Linux
+ * ones; the unifdef views of this file keep the Linux body unchanged, so
+ * the copy may drift.  Promotion terminalizes in its own transaction, so
+ * the receipt is the only durable trace of it: the journal, the row, the
+ * claim and the old ACTIVE record are gone.  No receipt is POLICY, with no
+ * lease, quiescence or namespace read, since promotion takes those itself;
+ * a receipt that does not match the journal is POLICY.  The receipt is
+ * terminal and outlives the graph's later lifecycle, so the graph must
+ * still be ACTIVE and unsealed in policy, as promotion left it: anything
+ * else is a stale replay (POLICY) and nothing is unsealed.  This reads only
+ * the receipt and the graph authority before the unseal; the unseal reads
+ * the ACTIVE evidence and opens the main by identity.  Nothing re-proves
+ * TERMINAL or the main's bytes: the graph is live, and a WAL and writes are
+ * legitimate.  Store errors pass through. */
+static wyrelog_error_t
+darwin_published_prove_terminal (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  g_autoptr (GBytes) finalized_blob = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (finalized,
+          &finalized_blob);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      finalized->graphs != NULL && finalized->graphs->len == 1
+      ? g_ptr_array_index (finalized->graphs, 0) : NULL;
+  if (finalized->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || finalized->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || finalized->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !finalized->replacement_selected_pending_cleanup
+      || finalized->policy_generation_published
+      || finalized->lifecycle_handoff_complete || graph == NULL
+      || graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      || !graph->transition_terminal || !graph->replay_preflighted)
+    return WYRELOG_E_POLICY;
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  rc = wyl_policy_store_offline_restore_receipt_lookup (policy,
+          finalized->operation_uuid, &receipt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (receipt == NULL)
+    return WYRELOG_E_POLICY;
+  guint64 terminal_revision = receipt->final_revision;
+  gboolean matches = receipt->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+      && g_strcmp0 (receipt->tenant_id, finalized->tenant_id) == 0
+      && g_strcmp0 (receipt->selected_graph_id,
+          finalized->selected_graph_id) == 0
+      && receipt->final_revision == finalized->revision + 2
+      && receipt->graph_count == 1
+      && g_strcmp0 (receipt->terminal_state, "committed") == 0
+      && memcmp (receipt->manifest_sha256, finalized->manifest_sha256,
+          sizeof receipt->manifest_sha256) == 0;
+  wyl_policy_offline_restore_receipt_free (receipt);
+  if (!matches)
+    return WYRELOG_E_POLICY;
+  g_auto (WylFactOfflineRestoreJournal) terminal = { 0 };
+  rc = wyl_fact_offline_restore_journal_decode (finalized_blob, &terminal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_mark_policy_published (&terminal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_mark_lifecycle_handoff (&terminal);
+  if (rc == WYRELOG_E_OK && terminal.revision != terminal_revision)
+    rc = WYRELOG_E_POLICY;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_read_graph_authority (policy, finalized->tenant_id,
+            finalized->selected_graph_id, &authority);
+  if (rc == WYRELOG_E_OK
+      && (authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      || authority->sealed_compatibility))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_graph_authority_record_free (authority);
+  if (rc == WYRELOG_E_OK) {
+    *out_committed = terminal;
+    memset (&terminal, 0, sizeof terminal);
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_finalize_checkpoint ("finalize-darwin-published-before-unseal");
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            finalized->tenant_id, finalized->selected_graph_id,
+            drain_timeout_us);
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear (out_committed);
   return rc;
