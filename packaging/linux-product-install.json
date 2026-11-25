@@ -23,11 +23,11 @@
     "duckdb-prebuilt-linux": "2.0.0",
     "libchronoid": "1.2.0",
     "nanoarrow": "0.10.0-SNAPSHOT",
-    "wirelog": "0.70.0",
+    "wirelog": "0.72.0",
     "xxhash": "0.8.4"
   },
   "wrap_revisions": {
-    "wirelog.wrap": "9cb295ad49280c2562e29148796d1ac7ec69c2ef",
+    "wirelog.wrap": "a782f54cdc13fa36dafb98ec4c80901cf240d3fe",
     "libchronoid.wrap": "v1.2.0"
   },
   "nested_wrap_pins": {
@@ -60,7 +60,7 @@
     "lib/libchronoid.so.1",
     "lib/libchronoid.so.1.2.0",
     "lib/libnanoarrow.so",
-    "lib/libwirelog.so.0.70.0",
+    "lib/libwirelog.so.0.72.0",
     "lib/libwirelog.so.1",
     "lib/libwyrelog-client.so.0",
     "lib/libwyrelog.so.0",

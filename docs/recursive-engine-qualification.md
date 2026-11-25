@@ -5,11 +5,19 @@ under #1502, extended with production activation evidence for #1506.
 Production registration and replay now enable the qualified positive recursive
 subset; unsafe negative cycles remain refused.
 
-The inspected baseline is Wyrelog `c462944d` and Wirelog
+The original qualification baseline was Wyrelog `c462944d` and Wirelog
 `9cb295ad49280c2562e29148796d1ac7ec69c2ef`. Qualification uses that pinned
 source **plus** `0002-easy-snapshot-completeness.patch`. The patch fixes
 [Wirelog #2345](https://github.com/semantic-reasoning/wirelog/issues/2345).
 An unpatched provider at the same version is not equivalent.
+
+The current pinned provider is Wirelog `0.72.0`, commit
+`a782f54cdc13fa36dafb98ec4c80901cf240d3fe`, with both downstream package patches
+retained. The release still needs the optional-benchmarks overlay and the easy
+snapshot completeness overlay. Dependency selection requires at least `0.72.0`
+and the existing API/capability probes; an unpatched `0.72.0` provider still
+fails the completeness probe. Re-run the qualification commands below when
+changing the pin; the historical baseline alone does not qualify a new release.
 
 ## Executable contract
 

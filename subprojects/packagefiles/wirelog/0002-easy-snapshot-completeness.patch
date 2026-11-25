@@ -1,6 +1,6 @@
 Subject: Reject incomplete recursive easy snapshots at the iteration cap
 Upstream: https://github.com/semantic-reasoning/wirelog/issues/2345
-Base: 9cb295ad49280c2562e29148796d1ac7ec69c2ef
+Base: a782f54cdc13fa36dafb98ec4c80901cf240d3fe
 
 Keep raw continuation semantics and retry state; the easy facade must not
 report partial models as successful complete snapshots. Remove this patch
