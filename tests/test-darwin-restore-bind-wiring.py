@@ -320,7 +320,50 @@ wyrelog/fact/offline-restore-resume-private.c with comments stripped:
   it calls only wyl_policy_store_offline_restore_load, exactly once: only
   its steps read the graph or mutate (E_PROMOTE_RESUME_DIRECT).
 
-The two files are read separately, each with E_UNREADABLE on failure, and
+Tenant bind-all rule (check_tenant_bind_all_rules), on the authority
+source: the first conditional of
+wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run is exactly
+``#ifndef __linux__`` with an ``#else``, its true arm is exactly ``(void)
+drain_timeout_us; return WYRELOG_E_POLICY;``, and no wyl_policy_store_* or
+wyl_fact_offline_restore_journal_store_* call precedes it
+(E_TENANT_BIND_ALL_GATE).  Since #1303 U5-16 the daemon's commit handler
+reaches this function on macOS, and this gate is what keeps a tenant commit
+there from binding anything; lifting it is #1303 U6.
+
+Commit handler rules (check_http_source), on wyrelog/daemon/http.c with
+comments and literals blanked by c_code_only, copied from
+tests/test-posix-errno-capability-pair.py: the file holds JSON literals
+with ``//`` and unbalanced braces, so strip_comments and function_body are
+not used on it.
+
+- exactly one ``if (rc == WYRELOG_E_OK && commit) {`` anchors the commit
+  handler (E_HTTP_COMMIT_ANCHOR);
+- the next non-blank line is ``#ifdef G_OS_WIN32``, whose true arm is
+  exactly ``rc = WYRELOG_E_POLICY;`` with whitespace removed and which has
+  an ``#else``; that ``#else`` holds no ``__linux__`` conditional, since it
+  runs on Linux and macOS alike (E_HTTP_COMMIT_GATE);
+- the ``#else`` calls the graph bind, the tenant bind-all, graph admission
+  and tenant admission exactly once each, both binds before both
+  admissions, with ``if (rc == WYRELOG_E_OK)`` between the last bind and
+  the first admission (E_HTTP_COMMIT_ORDER);
+- no ``__APPLE__`` appears anywhere in the file: #1303 U5-16 removed its one
+  macOS branch, and a new one needs a guard edit (E_HTTP_NO_APPLE).
+
+Admission rules (check_prepare_source), on
+wyrelog/fact/offline-restore-prepare-private.c with c_code_only:
+
+- the body of wyl_fact_offline_restore_graph_commit_admit_run names no
+  ``__APPLE__``, holds no ``__linux__`` conditional and exactly one
+  ``#ifdef G_OS_WIN32``; its first conditional is ``#ifndef
+  WYL_HAS_SECURE_DUCKDB_BRIDGE`` with an ``#else``, whose first conditional
+  is that ``#ifdef G_OS_WIN32``, with no ``#else`` and the true arm exactly
+  ``(void) drain_timeout_us; (void) cancellable; return WYRELOG_E_POLICY;``
+  (E_GRAPH_ADMIT_GATE);
+- wyl_fact_offline_restore_tenant_commit_admit_run keeps the same shape with
+  ``#if defined(__APPLE__) || defined(G_OS_WIN32)`` as its platform gate
+  until tenant commit is ported (#1303 U6) (E_TENANT_ADMIT_GATE).
+
+The four files are read separately, each with E_UNREADABLE on failure, and
 the authority rules run first.
 
 function_body finds a definition whose return type is on the line before
@@ -330,7 +373,12 @@ without regard to string or character literals; none of the pinned
 functions holds a brace literal today.
 
 Self-test: each mutant is applied to one function of a fixture set and must
-fail with its own error code.  The resume fixtures are the real bodies;
+fail with its own error code.  The commit handler and admission fixtures are
+the real text after #1303 U5-16, trimmed; a literal with ``//``, an
+unbalanced brace and ``__APPLE__`` in the handler's shared arm still passes,
+and each of those rule sets fails on the other's fixture with
+E_HTTP_COMMIT_ANCHOR or E_NO_FUNCTION.  The resume fixtures are the real
+bodies;
 each rule set fails with E_NO_FUNCTION on the other file's fixtures, so
 neither passes vacuously, and both spellings of the refusing arm's cast
 pass in every gated dispatcher.
@@ -1556,6 +1604,7 @@ def check_source(source: str) -> None:
     check_published_rules(source)
     check_select_resume_rules(source)
     check_restore_unseal_rules(source)
+    check_tenant_bind_all_rules(source)
 
 
 def check_finalize_resume_rules(source: str) -> None:
@@ -1666,6 +1715,240 @@ def check_resume_source(source: str) -> None:
     check_promote_resume_rules(source)
 
 
+HTTP_SOURCE = "wyrelog/daemon/http.c"
+PREPARE_SOURCE = "wyrelog/fact/offline-restore-prepare-private.c"
+TENANT_BIND_ALL_RUN = (
+    "wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run"
+)
+TENANT_BIND_ALL_GATE = "#ifndef __linux__"
+GRAPH_BIND_RUN = "wyl_fact_offline_restore_graph_bind_provisioned_old_run"
+GRAPH_ADMIT_RUN = "wyl_fact_offline_restore_graph_commit_admit_run"
+TENANT_ADMIT_RUN = "wyl_fact_offline_restore_tenant_commit_admit_run"
+HTTP_COMMIT_ANCHOR = re.compile(
+    r"^\s*if\s*\(rc == WYRELOG_E_OK && commit\)\s*\{", re.M
+)
+HTTP_COMMIT_GATE = "#ifdef G_OS_WIN32"
+HTTP_COMMIT_REFUSAL = "rc=WYRELOG_E_POLICY;"
+BRIDGE_GATE = "#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE"
+GRAPH_ADMIT_GATE = "#ifdef G_OS_WIN32"
+TENANT_ADMIT_GATE = "#if defined(__APPLE__) || defined(G_OS_WIN32)"
+ADMIT_REFUSING_ARM = (
+    "(void)drain_timeout_us;(void)cancellable;returnWYRELOG_E_POLICY;"
+)
+JOURNAL_STORE_CALL = re.compile(
+    r"(?<![\w])wyl_fact_offline_restore_journal_store_\w+\s*\("
+)
+LINUX_CONDITIONAL = re.compile(
+    r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b[^\n]*\b__linux__\b", re.M
+)
+TRIGRAPHS = {
+    "??=": "#",
+    "??/": "\\",
+    "??'": "^",
+    "??(": "[",
+    "??)": "]",
+    "??!": "|",
+    "??<": "{",
+    "??>": "}",
+    "??-": "~",
+}
+
+
+def c_code_only(source: str) -> str:
+    """Blank C comments and literals while preserving newlines.
+
+    Copied from c_code_only in tests/test-posix-errno-capability-pair.py,
+    which is not importable by module name.  http.c holds JSON literals
+    with ``//`` and unbalanced braces, so its rules need a stripper that
+    knows literals; strip_comments above does not."""
+    # Translation phase 1 replaces trigraphs, then phase 2 removes each
+    # backslash-newline.
+    for trigraph, replacement in TRIGRAPHS.items():
+        source = source.replace(trigraph, replacement)
+    source = re.sub(r"\\(?:\r\n|\n|\r)", "", source)
+    source = source.replace("%:%:", "##")
+    output = list(source)
+    index = 0
+    state = "code"
+    while index < len(source):
+        current = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if state == "code":
+            if current == "/" and following == "*":
+                output[index] = output[index + 1] = " "
+                state = "block-comment"
+                index += 2
+                continue
+            if current == "/" and following == "/":
+                output[index] = output[index + 1] = " "
+                state = "line-comment"
+                index += 2
+                continue
+            if current == '"':
+                output[index] = " "
+                state = "string"
+            elif current == "'":
+                output[index] = " "
+                state = "character"
+        elif state == "block-comment":
+            if current == "*" and following == "/":
+                output[index] = output[index + 1] = " "
+                state = "code"
+                index += 2
+                continue
+            if current != "\n":
+                output[index] = " "
+        elif state == "line-comment":
+            if current == "\n":
+                state = "code"
+            else:
+                output[index] = " "
+        elif state in {"string", "character"}:
+            delimiter = '"' if state == "string" else "'"
+            if current == "\\":
+                output[index] = " "
+                if index + 1 < len(source):
+                    if source[index + 1] != "\n":
+                        output[index + 1] = " "
+                    index += 2
+                    continue
+            if current == delimiter:
+                output[index] = " "
+                state = "code"
+            elif current != "\n":
+                output[index] = " "
+        index += 1
+    return "".join(output)
+
+
+def flat(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def check_tenant_bind_all_rules(source: str) -> None:
+    body = function_body(source, TENANT_BIND_ALL_RUN)
+    split = gate_arms(body, TENANT_BIND_ALL_RUN, "E_TENANT_BIND_ALL_GATE")
+    if (split is None or split[0] != TENANT_BIND_ALL_GATE
+            or split[2] is None or not refuses(split[1])):
+        raise ContractError(
+            f"E_TENANT_BIND_ALL_GATE: the first conditional of"
+            f" {TENANT_BIND_ALL_RUN} must be {TENANT_BIND_ALL_GATE!r} with an"
+            " #else, its true arm exactly (void) drain_timeout_us; return"
+            " WYRELOG_E_POLICY;"
+        )
+    head = body[:re.search(r"^\s*#\s*if", body, re.M).start()]
+    store = STORE_CALL.search(head) or JOURNAL_STORE_CALL.search(head)
+    if store is not None:
+        raise ContractError(
+            f"E_TENANT_BIND_ALL_GATE: {TENANT_BIND_ALL_RUN} calls"
+            f" {store.group(0).rstrip('( ')} before its gate, but a tenant"
+            " bind must refuse off Linux before it reads anything"
+        )
+
+
+def check_http_source(source: str) -> None:
+    source = c_code_only(source)
+    anchors = list(HTTP_COMMIT_ANCHOR.finditer(source))
+    if len(anchors) != 1:
+        raise ContractError(
+            f"E_HTTP_COMMIT_ANCHOR: {HTTP_SOURCE} must hold exactly one"
+            " 'if (rc == WYRELOG_E_OK && commit) {', found"
+            f" {len(anchors)}"
+        )
+    rest = source[anchors[0].end():].lstrip("\n")
+    lines = [line for line in rest.splitlines() if line.strip()]
+    gate = lines[0].strip() if lines else ""
+    split = gate_arms(rest, "the commit handler", "E_HTTP_COMMIT_GATE")
+    if (gate != HTTP_COMMIT_GATE or split is None
+            or split[0] != HTTP_COMMIT_GATE or split[2] is None
+            or flat(split[1]) != HTTP_COMMIT_REFUSAL):
+        raise ContractError(
+            "E_HTTP_COMMIT_GATE: the commit handler must open with"
+            f" {HTTP_COMMIT_GATE!r}, whose true arm is exactly rc ="
+            " WYRELOG_E_POLICY; and which has an #else"
+        )
+    shared = split[2]
+    if LINUX_CONDITIONAL.search(shared):
+        raise ContractError(
+            "E_HTTP_COMMIT_GATE: the #else of the commit handler's gate holds"
+            " a __linux__ conditional, but it runs on Linux and macOS alike"
+        )
+    calls = (GRAPH_BIND_RUN, TENANT_BIND_ALL_RUN, GRAPH_ADMIT_RUN,
+             TENANT_ADMIT_RUN)
+    if any(count_calls(shared, call) != 1 for call in calls):
+        raise ContractError(
+            "E_HTTP_COMMIT_ORDER: the commit handler must call each of"
+            f" {', '.join(calls)} exactly once"
+        )
+    text = flat(shared)
+    bind = max(text.find(GRAPH_BIND_RUN + "("),
+               text.find(TENANT_BIND_ALL_RUN + "("))
+    admit = min(text.find(GRAPH_ADMIT_RUN + "("),
+                text.find(TENANT_ADMIT_RUN + "("))
+    guard = text.find("if(rc==WYRELOG_E_OK)", bind)
+    if not bind < guard < admit:
+        raise ContractError(
+            "E_HTTP_COMMIT_ORDER: the commit handler must bind before it"
+            " admits, and admit only under if (rc == WYRELOG_E_OK) after the"
+            " bind"
+        )
+    if re.search(r"\b__APPLE__\b", source):
+        raise ContractError(
+            f"E_HTTP_NO_APPLE: {HTTP_SOURCE} names __APPLE__, but the restore"
+            " handler has no macOS branch since #1303 U5-16"
+        )
+
+
+def admit_platform_gate(body: str, name: str, code: str) -> tuple[str, str]:
+    """The platform gate inside the secure-bridge ``#else`` of an admit
+    run: its ``#if`` line and its true arm.  The gate has no ``#else``."""
+    split = gate_arms(body, name, code)
+    if split is None or split[0] != BRIDGE_GATE or split[2] is None:
+        raise ContractError(
+            f"{code}: the first conditional of {name} must be"
+            f" {BRIDGE_GATE!r} with an #else"
+        )
+    inner = gate_arms(split[2], name, code)
+    if inner is None or inner[2] is not None:
+        raise ContractError(
+            f"{code}: the #else of {BRIDGE_GATE!r} in {name} must open with a"
+            " platform gate that has no #else"
+        )
+    return inner[0], inner[1]
+
+
+def check_prepare_source(source: str) -> None:
+    source = c_code_only(source)
+    body = function_body(source, GRAPH_ADMIT_RUN)
+    if (re.search(r"\b__APPLE__\b", body) or LINUX_CONDITIONAL.search(body)
+            or len(re.findall(r"^\s*#\s*ifdef\s+G_OS_WIN32\s*$", body,
+                              re.M)) != 1):
+        raise ContractError(
+            f"E_GRAPH_ADMIT_GATE: {GRAPH_ADMIT_RUN} must name neither"
+            " __APPLE__ nor a __linux__ conditional and hold exactly one"
+            " #ifdef G_OS_WIN32: graph admission runs on Linux and macOS"
+            " (#1303 U5-16)"
+        )
+    gate, arm = admit_platform_gate(body, GRAPH_ADMIT_RUN,
+                                    "E_GRAPH_ADMIT_GATE")
+    if gate != GRAPH_ADMIT_GATE or flat(arm) != ADMIT_REFUSING_ARM:
+        raise ContractError(
+            f"E_GRAPH_ADMIT_GATE: the platform gate of {GRAPH_ADMIT_RUN} must"
+            f" be {GRAPH_ADMIT_GATE!r} with the true arm exactly (void)"
+            " drain_timeout_us; (void) cancellable; return WYRELOG_E_POLICY;"
+        )
+    body = function_body(source, TENANT_ADMIT_RUN)
+    gate, arm = admit_platform_gate(body, TENANT_ADMIT_RUN,
+                                    "E_TENANT_ADMIT_GATE")
+    if gate != TENANT_ADMIT_GATE or flat(arm) != ADMIT_REFUSING_ARM:
+        raise ContractError(
+            f"E_TENANT_ADMIT_GATE: the platform gate of {TENANT_ADMIT_RUN}"
+            f" must stay {TENANT_ADMIT_GATE!r} with the true arm exactly"
+            " (void) drain_timeout_us; (void) cancellable; return"
+            " WYRELOG_E_POLICY; until tenant commit is ported (U6)"
+        )
+
+
 def read_source(root: Path, name: str) -> str:
     try:
         return (root / name).read_text(encoding="utf-8")
@@ -1676,8 +1959,12 @@ def read_source(root: Path, name: str) -> str:
 def check_tree(root: Path) -> None:
     authority = read_source(root, SOURCE)
     resume = read_source(root, RESUME_SOURCE)
+    http = read_source(root, HTTP_SOURCE)
+    prepare = read_source(root, PREPARE_SOURCE)
     check_source(authority)
     check_resume_source(resume)
+    check_http_source(http)
+    check_prepare_source(prepare)
 
 
 BIND_FIXTURE = """\
@@ -3283,6 +3570,167 @@ wyrelog_error_t wyl_fact_offline_restore_graph_selected_promote_resume_run(
 }
 """
 
+# The real http.c commit handler region after #1303 U5-16, inside a trimmed
+# handler whose receipt branch keeps a JSON literal with an unbalanced
+# brace.
+HTTP_COMMIT_FIXTURE = """\
+static void
+facts_route_handler (SoupServer *server, SoupServerMessage *msg)
+{
+    if (rc == WYRELOG_E_OK && exact_scope && terminal_matches_operation) {
+      g_autoptr (GString) response = g_string_new ("{\\"scope\\":");
+      g_string_append (response, ",\\"failure_code\\":null}");
+    }
+    if (rc == WYRELOG_E_OK && commit) {
+#ifdef G_OS_WIN32
+      /* A refused commit must leave the journal unchanged (403).  The
+       * library can bind a prepared macOS or Windows graph restore, but
+       * admission refuses until the commit steps are ported (#1303 U5,
+       * #1304), so refuse before binding rather than return 403 with a
+       * bound journal. */
+      rc = WYRELOG_E_POLICY;
+#else
+      wyl_fact_offline_restore_journal_clear (&journal);
+      rc = graph_scope
+          ? wyl_fact_offline_restore_graph_bind_provisioned_old_run
+            (write.store, ctx->fact_root, runtime, values[5], values[2],
+              expected_revision, 30 * G_USEC_PER_SEC, &journal)
+          : wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+            (write.store, ctx->fact_root, runtime, values[5],
+              expected_revision, 30 * G_USEC_PER_SEC, &journal);
+      if (rc == WYRELOG_E_OK) {
+        guint64 bound_revision = journal.revision;
+        wyl_fact_offline_restore_journal_clear (&journal);
+        rc = graph_scope
+            ? wyl_fact_offline_restore_graph_commit_admit_run (write.store,
+                ctx->fact_root, runtime, scheduler, bundle, values[5],
+                bound_revision, 30 * G_USEC_PER_SEC, write.cancellable,
+                &journal)
+            : wyl_fact_offline_restore_tenant_commit_admit_run (write.store,
+                ctx->fact_root, runtime, scheduler, bundle, values[5],
+                bound_revision, 30 * G_USEC_PER_SEC, write.cancellable,
+                &journal);
+      }
+#endif
+    }
+    if (rc == WYRELOG_E_OK && resume) {
+      rc = WYRELOG_E_OK;
+    }
+}
+"""
+
+# The real tenant and graph admit runs after #1303 U5-16, trimmed after
+# their gates.
+PREPARE_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_commit_admit_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, WylFactReplayScheduler *scheduler,
+    WylFactOfflineBackupBundle *bundle, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    GCancellable *cancellable,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\\0'
+      || runtime == NULL || scheduler == NULL || bundle == NULL
+      || operation_uuid == NULL || *operation_uuid == '\\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  if (cancellable != NULL && g_cancellable_is_cancelled (cancellable))
+    return WYRELOG_E_CANCELLED;
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#else
+#if defined(__APPLE__) || defined(G_OS_WIN32)
+  /* The commit steps after admission are Linux-only on macOS (#1303 U5)
+   * and stop at PUBLISHED_DURABLE on Windows (#1304).  Refuse here so a
+   * bound journal never reaches decision COMMIT, where abort would be
+   * barred and resume would have no step to finish.  The body below is
+   * intentionally unreachable on both until then. */
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#endif
+  wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate (bundle);
+  return rc;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_admit_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, WylFactReplayScheduler *scheduler,
+    WylFactOfflineBackupBundle *bundle, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    GCancellable *cancellable,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\\0'
+      || runtime == NULL || scheduler == NULL || bundle == NULL
+      || operation_uuid == NULL || *operation_uuid == '\\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  if (cancellable != NULL && g_cancellable_is_cancelled (cancellable))
+    return WYRELOG_E_CANCELLED;
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#else
+#ifdef G_OS_WIN32
+  /* The graph commit steps after admission stop at PUBLISHED_DURABLE on
+   * macOS (#1303 U5) and on Windows (#1304).  Refuse here so a
+   * bound journal never reaches decision COMMIT, where abort would be
+   * barred and resume would have no step to finish.  The body below is
+   * intentionally unreachable on both until then. */
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#endif
+  wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate (bundle);
+  return rc;
+#endif
+}
+"""
+
+# The real tenant bind-all run, trimmed after its gate.
+TENANT_BIND_ALL_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\\0'
+      || runtime == NULL || operation_uuid == NULL || expected_revision == 0
+      || expected_revision >= G_MAXINT64 || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  g_auto (WylFactOfflineRestoreJournal) current = { 0 };
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  g_autoptr (GBytes) canonical = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load (policy,
+          operation_uuid, &current);
+  return rc;
+#endif
+}
+"""
+
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -3325,6 +3773,7 @@ POSITIVE = {
         SELECT_RESUME_RUN_FIXTURE,
     "darwin_selected_namespace_prove": DARWIN_SELECTED_PROVE_FIXTURE,
     "restore_unseal_graph": RESTORE_UNSEAL_FIXTURE,
+    TENANT_BIND_ALL_RUN: TENANT_BIND_ALL_FIXTURE,
 }
 
 
@@ -4722,6 +5171,26 @@ MUTANTS = (
         "wyl_policy_store_transition_graph_authority (policy, tenant_id,"
         " graph_id, from, to, error, generation, reconciliation, &result)"),
      "E_RESTORE_UNSEAL_RECOVERY"),
+    ("tenant bind all: gate opened to macOS", TENANT_BIND_ALL_RUN, replace(
+        "#ifndef __linux__\n",
+        "#if !defined(__linux__) && !defined(__APPLE__)\n"),
+     "E_TENANT_BIND_ALL_GATE"),
+    ("tenant bind all: gate refusal returns OK", TENANT_BIND_ALL_RUN,
+     replace("  (void) drain_timeout_us;\n  return WYRELOG_E_POLICY;\n",
+             "  (void) drain_timeout_us;\n  return WYRELOG_E_OK;\n"),
+     "E_TENANT_BIND_ALL_GATE"),
+    ("tenant bind all: store load before the gate", TENANT_BIND_ALL_RUN,
+     replace("#ifndef __linux__\n",
+             "  WylPolicyOfflineRestoreRecord *early = NULL;\n"
+             "  (void) wyl_policy_store_offline_restore_load (policy,"
+             " operation_uuid,\n      &early);\n#ifndef __linux__\n"),
+     "E_TENANT_BIND_ALL_GATE"),
+    ("tenant bind all: journal load before the gate", TENANT_BIND_ALL_RUN,
+     replace("#ifndef __linux__\n",
+             "  WylFactOfflineRestoreJournal early = { 0 };\n"
+             "  (void) wyl_fact_offline_restore_journal_store_load (policy,"
+             " operation_uuid,\n      &early);\n#ifndef __linux__\n"),
+     "E_TENANT_BIND_ALL_GATE"),
 )
 
 
@@ -4933,6 +5402,143 @@ RESUME_MUTANTS = (
 )
 
 
+HTTP_COMMIT_ELSE_LINE = (
+    "      wyl_fact_offline_restore_journal_clear (&journal);\n"
+)
+HTTP_COMMIT_BIND = (
+    "      rc = graph_scope\n"
+    "          ? wyl_fact_offline_restore_graph_bind_provisioned_old_run\n"
+    "            (write.store, ctx->fact_root, runtime, values[5],"
+    " values[2],\n"
+    "              expected_revision, 30 * G_USEC_PER_SEC, &journal)\n"
+    "          :"
+    " wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run\n"
+    "            (write.store, ctx->fact_root, runtime, values[5],\n"
+    "              expected_revision, 30 * G_USEC_PER_SEC, &journal);\n"
+)
+HTTP_COMMIT_ADMIT = (
+    "        rc = graph_scope\n"
+    "            ? wyl_fact_offline_restore_graph_commit_admit_run"
+    " (write.store,\n"
+)
+
+
+def http_admit_first(text: str) -> str:
+    """The graph admission moved ahead of the bind."""
+    start = text.index("      if (rc == WYRELOG_E_OK) {\n")
+    end = text.index("      }\n#endif\n") + len("      }\n")
+    admit = text[start:end]
+    text = text[:start] + text[end:]
+    return text.replace(HTTP_COMMIT_BIND, admit + HTTP_COMMIT_BIND, 1)
+
+
+def http_else_added(lines: str):
+    return replace(HTTP_COMMIT_ELSE_LINE, HTTP_COMMIT_ELSE_LINE + lines, 1)
+
+
+HTTP_MUTANTS = (
+    ("http: gate back to macOS and Windows", replace(
+        "#ifdef G_OS_WIN32\n",
+        "#if defined(__APPLE__) || defined(G_OS_WIN32)\n"),
+     "E_HTTP_COMMIT_GATE"),
+    ("http: gate #ifndef __linux__", replace(
+        "#ifdef G_OS_WIN32\n", "#ifndef __linux__\n"),
+     "E_HTTP_COMMIT_GATE"),
+    ("http: Windows block removed", lambda text: re.sub(
+        r"#ifdef G_OS_WIN32\n.*?#else\n", "", text, flags=re.DOTALL
+    ).replace("#endif\n", ""), "E_HTTP_COMMIT_GATE"),
+    ("http: refusal becomes OK", replace(
+        "      rc = WYRELOG_E_POLICY;\n#else\n",
+        "      rc = WYRELOG_E_OK;\n#else\n"), "E_HTTP_COMMIT_GATE"),
+    ("http: #ifndef __linux__ in the shared arm", http_else_added(
+        "#ifndef __linux__\n      rc = WYRELOG_E_POLICY;\n#endif\n"),
+     "E_HTTP_COMMIT_GATE"),
+    ("http: #if !defined(__linux__) in the shared arm", http_else_added(
+        "#if !defined(__linux__)\n      rc = WYRELOG_E_POLICY;\n#endif\n"),
+     "E_HTTP_COMMIT_GATE"),
+    ("http: #ifdef __linux__ in the shared arm", http_else_added(
+        "#ifdef __linux__\n      (void) 0;\n#endif\n"),
+     "E_HTTP_COMMIT_GATE"),
+    ("http: graph admission before the bind", http_admit_first,
+     "E_HTTP_COMMIT_ORDER"),
+    ("http: tenant bind all dropped", replace(
+        "          :"
+        " wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run\n",
+        "          : wyl_fact_offline_restore_tenant_bind_other\n"),
+     "E_HTTP_COMMIT_ORDER"),
+    ("http: admission not under the bind's OK", replace(
+        "      if (rc == WYRELOG_E_OK) {\n        guint64 bound_revision",
+        "      {\n        guint64 bound_revision"), "E_HTTP_COMMIT_ORDER"),
+    ("http: an Apple block elsewhere", replace(
+        "    if (rc == WYRELOG_E_OK && resume) {\n",
+        "#ifdef __APPLE__\n    rc = WYRELOG_E_POLICY;\n#endif\n"
+        "    if (rc == WYRELOG_E_OK && resume) {\n"), "E_HTTP_NO_APPLE"),
+    ("http: a second commit anchor", replace(
+        "    if (rc == WYRELOG_E_OK && resume) {\n",
+        "    if (rc == WYRELOG_E_OK && commit) {\n    }\n"
+        "    if (rc == WYRELOG_E_OK && resume) {\n"), "E_HTTP_COMMIT_ANCHOR"),
+)
+
+PREPARE_GRAPH_GATE_LINES = (
+    "#ifdef G_OS_WIN32\n"
+    "  /* The graph commit steps after admission stop at PUBLISHED_DURABLE"
+    " on\n"
+)
+PREPARE_GRAPH_REVALIDATE = (
+    "  return WYRELOG_E_POLICY;\n#endif\n"
+    "  wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate"
+    " (bundle);\n  return rc;\n#endif\n}\n"
+)
+
+
+def prepare_graph_added(lines: str):
+    """lines added to the graph admit body after its platform gate."""
+    return lambda text: text[:text.rindex(PREPARE_GRAPH_REVALIDATE)] + (
+        "  return WYRELOG_E_POLICY;\n#endif\n" + lines
+        + "  wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate"
+        " (bundle);\n  return rc;\n#endif\n}\n")
+
+
+def prepare_graph_gate(new: str):
+    return replace(PREPARE_GRAPH_GATE_LINES,
+                   new + PREPARE_GRAPH_GATE_LINES[len("#ifdef G_OS_WIN32\n"):])
+
+
+PREPARE_MUTANTS = (
+    ("graph admit: gate back to macOS and Windows", prepare_graph_gate(
+        "#if defined(__APPLE__) || defined(G_OS_WIN32)\n"),
+     "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: gate #ifndef __linux__", prepare_graph_gate(
+        "#ifndef __linux__\n"), "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: gate deleted", lambda text: text[:text.index(
+        PREPARE_GRAPH_GATE_LINES)] + text[text.rindex(
+            PREPARE_GRAPH_REVALIDATE) + len("  return WYRELOG_E_POLICY;\n"
+                                            "#endif\n"):],
+     "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: refusal returns OK", lambda text: text[:text.rindex(
+        PREPARE_GRAPH_REVALIDATE)] + PREPARE_GRAPH_REVALIDATE.replace(
+            "  return WYRELOG_E_POLICY;\n", "  return WYRELOG_E_OK;\n", 1),
+     "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: #ifndef __linux__ in the body", prepare_graph_added(
+        "#ifndef __linux__\n  return WYRELOG_E_POLICY;\n#endif\n"),
+     "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: #if !defined(__linux__) in the body", prepare_graph_added(
+        "#if !defined(__linux__)\n  return WYRELOG_E_POLICY;\n#endif\n"),
+     "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: #ifdef __linux__ in the body", prepare_graph_added(
+        "#ifdef __linux__\n  (void) 0;\n#endif\n"), "E_GRAPH_ADMIT_GATE"),
+    ("graph admit: an Apple block in the body", prepare_graph_added(
+        "#ifdef __APPLE__\n  return WYRELOG_E_POLICY;\n#endif\n"),
+     "E_GRAPH_ADMIT_GATE"),
+    ("tenant admit: gate narrowed to Windows", replace(
+        "#if defined(__APPLE__) || defined(G_OS_WIN32)\n",
+        "#ifdef G_OS_WIN32\n", 1), "E_TENANT_ADMIT_GATE"),
+    ("tenant admit: refusal returns OK", lambda text: text.replace(
+        "  return WYRELOG_E_POLICY;\n#endif\n",
+        "  return WYRELOG_E_OK;\n#endif\n", 1), "E_TENANT_ADMIT_GATE"),
+)
+
+
 def expect_failure(label: str, expected: str, check, source: str) -> None:
     try:
         check(source)
@@ -5100,6 +5706,32 @@ def self_test() -> None:
                    check_resume_source, "".join(POSITIVE.values()))
     expect_failure("authority rules on the resume source", "E_NO_FUNCTION",
                    check_source, "".join(RESUME_POSITIVE.values()))
+    # The commit handler and the admit runs (#1303 U5-16), each from its
+    # own file.
+    check_http_source(HTTP_COMMIT_FIXTURE)
+    check_prepare_source(PREPARE_FIXTURE)
+    for label, transform, expected in HTTP_MUTANTS:
+        mutated = transform(HTTP_COMMIT_FIXTURE)
+        if mutated == HTTP_COMMIT_FIXTURE:
+            raise ContractError(f"self-test mutant did not apply: {label}")
+        expect_failure(label, expected, check_http_source, mutated)
+    for label, transform, expected in PREPARE_MUTANTS:
+        mutated = transform(PREPARE_FIXTURE)
+        if mutated == PREPARE_FIXTURE:
+            raise ContractError(f"self-test mutant did not apply: {label}")
+        expect_failure(label, expected, check_prepare_source, mutated)
+    # The literal-aware strip: a "//" literal, a literal naming __APPLE__
+    # and one with an unbalanced brace in the shared arm still pass.
+    literals = HTTP_COMMIT_FIXTURE.replace(
+        HTTP_COMMIT_ELSE_LINE, HTTP_COMMIT_ELSE_LINE
+        + '      g_debug ("otpauth://totp/{%s", "__APPLE__");\n', 1)
+    if literals == HTTP_COMMIT_FIXTURE:
+        raise ContractError("self-test literal did not apply: http")
+    check_http_source(literals)
+    expect_failure("http rules on the admit source", "E_HTTP_COMMIT_ANCHOR",
+                   check_http_source, PREPARE_FIXTURE)
+    expect_failure("admit rules on the http source", "E_NO_FUNCTION",
+                   check_prepare_source, HTTP_COMMIT_FIXTURE)
 
 
 def main(argv: list[str]) -> int:

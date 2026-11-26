@@ -1800,12 +1800,12 @@ test_restore_begin_authenticated (void)
     wyl_fact_offline_restore_journal_clear (&committed);
 #ifdef __APPLE__
     /* macOS (#1303): a tenant journal stops at prepared, because tenant bind
-     * and commit admission refuse with the journal byte-identical.  A graph
-     * journal binds to its provisioned main through the ADR 0006 evidence
-     * witness (U3) and then stops, because commit admission refuses with the
-     * bound journal byte-identical until the commit steps are ported (U5).
-     * In both scopes abort retires every stage and releases the claim,
-     * leaving both namespaces exactly as they were before begin. */
+     * and commit admission refuse with the journal byte-identical (U6), and
+     * abort retires both stages and releases the claim, leaving both
+     * namespaces exactly as they were before begin.  A graph journal binds
+     * to its provisioned main through the ADR 0006 evidence witness (U3),
+     * and commit admission decides COMMIT (U5-16), after which abort is
+     * barred and only resume moves it on. */
     {
       g_autoptr (GBytes) prepared_journal = NULL;
       g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
@@ -1943,40 +1943,46 @@ test_restore_begin_authenticated (void)
         g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
             &bound_journal), ==, WYRELOG_E_OK);
         wyl_fact_offline_restore_journal_clear (&committed);
-        /* Commit admission refuses the bound journal byte-identical: the
-         * commit steps are not ported, so the decision never becomes COMMIT
-         * and abort stays open. */
+        /* Commit admission (#1303 U5-16) replays the stage, reserves the
+         * replacement row and decides COMMIT one revision past the bind.
+         * From there abort is barred: rollback refuses with the decided
+         * journal byte-identical, and the stage stays for resume.  A bound
+         * journal that never reached COMMIT is aborted by
+         * macos/commit-admit-cancelled. */
         g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
               (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
             operation, prepared_revision + 1, 0, NULL, &committed), ==,
-            WYRELOG_E_POLICY);
-        g_assert_null (committed.operation_uuid);
+            WYRELOG_E_OK);
+        g_assert_cmpint (committed.decision, ==,
+            WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+        g_assert_cmpuint (committed.revision, ==, prepared_revision + 2);
+        g_autoptr (GBytes) decided_journal = NULL;
+        g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+            &decided_journal), ==, WYRELOG_E_OK);
+        wyl_fact_offline_restore_journal_clear (&committed);
         assert_restore_journal_unchanged (fixture.policy, operation,
-            bound_journal, prepared_revision + 1);
-        /* Rollback decides once, then begins and completes the retire of the
-         * one staged graph, from the bound revision. */
+            decided_journal, prepared_revision + 2);
+        WylPolicyGraphRestoreReplacementRecord *reserved = NULL;
+        g_assert_cmpint (wyl_fact_offline_restore_replacement_load
+              (fixture.policy, operation, &reserved), ==, WYRELOG_E_OK);
+        g_assert_cmpstr (reserved->phase, ==, "reserved");
+        g_assert_cmpuint (reserved->attempt, ==, 0);
+        g_assert_cmpuint (reserved->journal_revision, ==,
+            prepared_revision + 1);
+        wyl_policy_graph_restore_replacement_record_free (reserved);
         g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
               (fixture.policy, fixture.root, fixture.runtime, operation, 0,
-            &committed), ==, WYRELOG_E_OK);
-        g_assert_cmpuint (committed.revision, ==, prepared_revision + 4);
-        g_assert_cmpint (committed.decision, ==,
-            WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
-        g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
-            ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
-        g_assert_cmpuint (committed.graphs->len, ==, 1);
-        g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
-            g_ptr_array_index (committed.graphs, 0))->transition_state, ==,
-            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
-        const guint64 aborted_revision = committed.revision;
-        wyl_fact_offline_restore_journal_clear (&committed);
-        g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
-        g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
-              (fixture.policy, fixture.root, fixture.runtime, operation,
-            aborted_revision, 0), ==, WYRELOG_E_OK);
-        assert_restore_operation_aborted (fixture.policy, operation, 1);
+            &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            decided_journal, prepared_revision + 2);
+        g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
       }
-      assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
-          alpha_before);
+      /* A decided graph restore keeps its stage in the selected graph, so
+       * only the namespaces it does not own are checked unchanged. */
+      if (selected == NULL)
+        assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
+            alpha_before);
       assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
           zeta_before);
       if (schema_transition) {
@@ -4582,14 +4588,16 @@ test_restore_daemon_http_stateful_refusal (void)
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&response, g_free);
 
-  /* COMMIT is barred on macOS before the bind step, so the prepared journal
-   * and the namespaces stay untouched (#1303 U5 ports the commit steps). */
+  /* A graph COMMIT is admitted on macOS (#1303 U5-16) and covered by the
+   * daemon-macos-commit cases.  Sent at a stale revision it is refused
+   * before the bind step, so the prepared journal and the namespaces stay
+   * untouched and abort stays open. */
   body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
-          bundle_root, digest, operation, 3, TRUE);
+          bundle_root, digest, operation, 2, TRUE);
   g_assert_true (restore_http_post (session, base_url, token, "commit", body,
       &status, &response));
-  g_assert_cmpuint (status, ==, 403);
-  g_assert_nonnull (strstr (response, "restore_refused"));
+  g_assert_cmpuint (status, ==, 409);
+  g_assert_nonnull (strstr (response, "restore_conflict"));
   assert_restore_journal_unchanged (policy, operation, prepared_journal, 3);
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&response, g_free);
@@ -4623,10 +4631,10 @@ test_restore_daemon_http_stateful_refusal (void)
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&response, g_free);
 
-  /* A tenant restore follows the same macOS matrix (#1303): begin and
-   * prepare are admitted, prepare stages both graphs and records their
-   * preflight at revision 5, commit and resume refuse with the journal
-   * byte-identical, and abort retires both stages. */
+  /* A tenant restore on macOS (#1303): begin and prepare are admitted,
+   * prepare stages both graphs and records their preflight at revision 5,
+   * commit and resume refuse with the journal byte-identical (tenant commit
+   * is U6), and abort retires both stages. */
   const gchar *tenant_operation = "01890c10-2e3f-7000-8000-000000000032";
   body = restore_http_request_body (bundle_root, digest, tenant_operation, 0,
           TRUE);
@@ -16640,9 +16648,10 @@ darwin_rewrite_graph_evidence (BackupFixture *fixture, GBytes *evidence)
 
 /* Begin, the graph import from the bundle, a recorded preflight, the bind
  * through the evidence witness, the replacement reservation and the COMMIT
- * decision.  Commit admission refuses on macOS, so the decision goes through
- * the journal store directly, with a proof that holds.  Returns the decided
- * revision and its journal bytes. */
+ * decision.  The decision goes through the journal store directly, with a
+ * proof that holds, so each step's test controls the proof; the real
+ * admission is covered by the macos/commit-admit and daemon-macos-commit
+ * cases.  Returns the decided revision and its journal bytes. */
 static guint64
 darwin_graph_commit_decided (BackupFixture *fixture,
     DestinationCapture *capture, WylFactOfflineBackupBundle *bundle,
@@ -23726,6 +23735,948 @@ test_graph_commit_promote_resume_macos (gconstpointer data)
 #endif
 }
 
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+/* The replacement row of operation, which must be reserved, attempt 0, at
+ * bound_revision. */
+static void
+admit_assert_row_reserved (wyl_policy_store_t *policy,
+    const gchar *operation, guint64 bound_revision)
+{
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (policy,
+      operation, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (row->phase, ==, "reserved");
+  g_assert_cmpuint (row->attempt, ==, 0);
+  g_assert_cmpuint (row->journal_revision, ==, bound_revision);
+  wyl_policy_graph_restore_replacement_record_free (row);
+}
+
+static void
+admit_assert_row_absent (wyl_policy_store_t *policy, const gchar *operation)
+{
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (policy,
+      operation, &row), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (row);
+}
+
+/* One direct admission of zeta's bound journal. */
+static wyrelog_error_t
+admit_run (BackupFixture *fixture, WylFactReplayScheduler *scheduler,
+    WylFactOfflineBackupBundle *bundle, const gchar *operation,
+    guint64 revision, GCancellable *cancellable,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  return wyl_fact_offline_restore_graph_commit_admit_run (fixture->policy,
+             fixture->root, fixture->runtime, scheduler, bundle, operation,
+             revision, 0, cancellable, out_committed);
+}
+
+/* An admission that decided COMMIT one past bound and left the row
+ * reserved at bound. */
+static void
+admit_assert_decided (BackupFixture *fixture, const gchar *operation,
+    guint64 bound, const WylFactOfflineRestoreJournal *committed)
+{
+  g_assert_cmpstr (committed->operation_uuid, ==, operation);
+  g_assert_cmpint (committed->decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+  g_assert_cmpuint (committed->revision, ==, bound + 1);
+  g_assert_cmpuint (committed->version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+  g_autoptr (GBytes) decided = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (committed,
+      &decided), ==, WYRELOG_E_OK);
+  assert_restore_journal_unchanged (fixture->policy, operation, decided,
+      bound + 1);
+  admit_assert_row_reserved (fixture->policy, operation, bound);
+}
+#endif
+
+/* macOS (#1303 U5-16): graph commit admission, the Linux function opened in
+ * place, called directly on a bound zeta restore.  Setup is begin, the
+ * graph import, the real prepare (the preflight at 3) and the bind through
+ * the evidence witness (4).  Admission opens its validation session through
+ * the ACTIVE record's evidence, replays the stage inside the scheduler,
+ * reserves the replacement row in its own write and then decides COMMIT at
+ * 5 in one guarded write whose proof re-inventories the pair opened from
+ * evidence.
+ *
+ * Per mode: what is done | code | state afterwards.  Unless stated, a
+ * refusal leaves the bound journal at 4 byte-identical, no output and no
+ * replacement row.
+ *
+ *   admit-decided
+ *     admit at 4 | OK, COMMIT at 5 | row reserved at 4; rollback then
+ *     refuses with POLICY and the decided journal byte-identical
+ *   admit-lost-response
+ *     IO at the proof (the row reserved), then the guarded write's response
+ *     lost | IO, then OK at 5 from the store's read-back of the exact
+ *     record | a reopened store holds the same journal at 5
+ *   admit-main-substituted
+ *     a same-bytes object at zeta's main | POLICY | -
+ *   admit-runtime-open
+ *     zeta's runtime entry READY, its admission reopened after the bind
+ *     | OK, COMMIT at 5 | row reserved at 4; zeta READY, OPEN and
+ *     queryable afterwards (the proof's closed-admission check runs under
+ *     the session's quiescence token)
+ *   admit-stale
+ *     admit at 3 | BUSY | -
+ *   admit-cancelled
+ *     a cancelled cancellable | CANCELLED | -; then abort of the bound
+ *     journal: rollback retires the stage at 7, release leaves one aborted
+ *     receipt and both namespaces as before begin
+ *   admit-reserved-retry
+ *     IO at the proof, then admit again | IO, then OK at 5 | after the IO,
+ *     the row reserved at 4
+ *   admit-reserved-abort
+ *     IO at the proof (the row reserved), then abort | rollback OK at 7,
+ *     the stage retired; release IO, twice; admission POLICY | the journal
+ *     ROLLBACK at 7 byte-identical, the row reserved and no receipt: the
+ *     abort cannot finish (see the mode) */
+static void
+test_graph_commit_admit_macos (gconstpointer data)
+{
+#if !defined(__APPLE__) || !defined(WYL_TEST_HANDLE_SEAMS)
+  (void) data;
+  g_test_skip ("macOS graph restore commit admission");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0065";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-admit-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GHashTable) alpha_before =
+      capture_dry_run_graph_namespace (&fixture, "alpha");
+  g_autoptr (GHashTable) zeta_before =
+      capture_dry_run_graph_namespace (&fixture, "zeta");
+  if (g_str_equal (mode, "admit-runtime-open")) {
+    /* zeta's entry READY from before begin.  Begin closes its admission,
+     * so the mode reopens it after the bind. */
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (fixture.runtime,
+        &key, session_build_engine, NULL, NULL), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL,
+      &scheduler), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", operation, TRUE, 0,
+      &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 1);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  WylFactOfflineBackupGraphView view = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_graph_view (bundle, "zeta",
+      &view), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_import_run
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "zeta",
+      capture.manifest, operation, 1, 0,
+      wyl_fact_offline_backup_bundle_graph_input (), &view, &committed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 2);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+      fixture.root, fixture.runtime, scheduler, bundle, operation, 2, 0, NULL,
+      &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 3);
+  g_assert_true (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (committed.graphs, 0))->replay_preflighted);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "zeta", 3,
+      0, &committed), ==, WYRELOG_E_OK);
+  const guint64 bound = committed.revision;
+  g_assert_cmpuint (bound, ==, 4);
+  g_autoptr (GBytes) bound_journal = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+      &bound_journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          operation);
+  g_autofree gchar *stage = graph_file_path (&fixture, "zeta", stage_name);
+  g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+  gboolean proof_called = FALSE;
+
+  if (g_str_equal (mode, "admit-decided")) {
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_OK);
+    admit_assert_decided (&fixture, operation, bound, &committed);
+    g_autoptr (GBytes) decided = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &decided), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    /* After the decision abort is barred, at the library as at HTTP. */
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+        &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation, decided,
+        bound + 1);
+    g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+  } else if (g_str_equal (mode, "admit-lost-response")) {
+    /* As on Linux, the row is reserved by a first attempt that fails at
+     * the proof, so the one lost response is the guarded NONE-to-COMMIT
+     * write's.  The store reads the exact canonical record back and
+     * answers OK, so admission's own reload is not reached. */
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (graph_commit_admission_fail_before_cas, &proof_called);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_IO);
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_true (proof_called);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, bound);
+    admit_assert_row_reserved (fixture.policy, operation, bound);
+    wyl_policy_store_offline_restore_fail_once (fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+    g_assert_cmpuint (committed.revision, ==, bound + 1);
+    g_autoptr (GBytes) decided = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &decided), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    select_reopen_policy (&fixture);
+    assert_restore_journal_unchanged (fixture.policy, operation, decided,
+        bound + 1);
+    admit_assert_row_reserved (fixture.policy, operation, bound);
+  } else if (g_str_equal (mode, "admit-main-substituted")) {
+    g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+            "facts.duckdb");
+    darwin_replace_with_same_bytes (main_path);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, bound);
+    admit_assert_row_absent (fixture.policy, operation);
+  } else if (g_str_equal (mode, "admit-runtime-open")) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==,
+        WYRELOG_E_OK);
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (fixture.runtime, &key, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    wyl_fact_graph_runtime_status_clear (&status);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission
+          (fixture.runtime, &key), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (fixture.runtime, &key, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+    wyl_fact_graph_runtime_status_clear (&status);
+    /* The session's quiescence token closes admission while it is held,
+     * so the proof sees it closed and decides; releasing the token
+     * restores OPEN.  The open entry does not stop admission on any
+     * host. */
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_OK);
+    admit_assert_decided (&fixture, operation, bound, &committed);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (fixture.runtime, &key, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+    g_assert_true (status.queryable);
+    wyl_fact_graph_runtime_status_clear (&status);
+    wyl_fact_graph_key_clear (&key);
+  } else if (g_str_equal (mode, "admit-stale")) {
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation,
+        bound - 1, NULL, &committed), ==, WYRELOG_E_BUSY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, bound);
+    admit_assert_row_absent (fixture.policy, operation);
+  } else if (g_str_equal (mode, "admit-cancelled")) {
+    g_autoptr (GCancellable) cancelled = g_cancellable_new ();
+    g_cancellable_cancel (cancelled);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        cancelled, &committed), ==, WYRELOG_E_CANCELLED);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, bound);
+    admit_assert_row_absent (fixture.policy, operation);
+    /* A bound journal that never reached COMMIT stays abortable: rollback
+     * decides once, then begins and completes the retire of the one staged
+     * graph, from the bound revision. */
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+        &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, bound + 3);
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
+        ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+    g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (committed.graphs, 0))->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+    const guint64 aborted = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, aborted,
+        0), ==, WYRELOG_E_OK);
+    assert_restore_operation_aborted (fixture.policy, operation, 1);
+    assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
+        alpha_before);
+    assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
+        zeta_before);
+  } else if (g_str_equal (mode, "admit-reserved-retry")) {
+    /* A refusal after the reservation leaves the row reserved; the retry
+     * accepts it as an unchanged replay and decides COMMIT. */
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (graph_commit_admission_fail_before_cas, &proof_called);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_IO);
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_true (proof_called);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, bound);
+    admit_assert_row_reserved (fixture.policy, operation, bound);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_OK);
+    admit_assert_decided (&fixture, operation, bound, &committed);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  } else if (g_str_equal (mode, "admit-reserved-abort")) {
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (graph_commit_admission_fail_before_cas, &proof_called);
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+        NULL, &committed), ==, WYRELOG_E_IO);
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_true (proof_called);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, bound);
+    admit_assert_row_reserved (fixture.policy, operation, bound);
+    /* Rollback still decides and retires the stage, but the release
+     * cannot delete the journal while the reserved row remains (the store's
+     * journal delete guard), and only a committed receipt may delete that
+     * row.  The abort wedges at ROLLBACK, COMPLETE, with no receipt, and
+     * admission refuses the rolled-back journal.  This is the shared
+     * library's behaviour on every host; U5-16 makes it reachable on
+     * macOS. */
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+        &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, bound + 3);
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
+        ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+    const guint64 aborted = committed.revision;
+    g_autoptr (GBytes) rolled_back = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &rolled_back), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+    for (guint i = 0; i < 2; i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          aborted, 0), ==, WYRELOG_E_IO);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          rolled_back, aborted);
+      admit_assert_row_reserved (fixture.policy, operation, bound);
+      WylPolicyOfflineRestoreReceipt *receipt = NULL;
+      g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+            (fixture.policy, operation, &receipt), ==, WYRELOG_E_OK);
+      g_assert_null (receipt);
+    }
+    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation,
+        aborted, NULL, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation, rolled_back,
+        aborted);
+  } else {
+    g_assert_not_reached ();
+  }
+  g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#ifdef __APPLE__
+/* The macOS daemon commit fixture: the daemon-http session fixture served
+ * by a handle, its HTTP server on a thread, a skip-MFA login, and a bundle
+ * from which a graph restore of alpha is begun (1) and prepared (3) over
+ * HTTP. */
+typedef struct
+{
+  SessionFixture f;
+  WylHandle *handle;
+  WylDaemonRuntime daemon_runtime;
+  RestoreHttpServer http;
+  GThread *thread;
+  gchar *base_url;
+  WylClient *client;
+  gchar *token;
+  gchar *bundle_root;
+  gchar *digest;
+  SoupSession *session;
+  wyl_policy_store_t *policy;
+  WylFactGraphRuntimeManager *runtime;
+  GHashTable *zeta_before;
+  WylFactArtifactInventoryIdentity alpha_main_before;
+  gchar *stage;
+  GBytes *prepared_journal;
+} DaemonCommit;
+
+static const gchar daemon_commit_operation[] =
+    "01890c10-2e3f-7000-8000-000000000041";
+
+/* One restore request for alpha.  begin, prepare and commit carry the
+ * bundle; begin and commit are confirmed. */
+static gchar *
+daemon_commit_post (DaemonCommit *d, const gchar *operation,
+    guint64 revision, guint *out_status)
+{
+  gboolean with_bundle = g_str_equal (operation, "begin")
+      || g_str_equal (operation, "prepare")
+      || g_str_equal (operation, "commit");
+  gboolean confirmed = g_str_equal (operation, "begin")
+      || g_str_equal (operation, "commit");
+  g_autofree gchar *body = restore_http_request_body_for_scope ("graph",
+          "tenant-a", "alpha", with_bundle ? d->bundle_root : "",
+          with_bundle ? d->digest : "", daemon_commit_operation, revision,
+          confirmed);
+  gchar *response = NULL;
+  g_assert_true (restore_http_post (d->session, d->base_url, d->token,
+      operation, body, out_status, &response));
+  return response;
+}
+
+/* The request, answered with expected_status and a body holding needle. */
+static void
+daemon_commit_expect (DaemonCommit *d, const gchar *operation,
+    guint64 revision, guint expected_status, const gchar *needle)
+{
+  guint status = 0;
+  g_autofree gchar *response = daemon_commit_post (d, operation, revision,
+          &status);
+  if (status != expected_status || strstr (response, needle) == NULL)
+    g_test_message ("%s at %" G_GUINT64_FORMAT " returned HTTP %u: %s",
+        operation, revision, status, response);
+  g_assert_cmpuint (status, ==, expected_status);
+  g_assert_nonnull (strstr (response, needle));
+}
+
+/* The request, answered 200 in state at revision. */
+static void
+daemon_commit_expect_state (DaemonCommit *d, const gchar *operation,
+    guint64 revision, const gchar *state, guint64 expected_revision)
+{
+  guint status = 0;
+  g_autofree gchar *response = daemon_commit_post (d, operation, revision,
+          &status);
+  g_autofree gchar *needle = g_strdup_printf ("\"state\":\"%s\"", state);
+  if (status != 200 || strstr (response, needle) == NULL)
+    g_test_message ("%s at %" G_GUINT64_FORMAT " returned HTTP %u: %s",
+        operation, revision, status, response);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, needle));
+  g_assert_cmpuint (restore_http_revision (response), ==, expected_revision);
+}
+
+/* The request with its response read and discarded. */
+static void
+daemon_commit_drop (DaemonCommit *d, const gchar *operation,
+    guint64 revision)
+{
+  gboolean with_bundle = g_str_equal (operation, "commit");
+  g_autofree gchar *body = restore_http_request_body_for_scope ("graph",
+          "tenant-a", "alpha", with_bundle ? d->bundle_root : "",
+          with_bundle ? d->digest : "", daemon_commit_operation, revision,
+          with_bundle);
+  g_assert_true (restore_http_post_and_drop_response (d->base_url, d->token,
+      operation, body, NULL, NULL));
+}
+
+static GBytes *
+daemon_commit_journal_bytes (DaemonCommit *d, guint64 expected_revision)
+{
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (d->policy,
+      daemon_commit_operation, &journal), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, expected_revision);
+  GBytes *bytes = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &bytes), ==, WYRELOG_E_OK);
+  return bytes;
+}
+
+static void
+daemon_commit_init (DaemonCommit *d)
+{
+  session_fixture_init (&d->f, "daemon-http");
+  for (guint i = 0; i < G_N_ELEMENTS (d->f.snapshots); i++)
+    g_clear_pointer (&d->f.snapshots[i], wyl_fact_graph_snapshot_unref);
+  g_clear_pointer (&d->f.fixture.runtime,
+      wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&d->f.fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *policy_path = g_build_filename (d->f.fixture.root,
+          "policy.db", NULL);
+  WylHandleOpenOptions open_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy_path,
+    .fact_root = d->f.fixture.root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&open_options, &d->handle),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (grant_restore_http_authority (d->handle), ==,
+      WYRELOG_E_OK);
+  d->runtime = wyl_handle_fact_graph_runtime_ref (d->handle);
+  g_assert_nonnull (d->runtime);
+  const gchar *graph_ids[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graph_ids); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graph_ids[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (d->runtime, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  WylDaemonOptions daemon_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+    .fact_root = d->f.fixture.root,
+  };
+  d->daemon_runtime.handle = d->handle;
+  g_assert_cmpint (wyl_daemon_start_delta_callbacks (d->handle,
+      &d->daemon_runtime), ==, WYRELOG_E_OK);
+  d->http.loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GError) error = NULL;
+  d->http.server = wyl_daemon_start_http_server_with_runtime (&daemon_options,
+          d->handle, &d->daemon_runtime, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (d->http.server);
+  d->thread = g_thread_new ("restore-http-macos-commit",
+          restore_http_server_thread, &d->http);
+  GSList *uris = soup_server_get_uris (d->http.server);
+  g_assert_nonnull (uris);
+  d->base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  wyl_handle_set_login_skip_mfa_allowed (d->handle, TRUE);
+  g_assert_cmpint (wyl_client_new (d->base_url, &d->client), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_login_skip_mfa (d->client,
+      "restore-http-admin"), ==, WYRELOG_E_OK);
+  d->policy = wyl_handle_get_policy_store (d->handle);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (d->policy,
+      "restore-http-admin", "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (d->handle), ==,
+      WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (d->handle, FALSE);
+  d->token = wyl_client_dup_access_token (d->client);
+  g_assert_nonnull (d->token);
+
+  d->bundle_root = wyl_test_make_secure_fact_root
+        ("wyl-restore-daemon-commit-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (d->bundle_root);
+  gsize manifest_length = 0;
+  const guint8 *manifest_data = g_bytes_get_data (d->f.capture.manifest,
+          &manifest_length);
+  g_autofree gchar *manifest_path = g_build_filename (d->bundle_root,
+          "manifest", NULL);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) manifest_data, manifest_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  for (guint i = 0; i < d->f.capture.completed_graphs->len; i++) {
+    const gchar *graph_id = g_ptr_array_index (d->f.capture.completed_graphs,
+            i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (graph_id, &component),
+        ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (d->bundle_root, name, NULL);
+    GBytes *artifact = g_ptr_array_index (d->f.capture.artifact_bytes, i);
+    gsize artifact_length = 0;
+    const gchar *artifact_data = g_bytes_get_data (artifact,
+            &artifact_length);
+    g_assert_true (g_file_set_contents (path, artifact_data, artifact_length,
+        &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  d->digest = g_compute_checksum_for_data (G_CHECKSUM_SHA256, manifest_data,
+          manifest_length);
+  d->zeta_before = capture_dry_run_graph_namespace (&d->f.fixture, "zeta");
+  g_autofree gchar *alpha_main = graph_file_path (&d->f.fixture, "alpha",
+          "facts.duckdb");
+  d->alpha_main_before = darwin_file_identity (alpha_main);
+  d->session = soup_session_new ();
+
+  daemon_commit_expect_state (d, "begin", 0, "preparing", 1);
+  daemon_commit_expect_state (d, "prepare", 1, "prepared", 3);
+  d->prepared_journal = daemon_commit_journal_bytes (d, 3);
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          daemon_commit_operation);
+  d->stage = graph_file_path (&d->f.fixture, "alpha", stage_name);
+  g_assert_true (g_file_test (d->stage, G_FILE_TEST_EXISTS));
+}
+
+static void
+daemon_commit_clear (DaemonCommit *d)
+{
+  g_main_loop_quit (d->http.loop);
+  g_thread_join (d->thread);
+  soup_server_disconnect (d->http.server);
+  g_clear_object (&d->http.server);
+  g_clear_pointer (&d->http.loop, g_main_loop_unref);
+  g_clear_object (&d->session);
+  g_clear_object (&d->client);
+  g_clear_pointer (&d->runtime, wyl_fact_graph_runtime_manager_unref);
+  d->policy = NULL;
+  g_clear_object (&d->handle);
+  remove_tree (d->bundle_root);
+  g_clear_pointer (&d->bundle_root, g_free);
+  g_clear_pointer (&d->base_url, g_free);
+  g_clear_pointer (&d->token, g_free);
+  g_clear_pointer (&d->digest, g_free);
+  g_clear_pointer (&d->stage, g_free);
+  g_clear_pointer (&d->zeta_before, g_hash_table_unref);
+  g_clear_pointer (&d->prepared_journal, g_bytes_unref);
+  session_fixture_clear (&d->f);
+}
+
+/* alpha's runtime entry in the daemon's handle. */
+static void
+daemon_commit_runtime_status (DaemonCommit *d,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "alpha"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (d->runtime,
+      &key, out_status), ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&key);
+}
+
+/* Holds alpha's quiescence in the daemon's runtime as another owner
+ * would. */
+static WylFactGraphQuiescenceToken *
+daemon_commit_hold_quiescence (DaemonCommit *d)
+{
+  WylFactGraphKey key = { 0 };
+  WylFactGraphQuiescenceToken *token = NULL;
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "alpha"), ==,
+      WYRELOG_E_OK);
+  wyrelog_error_t rc = wyl_fact_graph_runtime_manager_quiesce (d->runtime,
+          &key, 0, &token);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed (d->runtime,
+            &key, 0, &token);
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&key);
+  return token;
+}
+
+/* The operation's rows after its commit: none left but the committed
+ * receipt and one history row. */
+static void
+daemon_commit_assert_rows (DaemonCommit *d)
+{
+  sqlite3_stmt *rows = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (d->policy),
+      "SELECT (SELECT count(*) FROM fact_offline_restore_journals"
+      " WHERE operation_uuid=?1),"
+      "(SELECT count(*) FROM fact_offline_restore_graph_claims"
+      " WHERE operation_uuid=?1),"
+      "(SELECT count(*) FROM fact_graph_restore_replacements"
+      " WHERE restore_operation_uuid=?1),"
+      "(SELECT count(*) FROM fact_offline_restore_receipts"
+      " WHERE operation_uuid=?1 AND terminal_state='committed'),"
+      "(SELECT count(*) FROM fact_offline_restore_terminal_history"
+      " WHERE operation_uuid=?1);", -1, &rows, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (rows, 1, daemon_commit_operation, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (rows), ==, SQLITE_ROW);
+  for (gint i = 0; i < 3; i++)
+    g_assert_cmpint (sqlite3_column_int (rows, i), ==, 0);
+  g_assert_cmpint (sqlite3_column_int (rows, 3), ==, 1);
+  g_assert_cmpint (sqlite3_column_int (rows, 4), ==, 1);
+  g_assert_cmpint (sqlite3_finalize (rows), ==, SQLITE_OK);
+}
+
+/* The replacement UUID of the decided restore, from its reserved row. */
+static gchar *
+daemon_commit_replacement_uuid (DaemonCommit *d)
+{
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (d->policy,
+      daemon_commit_operation, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (row->phase, ==, "reserved");
+  g_assert_cmpuint (row->attempt, ==, 0);
+  g_assert_cmpuint (row->journal_revision, ==, 4);
+  gchar *uuid = g_strdup (row->replacement_uuid);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  return uuid;
+}
+
+/* A commit at 3 answered committing at 5: bind (4), then the decision. */
+static gchar *
+daemon_commit_decide (DaemonCommit *d)
+{
+  daemon_commit_expect_state (d, "commit", 3, "committing", 5);
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (d->policy,
+      daemon_commit_operation, &journal), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, 5);
+  g_assert_cmpint (journal.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+  g_assert_false (journal.lifecycle_handoff_complete);
+  return daemon_commit_replacement_uuid (d);
+}
+
+/* The committed restore: the receipt at 22 and nothing else left, alpha's
+ * only provisioning record ACTIVE as the replacement with its evidence, a
+ * new main at alpha's main name, alpha READY and queryable, and zeta as it
+ * was before begin.  22 is the decision (5), the v2 steps to
+ * PUBLISHED_DURABLE (+12), selection (+1), FINALIZE (+2) and promotion
+ * (+2). */
+static void
+daemon_commit_assert_completed (DaemonCommit *d, const gchar *replacement)
+{
+  daemon_commit_expect_state (d, "status", 0, "committed", 22);
+  daemon_commit_assert_rows (d);
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+        (d->policy, daemon_commit_operation, &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (receipt->terminal_state, ==, "committed");
+  g_assert_cmpuint (receipt->final_revision, ==, 22);
+  g_assert_cmpstr (receipt->selected_graph_id, ==, "alpha");
+  g_assert_cmpuint (receipt->graph_count, ==, 1);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (d->policy, "tenant-a", "alpha", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  const WylPolicyGraphProvisioningRecord *record =
+      g_ptr_array_index (records, 0);
+  g_assert_cmpstr (record->op_uuid, ==, replacement);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  g_assert_nonnull (record->darwin_operation_evidence);
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (record->darwin_operation_evidence,
+          &length);
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      replacement, &evidence), ==, WYRELOG_E_OK);
+  g_autofree gchar *alpha_main = graph_file_path (&d->f.fixture, "alpha",
+          "facts.duckdb");
+  const WylFactArtifactInventoryIdentity at_main =
+      darwin_file_identity (alpha_main);
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal
+        (&d->alpha_main_before, &at_main));
+  g_assert_false (g_file_test (d->stage, G_FILE_TEST_EXISTS));
+  WylFactGraphRuntimeStatus status = { 0 };
+  daemon_commit_runtime_status (d, &status);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  assert_dry_run_graph_namespace_unchanged (&d->f.fixture, "zeta",
+      d->zeta_before);
+}
+#endif
+
+#ifndef G_OS_WIN32
+/* macOS (#1303 U5-16): a graph restore of alpha committed through the
+ * daemon's HTTP routes, prepared at 3 by the fixture.  commit binds (4) and
+ * admits (COMMIT at 5, "committing"); resume drives the v2 steps, the
+ * companion step and selection, FINALIZE and promotion to the committed
+ * receipt at 22; after the receipt, status and resume answer from it and
+ * commit and abort find nothing.
+ *
+ * Per mode: the requests | the answers.  Unless stated, each run ends with
+ * the restore committed at 22 (daemon_commit_assert_completed).
+ *
+ *   fresh
+ *     commit at 3; resume at 5 | 200 committing at 5; 200 committed at 22
+ *   retry-receipt
+ *     fresh, then resume at 5 and at 22, status, commit at 5, abort at 22
+ *     | 200 committed at 22 from the receipt, its rows and alpha's engine
+ *     generation unchanged; then 404 restore_not_found twice
+ *   lost-response
+ *     commit at 3 with the response dropped; status; commit at 3; resume at
+ *     5 dropped; status; resume at 5 | committing at 5; 409
+ *     restore_conflict; committed at 22; 200 committed at 22
+ *   interrupted-before-promote
+ *     commit at 3; resume at 5 with IO before promotion's transaction;
+ *     status; resume at 5; resume at 20 | 500 restore_operation_failed with
+ *     the journal FINALIZED at 20 and alpha DEGRADED and closed;
+ *     committing at 20; 409 restore_conflict; 200 committed at 22 through
+ *     the selected branch
+ *   busy-conflict
+ *     commit at 2; commit at 3 with alpha quiesced elsewhere; commit at 3;
+ *     resume at 5 quiesced; resume at 5 | 409 restore_conflict and 409
+ *     restore_in_progress, each with the journal byte-identical and no
+ *     row; 200 committing at 5; 409 restore_in_progress at 5; 200 committed
+ *     at 22
+ *   abort-barred
+ *     commit at 3; abort at 5; resume at 5; abort at 22 | 200; 403
+ *     restore_refused with the journal byte-identical and the stage kept;
+ *     200 committed at 22; 404 restore_not_found
+ *   admit-refused-retry
+ *     commit at 3 with IO at admission's proof; status; commit at 3; commit
+ *     at 4 | 500 restore_operation_failed with the journal bound at 4 and
+ *     the row reserved; prepared at 4; 409 restore_conflict; 200 committing
+ *     at 5, the bind replayed and the reservation accepted; then resume */
+static void
+test_restore_daemon_http_graph_commit_macos (gconstpointer data)
+{
+#ifndef __APPLE__
+  (void) data;
+  g_test_skip ("macOS daemon graph restore commit");
+#else
+  const gchar *mode = data;
+  DaemonCommit d = { 0 };
+  daemon_commit_init (&d);
+  g_autofree gchar *replacement = NULL;
+
+  if (g_str_equal (mode, "fresh") || g_str_equal (mode, "retry-receipt")) {
+    replacement = daemon_commit_decide (&d);
+    daemon_commit_expect_state (&d, "resume", 5, "committed", 22);
+    if (g_str_equal (mode, "retry-receipt")) {
+      daemon_commit_assert_completed (&d, replacement);
+      WylFactGraphRuntimeStatus before = { 0 };
+      daemon_commit_runtime_status (&d, &before);
+      daemon_commit_expect_state (&d, "resume", 5, "committed", 22);
+      daemon_commit_expect_state (&d, "resume", 22, "committed", 22);
+      daemon_commit_expect_state (&d, "status", 0, "committed", 22);
+      daemon_commit_assert_rows (&d);
+      WylFactGraphRuntimeStatus after = { 0 };
+      daemon_commit_runtime_status (&d, &after);
+      g_assert_cmpuint (after.engine_generation, ==,
+          before.engine_generation);
+      wyl_fact_graph_runtime_status_clear (&before);
+      wyl_fact_graph_runtime_status_clear (&after);
+      daemon_commit_expect (&d, "commit", 5, 404, "restore_not_found");
+      daemon_commit_expect (&d, "abort", 22, 404, "restore_not_found");
+    }
+  } else if (g_str_equal (mode, "lost-response")) {
+    daemon_commit_drop (&d, "commit", 3);
+    daemon_commit_expect_state (&d, "status", 0, "committing", 5);
+    replacement = daemon_commit_replacement_uuid (&d);
+    daemon_commit_expect (&d, "commit", 3, 409, "restore_conflict");
+    daemon_commit_drop (&d, "resume", 5);
+    daemon_commit_expect_state (&d, "status", 0, "committed", 22);
+    daemon_commit_expect_state (&d, "resume", 5, "committed", 22);
+  } else if (g_str_equal (mode, "interrupted-before-promote")) {
+    replacement = daemon_commit_decide (&d);
+    FinalizeProbe probe = {
+      .act_at = PROMOTE_BEFORE_TRANSACTION, .action = FINALIZE_PROBE_FAIL,
+      .seen = g_ptr_array_new_with_free_func (g_free),
+    };
+    wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+      (finalize_probe_checkpoint, &probe);
+    daemon_commit_expect (&d, "resume", 5, 500, "restore_operation_failed");
+    wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_cmpuint (probe.hits, ==, 1);
+    g_ptr_array_unref (probe.seen);
+    g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (d.policy,
+        daemon_commit_operation, &finalized), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (finalized.revision, ==, 20);
+    g_assert_cmpuint (finalized.version, ==,
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
+    g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (finalized.graphs, 0))->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+    WylFactGraphRuntimeStatus status = { 0 };
+    daemon_commit_runtime_status (&d, &status);
+    /* The daemon's runtime already held alpha's entry before the restore,
+     * unlike the direct promote cases' empty runtime: it is left DEGRADED
+     * and closed until promotion unseals the graph. */
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_DEGRADED);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (status.queryable);
+    wyl_fact_graph_runtime_status_clear (&status);
+    daemon_commit_expect_state (&d, "status", 0, "committing", 20);
+    daemon_commit_expect (&d, "resume", 5, 409, "restore_conflict");
+    daemon_commit_expect_state (&d, "resume", 20, "committed", 22);
+  } else if (g_str_equal (mode, "busy-conflict")) {
+    daemon_commit_expect (&d, "commit", 2, 409, "restore_conflict");
+    assert_restore_journal_unchanged (d.policy, daemon_commit_operation,
+        d.prepared_journal, 3);
+    WylFactGraphQuiescenceToken *token = daemon_commit_hold_quiescence (&d);
+    daemon_commit_expect (&d, "commit", 3, 409, "restore_in_progress");
+    wyl_fact_graph_quiescence_token_release (token);
+    assert_restore_journal_unchanged (d.policy, daemon_commit_operation,
+        d.prepared_journal, 3);
+    admit_assert_row_absent (d.policy, daemon_commit_operation);
+    replacement = daemon_commit_decide (&d);
+    g_autoptr (GBytes) decided = daemon_commit_journal_bytes (&d, 5);
+    token = daemon_commit_hold_quiescence (&d);
+    daemon_commit_expect (&d, "resume", 5, 409, "restore_in_progress");
+    wyl_fact_graph_quiescence_token_release (token);
+    assert_restore_journal_unchanged (d.policy, daemon_commit_operation,
+        decided, 5);
+    daemon_commit_expect_state (&d, "resume", 5, "committed", 22);
+  } else if (g_str_equal (mode, "abort-barred")) {
+    replacement = daemon_commit_decide (&d);
+    g_autoptr (GBytes) decided = daemon_commit_journal_bytes (&d, 5);
+    daemon_commit_expect (&d, "abort", 5, 403, "restore_refused");
+    assert_restore_journal_unchanged (d.policy, daemon_commit_operation,
+        decided, 5);
+    g_assert_true (g_file_test (d.stage, G_FILE_TEST_EXISTS));
+    daemon_commit_expect_state (&d, "resume", 5, "committed", 22);
+    daemon_commit_expect (&d, "abort", 22, 404, "restore_not_found");
+  } else if (g_str_equal (mode, "admit-refused-retry")) {
+    gboolean proof_called = FALSE;
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (graph_commit_admission_fail_before_cas, &proof_called);
+    daemon_commit_expect (&d, "commit", 3, 500, "restore_operation_failed");
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_true (proof_called);
+    g_auto (WylFactOfflineRestoreJournal) bound = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (d.policy,
+        daemon_commit_operation, &bound), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (bound.revision, ==, 4);
+    g_assert_cmpuint (bound.version, ==,
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+    g_assert_cmpint (bound.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+    admit_assert_row_reserved (d.policy, daemon_commit_operation, 4);
+    daemon_commit_expect_state (&d, "status", 0, "prepared", 4);
+    daemon_commit_expect (&d, "commit", 3, 409, "restore_conflict");
+    daemon_commit_expect_state (&d, "commit", 4, "committing", 5);
+    replacement = daemon_commit_replacement_uuid (&d);
+    daemon_commit_expect_state (&d, "resume", 5, "committed", 22);
+  } else {
+    g_assert_not_reached ();
+  }
+  daemon_commit_assert_completed (&d, replacement);
+  daemon_commit_clear (&d);
+#endif
+}
+#endif
+
 /* After the stage sync, RETAIN moves the evidenced old main to the
  * operation's rollback name and leaves the main name empty, journaled
  * RETAINED with SYNC_ROLLBACK_FILE next.  A run that renamed and then
@@ -25365,6 +26316,30 @@ main (int argc, char **argv)
       "promote-resume-substituted-main",
       test_graph_commit_promote_resume_macos);
   g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-cancelled",
+      "admit-cancelled", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-decided",
+      "admit-decided", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-lost-response",
+      "admit-lost-response", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-main-substituted",
+      "admit-main-substituted", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-reserved-abort",
+      "admit-reserved-abort", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-reserved-retry",
+      "admit-reserved-retry", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-runtime-open",
+      "admit-runtime-open", test_graph_commit_admit_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-admit-stale",
+      "admit-stale", test_graph_commit_admit_macos);
+  g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-published",
       "published", test_graph_commit_published_macos);
   g_test_add_data_func
@@ -25448,6 +26423,24 @@ main (int argc, char **argv)
       test_restore_daemon_http_stateful_refusal);
   g_test_add_func ("/fact-offline-backup-source/restore-daemon-http-lifecycle",
       test_restore_daemon_http_lifecycle);
+  /* Its own meson test, as the main run has no time left
+   * (tests/meson.build). */
+  const gchar *daemon_macos_commit_modes[] = {
+    "abort-barred",
+    "admit-refused-retry",
+    "busy-conflict",
+    "fresh",
+    "interrupted-before-promote",
+    "lost-response",
+    "retry-receipt",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (daemon_macos_commit_modes); i++) {
+    g_autofree gchar *path = g_strconcat
+          ("/fact-offline-backup-source/daemon-macos-commit/",
+            daemon_macos_commit_modes[i], NULL);
+    g_test_add_data_func (path, daemon_macos_commit_modes[i],
+        test_restore_daemon_http_graph_commit_macos);
+  }
   g_test_add_func
     ("/fact-offline-backup-source/restore-daemon-http-graph-lifecycle",
       test_restore_daemon_http_graph_lifecycle);

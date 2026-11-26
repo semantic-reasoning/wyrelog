@@ -379,11 +379,68 @@ dispatcher drives the companion step and selection and replays a selected
 restore; the `FINALIZE` resume dispatcher finalizes a selected restore and
 proves it terminal; the promote resume dispatcher promotes a finalized
 restore and answers its replay from the receipt; `RETIRE_STAGE` still
-refuses. None of it is reachable while macOS commit admission refuses; these
-steps are proved by tests that reach the decision directly, and the
-companion step, selection, the select resume dispatcher, `FINALIZE`, the
-`FINALIZE` resume dispatcher, the terminal proof, promotion, the published
-proof and the promote resume dispatcher by tests that call them directly.
+refuses. Since #1303 U5-16 the daemon's commit handler binds and admits a
+macOS graph restore (see "Commit admission (macOS)") and its resume handler
+drives these steps to the committed receipt. The per-step tests still reach
+the decision directly, and the companion step, selection, the select resume
+dispatcher, `FINALIZE`, the `FINALIZE` resume dispatcher, the terminal proof,
+promotion, the published proof and the promote resume dispatcher are proved
+by tests that call them directly; `daemon-macos-commit/*` and
+`macos/commit-admit-*` in `tests/test-fact-offline-backup-source.c` cover
+the operator path.
+
+## Commit admission (macOS)
+
+macOS graph commit admission
+(`wyl_fact_offline_restore_graph_commit_admit_run`, #1303 U5-16) is the
+Linux function opened in place: only its Windows gate remains, and the
+daemon's commit handler (`wyrelog/daemon/http.c`) no longer refuses before
+the bind. `commit` binds the prepared journal through the restore witness
+(see "Restore witness"), then admits it. Admission's validation session
+opens the pair through the `ACTIVE` record's evidence
+(`offline-restore-validation-session-private.c`), so the device and inode
+compare of its inventory is anchored to a descriptor the evidence proved,
+not accepted by identity alone. It replays the stage inside the scheduler.
+It then reserves the replacement row in its own write, and decides `COMMIT`
+in one guarded write whose proof re-inventories the pair opened from
+evidence. A refusal after the reservation leaves the row `reserved`, and a
+retried admission accepts that row as `UNCHANGED_REPLAY`. A lost response
+of the guarded write is accepted only as the exact canonical successor.
+After the decision abort is barred (403, at the handler and at
+`wyl_fact_offline_restore_rollback_recover_run` alike), and resume is the
+only forward action; the daemon then answers `committing` at the bound
+revision plus one, and resume answers `committed` at the selected revision
+plus four.
+
+The proof's closed-admission check runs while the session holds the
+graph's quiescence token, which closes admission for as long as it is held,
+so a runtime entry that was `OPEN` before admission does not stop it: the
+proof decides, and releasing the token restores `OPEN`
+(`macos/commit-admit-runtime-open`). The same holds on Linux, where the
+code is shared. An abort after a reservation that never reached `COMMIT`
+cannot finish on any host: rollback decides and retires the stage, but the
+release cannot delete the journal while the `reserved` row remains (the
+store's journal delete guard), and only a committed receipt may delete that
+row, so the journal stays `ROLLBACK`, complete, with no receipt, and
+admission refuses it (`macos/commit-admit-reserved-abort`). That is the
+shared library's behaviour, which U5-16 makes reachable on macOS; it is not
+changed here, and no Linux test pins it.
+
+Tenant-scope commit stays refused on macOS. The daemon now reaches
+`wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run`, which
+refuses on every host but Linux before it reads the journal, so a tenant
+commit still answers 403 with the journal byte-identical, and tenant
+admission refuses on macOS and Windows as well. Tenant resume refuses on
+macOS. `tests/test-darwin-restore-bind-wiring.py` pins both gates
+(E_TENANT_BIND_ALL_GATE, E_TENANT_ADMIT_GATE), and lifting either is #1303
+U6. Windows still refuses commit, at the handler and at admission (#1304).
+The `G_OS_WIN32` blocks in `wyrelog/daemon/http.c` and
+`wyrelog/fact/offline-restore-prepare-private.c` keep comments that still
+name macOS, because the Windows view of both files stays byte-identical;
+#1304 rewrites them. The guard pins the handler's gate, its bind-before-admit
+order and the absence of any `__APPLE__` in `http.c`, and graph admission's
+gate (E_HTTP_COMMIT_GATE, E_HTTP_COMMIT_ORDER, E_HTTP_NO_APPLE,
+E_GRAPH_ADMIT_GATE).
 
 ## Restore replacement evidence
 
@@ -578,19 +635,19 @@ of the journal or the row between the reads
 (`check_finalized_persisted`) gives `BUSY`. A remount or reboot after
 `FINALIZE` changes the device number the `TERMINAL` inventory compares, so
 the proof then refuses as an operator wedge (`POLICY`). For a `HANDOFF` graph
-journal with a `COMMIT` decision that direct calls produced, the daemon's
-resume handler on macOS takes the restore through the remaining commit steps,
-the companion step and selection, deleting the old `ACTIVE` record, through
-the `FINALIZE` resume dispatcher to `FINALIZED`, unlinking the rollback name,
-and through the promote resume dispatcher (#1303 U5-15c) to the committed
-receipt at the selected revision plus four, with the graph and the tenant
-active and unsealed in policy and the graph's runtime open and queryable. The
-handler then answers 200 with state `committed` at that revision.
-`publication_eligible` is `false`: the handler takes it from the journal it
-loaded before the resume, so the answer is the same as on Linux and the same
-as the receipt answer. Any step's `BUSY` or `IO` can return first, and the
-handler reports `BUSY` as a conflict when the revision moved. The handler's
-`SELECTED` branch (`wyrelog/daemon/http.c`, for a stored
+journal with a `COMMIT` decision, from commit admission or a direct call,
+the daemon's resume handler on macOS takes the restore through the
+remaining commit steps, the companion step and selection, deleting the old
+`ACTIVE` record, through the `FINALIZE` resume dispatcher to `FINALIZED`,
+unlinking the rollback name, and through the promote resume dispatcher (#1303
+U5-15c) to the committed receipt at the selected revision plus four, with the
+graph and the tenant active and unsealed in policy and the graph's runtime
+open and queryable. The handler then answers 200 with state `committed` at
+that revision. `publication_eligible` is `false`: the handler takes it from
+the journal it loaded before the resume, so the answer is the same as on
+Linux and the same as the receipt answer. Any step's `BUSY` or `IO` can
+return first, and the handler reports `BUSY` as a conflict when the revision
+moved. The handler's `SELECTED` branch (`wyrelog/daemon/http.c`, for a stored
 `selected_pending_cleanup` journal) finalizes a selected journal that is not
 yet `FINALIZED` the same way, or runs the terminal proof on a `FINALIZED`
 one, and then promotes through the same dispatcher. Once promotion has
@@ -602,10 +659,10 @@ the handler answers 403 (`POLICY`) with the receipt committed and the runtime
 closed, and a retry answers 200 from the receipt. The runtime stays closed
 until a restart, and boot then opens the graph through the `ACTIVE` evidence
 or refuses it. No test seam reaches that tail failure through the handler, so
-this is accepted on reasoning. None of this is reachable while macOS commit
-admission refuses (`wyrelog/daemon/http.c`, until #1303 U5-16): the daemon's
-resume handler reaches these steps only for a journal that direct calls
-produced.
+this is accepted on reasoning. Since #1303 U5-16 commit admission produces
+that journal through the daemon, and `daemon-macos-commit/*` drives the
+whole path over HTTP, including a resume stopped after `FINALIZE` and
+finished through the `SELECTED` branch.
 
 The macOS `FINALIZE` resume dispatcher
 (`wyl_fact_offline_restore_graph_selected_finalize_resume_run`, #1303 U5-14)
@@ -662,19 +719,40 @@ while a restore holds the policy write
 (`wyrelog/auth/service-auth-coordination.c`), so the stall adds nothing for
 them. It additionally blocks the store calls that take only the store
 connection mutex, outside policy-write coordination, for a full SHA-256 of
-the main, which grows with the main's size. That is accepted here; the stall
-has not been measured, and measuring it is a follow-up. The store then
-promotes the schema, publishes the journal, activates the graph, moves the
-`restore_selected` record to `ACTIVE` with its evidence and the row to
-`verified`, takes the tenant through `unsealing` to `active`, and
-terminalizes: history, receipt and terminal guard, then the replacement row,
-the claim and the journal are deleted. Promotion changes no file. The graph
-is unsealed afterwards through the `ACTIVE` evidence; the existing macOS
-unseal coverage is in `tests/test-fact-graph-seal.c`. Every locator refusal
-is a policy refusal. If the commit is durable and its response is lost, the
-call returns `IO` and the store goes terminal, so the same call cannot read
-the receipt and does not unseal. After a reopen the policy shows the
-promotion committed (the receipt at the selected revision plus four, the
+the main, which grows with the main's size. Measured on an Apple M2 Max with
+GLib 2.90.1 (the build's), warm cache, 64 KiB `pread`s into
+`g_checksum_update`, the loop of the compare: 3.11 s per GiB (328.5 to
+329.0 MiB/s over seven runs of a 1 GiB file), plus the device read on a cold
+cache. The connection is opened `SQLITE_OPEN_FULLMUTEX`, so every policy
+store statement in the process, authentication included, waits on the
+connection mutex (`sqlite3_db_mutex`, `wyrelog/policy/store.c`) for that
+long. A fresh resume through the daemon reads the new main in full seven
+times (counted at the digest loop over `daemon-macos-commit/fresh`), so its
+request takes about 22 s per GiB of hashing; only promotion's read, 3.1 s
+per GiB, runs inside the store transaction. The restore handler runs
+synchronously on the HTTP server's main loop, so that server answers
+nothing else for the whole resume. A client that times out first, as wyctl
+does after its default 2000 ms (`default-timeout-ms`, which `--timeout-ms` or
+the setting raises), loses the response; the restore still finishes, and
+`status` answers it from the journal or the receipt. This is accepted now
+that operators reach it: a daemon restore already holds the exclusive policy
+write, so the authority readers already wait; the extra blocked set is the
+store calls that take only the connection mutex; and the compare cannot
+move out of the transaction without accepting the main by identity alone,
+which this ADR forbids. A hardware-accelerated SHA-256 (CommonCrypto
+`CC_SHA256`, the ARMv8 SHA extensions) would keep the in-transaction proof
+and shorten the hold; its factor is not measured, and it is a follow-up.
+The store then promotes the schema, publishes the journal, activates the
+graph, moves the `restore_selected` record to `ACTIVE` with its evidence
+and the row to `verified`, takes the tenant through `unsealing` to `active`,
+and terminalizes: history, receipt and terminal guard, then the replacement
+row, the claim and the journal are deleted. Promotion changes no file. The
+graph is unsealed afterwards through the `ACTIVE` evidence; the existing
+macOS unseal coverage is in `tests/test-fact-graph-seal.c`. Every locator
+refusal is a policy refusal. If the commit is durable and its response is
+lost, the call returns `IO` and the store goes terminal, so the same call
+cannot read the receipt and does not unseal. After a reopen the policy shows
+the promotion committed (the receipt at the selected revision plus four, the
 journal, row and claim gone, the `ACTIVE` record with the replacement
 evidence, the graph active and unsealed in policy), the runtime stays closed
 in that process until the published proof or boot opens the graph through
@@ -791,6 +869,9 @@ refusal.
 
 | Durable observation | Required recovery result |
 | --- | --- |
+| `HANDOFF`, bound, commit refused after the bind (macOS) | The journal stays at the bound revision (4 in the daemon), byte-identical; the handler answers 403 (`POLICY`), 409 `restore_conflict` (`BUSY` with the revision moved) or 500 (`IO`). The forward action is `commit` at the bound revision: the bind replays and admission proceeds. Abort stays open while no row is reserved. |
+| `HANDOFF`, bound, row `reserved`, no decision | A retried admission accepts the row as `UNCHANGED_REPLAY` and decides `COMMIT`. An abort decides `ROLLBACK` and retires the stage, but the release fails (`IO`) while the row remains, so the journal stays `ROLLBACK`, complete, with no receipt; operator wedge, on every host. |
+| `HANDOFF`, `COMMIT` decided (macOS) | Abort is barred (403 at the handler, `POLICY` at rollback) with the journal byte-identical; resume is the only forward action. |
 | Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed (capture, write-once, re-read, compare, advance). |
 | `reserved`, evidence present | Re-read exactly and advance; never recapture. |
 | `companion_synced`, evidence absent (macOS) | Fail closed at the companion step, at mark and at selection; no recapture; operator wedge. |

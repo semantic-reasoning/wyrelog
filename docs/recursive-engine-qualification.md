@@ -416,8 +416,9 @@ The acceptance outcome ledger and exact revision/log links are recorded in
 [#1502](https://github.com/semantic-reasoning/wyrelog/issues/1502).
 CI wiring is a requirement to collect evidence, not a successful run. Do not
 close either issue merely because local Linux checks pass. Journaled restore
-commit remains Linux-only; macOS begin/prepare does not establish commit or
-resume support. See the [restore runbook](fact-offline-restore-runbook.md).
+commit runs on Linux and, for a graph restore, on macOS; a macOS tenant
+restore still refuses commit and resume (#1303 U6), and Windows refuses
+commit (#1304). See the [restore runbook](fact-offline-restore-runbook.md).
 
 ### Interpreting the measurements
 
