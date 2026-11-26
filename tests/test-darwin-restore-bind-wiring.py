@@ -301,10 +301,24 @@ wyrelog/fact/offline-restore-resume-private.c with comments stripped:
   shape or execute, the compare or wyl_fact_graph_resolver_open, nor any
   wyl_policy_store_* function: only its steps read the graph or mutate
   (E_FINALIZE_RESUME_DIRECT);
-- wyl_fact_offline_restore_graph_selected_promote_resume_run still refuses
-  off Linux until #1303 U5-15: its first conditional is ``#ifndef
-  __linux__`` with an ``#else`` and its true arm is the refusal above
-  (E_PROMOTE_RESUME_FENCE).
+- wyl_fact_offline_restore_graph_selected_promote_resume_run is opened to
+  macOS in place (#1303 U5-15c): its gate passes check_refusing_gate
+  (E_PROMOTE_RESUME_GATE); the gate's ``#else`` holds no conditional at
+  all (E_PROMOTE_RESUME_ARMS); it calls the published proof exactly twice
+  and graph_selected_load_durable and promotion exactly once, the first
+  proof before the load and the load before promotion
+  (E_PROMOTE_RESUME_STEPS); with whitespace removed, its ``#else`` holds
+  exactly one ``if (terminal_rc != WYRELOG_E_POLICY) return terminal_rc;``
+  and one ``if (terminal_rc == WYRELOG_E_OK) return WYRELOG_E_OK;``, both
+  before its wyl_policy_store_offline_restore_load call, so only the
+  proof's POLICY falls through to the journal load
+  (E_PROMOTE_RESUME_FALLTHROUGH); and it calls none of restore_unseal_graph,
+  the store promotion, the journal store CAS, the Darwin cleanup shape or
+  execute, the compare, wyl_fact_graph_resolver_open, FINALIZE, the
+  terminal proof, or the store FINALIZE begin or completion, and of the
+  wyl_policy_store_* and wyl_fact_offline_restore_journal_store_* functions
+  it calls only wyl_policy_store_offline_restore_load, exactly once: only
+  its steps read the graph or mutate (E_PROMOTE_RESUME_DIRECT).
 
 The two files are read separately, each with E_UNREADABLE on failure, and
 the authority rules run first.
@@ -1584,23 +1598,72 @@ def check_finalize_resume_rules(source: str) -> None:
         )
 
 
-def check_promote_resume_fence(source: str) -> None:
+# The only store entry the promote resume dispatcher calls itself: the
+# journal load after the published proof's POLICY.
+PROMOTE_RESUME_STORE_CALLS = ["wyl_policy_store_offline_restore_load"]
+PROMOTE_RESUME_PASS_THROUGH = (
+    "if(terminal_rc!=WYRELOG_E_POLICY)returnterminal_rc;"
+)
+PROMOTE_RESUME_PROVED = "if(terminal_rc==WYRELOG_E_OK)returnWYRELOG_E_OK;"
+
+
+def check_promote_resume_rules(source: str) -> None:
     body = function_body(source, PROMOTE_RESUME_RUN)
-    split = gate_arms(body, PROMOTE_RESUME_RUN, "E_PROMOTE_RESUME_FENCE")
-    if (split is None or split[0] != "#ifndef __linux__" or split[2] is None
-            or not refuses(split[1])):
+    shared = check_refusing_gate(body, PROMOTE_RESUME_RUN,
+                                 "E_PROMOTE_RESUME_GATE")
+    if re.search(r"^\s*#\s*(?:if|elif|else|endif)", shared, re.M):
         raise ContractError(
-            f"E_PROMOTE_RESUME_FENCE: {PROMOTE_RESUME_RUN} must still refuse"
-            " off Linux: its first conditional is #ifndef __linux__ with an"
-            " #else, whose true arm is exactly (void) drain_timeout_us;"
-            " return WYRELOG_E_POLICY; (#1303 U5-15 opens it)"
+            f"E_PROMOTE_RESUME_ARMS: the #else of the gate of"
+            f" {PROMOTE_RESUME_RUN} must hold no conditional: every platform"
+            " difference lives behind the public steps"
+        )
+    published = [match.start() for match in re.finditer(
+        r"(?<![\w])" + re.escape(PUBLISHED_RUN) + r"\s*\(", shared)]
+    if (len(published) != 2 or count_calls(shared, LOAD_DURABLE) != 1
+            or count_calls(shared, PROMOTE_RUN) != 1
+            or not published[0] < first_call(shared, LOAD_DURABLE)
+            < first_call(shared, PROMOTE_RUN)):
+        raise ContractError(
+            f"E_PROMOTE_RESUME_STEPS: {PROMOTE_RESUME_RUN} must call"
+            f" {PUBLISHED_RUN} exactly twice and {LOAD_DURABLE} and"
+            f" {PROMOTE_RUN} exactly once, proving before loading and"
+            " loading before promoting"
+        )
+    flat = re.sub(r"\s+", "", shared)
+    load = flat.find(PROMOTE_RESUME_STORE_CALLS[0] + "(")
+    if (flat.count(PROMOTE_RESUME_PASS_THROUGH) != 1
+            or flat.count(PROMOTE_RESUME_PROVED) != 1 or load < 0
+            or flat.find(PROMOTE_RESUME_PASS_THROUGH) > load
+            or flat.find(PROMOTE_RESUME_PROVED) > load):
+        raise ContractError(
+            f"E_PROMOTE_RESUME_FALLTHROUGH: {PROMOTE_RESUME_RUN} must return"
+            " the published proof's OK and every refusal but POLICY before"
+            f" {PROMOTE_RESUME_STORE_CALLS[0]}, exactly once each: only the"
+            " proof's POLICY may fall through to the journal load"
+        )
+    for call in (UNSEAL_CALL, PROMOTE_CALL, JOURNAL_CAS_CALL,
+                 CLEANUP_SHAPE_CALL, CLEANUP_EXECUTE_CALL, COMPARE_CALL,
+                 "wyl_fact_graph_resolver_open", FINALIZE_RUN, TERMINAL_RUN,
+                 BEGIN_CALL, COMPLETE_CALL):
+        if count_calls(body, call) != 0:
+            raise ContractError(
+                f"E_PROMOTE_RESUME_DIRECT: {PROMOTE_RESUME_RUN} calls"
+                f" {call}, but only its steps may read the graph or mutate"
+            )
+    store = [re.sub(r"\s*\($", "", match.group(0))
+             for match in STORE_ENTRY.finditer(body)]
+    if store != PROMOTE_RESUME_STORE_CALLS:
+        raise ContractError(
+            f"E_PROMOTE_RESUME_DIRECT: {PROMOTE_RESUME_RUN} reaches the store"
+            f" through {', '.join(store) or 'nothing'}, but it may call only"
+            f" {PROMOTE_RESUME_STORE_CALLS[0]}, exactly once"
         )
 
 
 def check_resume_source(source: str) -> None:
     source = strip_comments(source)
     check_finalize_resume_rules(source)
-    check_promote_resume_fence(source)
+    check_promote_resume_rules(source)
 
 
 def read_source(root: Path, name: str) -> str:
@@ -3124,7 +3187,7 @@ wyrelog_error_t wyl_fact_offline_restore_graph_selected_promote_resume_run(
       finalized->operation_uuid == NULL || finalized->revision == 0 ||
       out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   (void)drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -4703,6 +4766,46 @@ def finalize_resume_load_moved(text: str) -> str:
         FINALIZE_RESUME_STEP_LINES + FINALIZE_RESUME_LOAD_LINES, 1)
 
 
+PROMOTE_RESUME_EXACT_LINE = "  gboolean exact_input = rc == WYRELOG_E_OK &&\n"
+PROMOTE_RESUME_STEP_LINES = (
+    "  rc = wyl_fact_offline_restore_graph_commit_promote_run(\n"
+    "    policy, fact_root, runtime, finalized->operation_uuid,\n"
+    "    finalized->revision, drain_timeout_us, &promoted);\n"
+)
+PROMOTE_RESUME_FIRST_PROOF = (
+    "    wyrelog_error_t terminal_rc =\n"
+    "        wyl_fact_offline_restore_graph_commit_published_prove_terminal(\n"
+)
+PROMOTE_RESUME_PROOF_LINES = (
+    "  if (rc == WYRELOG_E_OK) {\n"
+    + PROMOTE_RESUME_FIRST_PROOF
+    + "      policy, fact_root, runtime, finalized, drain_timeout_us,\n"
+    "      out_committed);\n"
+    "    if (terminal_rc == WYRELOG_E_OK)\n"
+    "      return WYRELOG_E_OK;\n"
+    "    if (terminal_rc != WYRELOG_E_POLICY)\n"
+    "      return terminal_rc;\n"
+    "  }\n"
+)
+PROMOTE_RESUME_LOAD_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_policy_store_offline_restore_load(policy,"
+    " finalized->operation_uuid,\n"
+    "            &record);\n"
+)
+
+
+def promote_resume_added(call: str):
+    return replace(PROMOTE_RESUME_EXACT_LINE,
+                   "  rc = " + call + ";\n" + PROMOTE_RESUME_EXACT_LINE)
+
+
+def promote_resume_proof_moved(text: str) -> str:
+    return text.replace(PROMOTE_RESUME_PROOF_LINES, "", 1).replace(
+        PROMOTE_RESUME_LOAD_LINES,
+        PROMOTE_RESUME_LOAD_LINES + PROMOTE_RESUME_PROOF_LINES, 1)
+
+
 RESUME_MUTANTS = (
     ("finalize resume: gate back to #ifndef __linux__", FR, replace(
         REPLAY_GATE + "\n", "#ifndef __linux__\n"),
@@ -4759,16 +4862,74 @@ RESUME_MUTANTS = (
     ("finalize resume: another store call added", FR, finalize_resume_added(
         "wyl_policy_store_offline_restore_load(policy,"
         " expected->operation_uuid, &record)"), "E_FINALIZE_RESUME_DIRECT"),
-    ("promote resume: gate opened to macOS", PRR, replace(
-        "#ifndef __linux__\n", REPLAY_GATE + "\n"),
-     "E_PROMOTE_RESUME_FENCE"),
+    ("promote resume: gate back to #ifndef __linux__", PRR, replace(
+        REPLAY_GATE + "\n", "#ifndef __linux__\n"),
+     "E_PROMOTE_RESUME_GATE"),
     ("promote resume: gate refusal returns OK", PRR, replace(
         RESUME_REFUSAL_LINES,
         "  (void)drain_timeout_us;\n  return WYRELOG_E_OK;\n#else\n"),
-     "E_PROMOTE_RESUME_FENCE"),
-    ("promote resume: gate dropped", PRR, lambda text: text.replace(
-        "#ifndef __linux__\n" + RESUME_REFUSAL_LINES, "", 1).replace(
-        "#endif\n}\n", "}\n", 1), "E_PROMOTE_RESUME_FENCE"),
+     "E_PROMOTE_RESUME_GATE"),
+    ("promote resume: gate refusal returns OK early", PRR, replace(
+        RESUME_REFUSAL_LINES,
+        "  (void)drain_timeout_us;\n  if (drain_timeout_us > 0)\n"
+        "    return WYRELOG_E_OK;\n  return WYRELOG_E_POLICY;\n#else\n"),
+     "E_PROMOTE_RESUME_GATE"),
+    ("promote resume: #ifndef __linux__ inside the shared arm", PRR,
+     replace(PROMOTE_RESUME_EXACT_LINE,
+             "#ifndef __linux__\n  (void) rc;\n#endif\n"
+             + PROMOTE_RESUME_EXACT_LINE), "E_PROMOTE_RESUME_GATE"),
+    ("promote resume: Apple arm inside the shared arm", PRR, replace(
+        PROMOTE_RESUME_EXACT_LINE,
+        "#ifdef __APPLE__\n  return WYRELOG_E_POLICY;\n#endif\n"
+        + PROMOTE_RESUME_EXACT_LINE), "E_PROMOTE_RESUME_ARMS"),
+    ("promote resume: another conditional in the shared arm", PRR, replace(
+        PROMOTE_RESUME_EXACT_LINE,
+        "#ifdef G_OS_WIN32\n  (void) rc;\n#endif\n"
+        + PROMOTE_RESUME_EXACT_LINE), "E_PROMOTE_RESUME_ARMS"),
+    ("promote resume: promotion not called", PRR, replace(
+        "  rc = wyl_fact_offline_restore_graph_commit_promote_run(\n",
+        "  rc = promote_skipped(\n"), "E_PROMOTE_RESUME_STEPS"),
+    ("promote resume: promotion called twice", PRR, replace(
+        PROMOTE_RESUME_STEP_LINES,
+        PROMOTE_RESUME_STEP_LINES + PROMOTE_RESUME_STEP_LINES),
+     "E_PROMOTE_RESUME_STEPS"),
+    ("promote resume: first proof not called", PRR, replace(
+        PROMOTE_RESUME_FIRST_PROOF,
+        PROMOTE_RESUME_FIRST_PROOF.replace(PUBLISHED_RUN, "proof_skipped")),
+     "E_PROMOTE_RESUME_STEPS"),
+    ("promote resume: every refusal falls through", PRR, replace(
+        "    if (terminal_rc != WYRELOG_E_POLICY)\n",
+        "    if (terminal_rc == WYRELOG_E_OK)\n"),
+     "E_PROMOTE_RESUME_FALLTHROUGH"),
+    ("promote resume: proof refusals not passed through", PRR, replace(
+        "    if (terminal_rc != WYRELOG_E_POLICY)\n"
+        "      return terminal_rc;\n", ""), "E_PROMOTE_RESUME_FALLTHROUGH"),
+    ("promote resume: first proof after the journal load", PRR,
+     promote_resume_proof_moved, "E_PROMOTE_RESUME_FALLTHROUGH"),
+    ("promote resume: unseal added", PRR, promote_resume_added(
+        "restore_unseal_graph(policy, fact_root, runtime,"
+        " finalized->tenant_id, finalized->selected_graph_id, 0)"),
+     "E_PROMOTE_RESUME_DIRECT"),
+    ("promote resume: store promotion added", PRR, promote_resume_added(
+        "wyl_policy_store_graph_restore_selected_promote_with_effect(policy,"
+        " NULL, NULL, NULL, NULL, NULL)"), "E_PROMOTE_RESUME_DIRECT"),
+    ("promote resume: FINALIZE added", PRR, promote_resume_added(
+        "wyl_fact_offline_restore_graph_commit_finalize_run(policy,"
+        " fact_root, runtime, finalized->operation_uuid, 1, 0, &promoted)"),
+     "E_PROMOTE_RESUME_DIRECT"),
+    ("promote resume: terminal proof added", PRR, promote_resume_added(
+        "wyl_fact_offline_restore_graph_commit_finalized_prove_terminal("
+        "policy, fact_root, runtime, finalized, 0, out_committed)"),
+     "E_PROMOTE_RESUME_DIRECT"),
+    ("promote resume: another store call added", PRR, promote_resume_added(
+        "wyl_policy_store_graph_restore_replacement_load(policy,"
+        " finalized->operation_uuid, &row)"), "E_PROMOTE_RESUME_DIRECT"),
+    ("promote resume: journal store load added", PRR, promote_resume_added(
+        "wyl_fact_offline_restore_journal_store_load(policy,"
+        " finalized->operation_uuid, &current)"), "E_PROMOTE_RESUME_DIRECT"),
+    ("promote resume: journal load called twice", PRR, promote_resume_added(
+        "wyl_policy_store_offline_restore_load(policy,"
+        " finalized->operation_uuid, &record)"), "E_PROMOTE_RESUME_DIRECT"),
 )
 
 

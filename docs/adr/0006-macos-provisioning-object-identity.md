@@ -377,12 +377,13 @@ proves, and promotion (see "Restore replacement evidence") then commits it,
 which the published proof resolves after a lost response. The select resume
 dispatcher drives the companion step and selection and replays a selected
 restore; the `FINALIZE` resume dispatcher finalizes a selected restore and
-proves it terminal; the promote resume dispatcher still refuses (#1303 U5-15),
-and so does `RETIRE_STAGE`. None of it is reachable while macOS commit
-admission refuses; these steps are proved by tests that reach the decision
-directly, and the companion step, selection, the select resume dispatcher,
-`FINALIZE`, the `FINALIZE` resume dispatcher, the terminal proof, promotion
-and the published proof by tests that call them directly.
+proves it terminal; the promote resume dispatcher promotes a finalized
+restore and answers its replay from the receipt; `RETIRE_STAGE` still
+refuses. None of it is reachable while macOS commit admission refuses; these
+steps are proved by tests that reach the decision directly, and the
+companion step, selection, the select resume dispatcher, `FINALIZE`, the
+`FINALIZE` resume dispatcher, the terminal proof, promotion, the published
+proof and the promote resume dispatcher by tests that call them directly.
 
 ## Restore replacement evidence
 
@@ -578,27 +579,33 @@ of the journal or the row between the reads
 `FINALIZE` changes the device number the `TERMINAL` inventory compares, so
 the proof then refuses as an operator wedge (`POLICY`). For a `HANDOFF` graph
 journal with a `COMMIT` decision that direct calls produced, the daemon's
-resume handler on macOS now takes the restore through the remaining commit
-steps, the companion step and selection, deleting the old `ACTIVE` record, and
-through the `FINALIZE` resume dispatcher to `FINALIZED`, unlinking the
-rollback name. The promote resume dispatcher then refuses (`POLICY`, #1303
-U5-15), so the handler answers 403 with the journal at the selected revision
-plus two and the rollback name gone. Any step's `BUSY` or `IO` can return
-before that `POLICY`, and the handler reports `BUSY` as a conflict when the
-revision moved. The handler's `SELECTED` branch (`wyrelog/daemon/http.c`, for
-a stored `selected_pending_cleanup` journal) now finalizes a selected journal
-that is not yet `FINALIZED` the same way. A retry finds a `FINALIZED` journal,
-runs the terminal proof and refuses at the same dispatcher, changing nothing.
-Between #1303 U5-14 and U5-15 a macOS restore driven by direct calls therefore
-parks at `FINALIZED` and is not promotable through the daemon; only a direct
-call of promotion takes it further. None of this is reachable while macOS
-commit admission refuses. The daemon's resume handler reaches the proof only
-for a journal that direct calls produced. It reaches promotion only through
-the promote resume dispatcher, which still refuses on macOS (#1303 U5-15), so
-promotion runs by direct call only. For such a journal the resume handler on
-macOS runs the proof before that dispatcher refuses: it takes the root writer
-lease, quiesces the graph and reads the main, so it can return the proof's
-`BUSY` or `IO` before that `POLICY`.
+resume handler on macOS takes the restore through the remaining commit steps,
+the companion step and selection, deleting the old `ACTIVE` record, through
+the `FINALIZE` resume dispatcher to `FINALIZED`, unlinking the rollback name,
+and through the promote resume dispatcher (#1303 U5-15c) to the committed
+receipt at the selected revision plus four, with the graph and the tenant
+active and unsealed in policy and the graph's runtime open and queryable. The
+handler then answers 200 with state `committed` at that revision.
+`publication_eligible` is `false`: the handler takes it from the journal it
+loaded before the resume, so the answer is the same as on Linux and the same
+as the receipt answer. Any step's `BUSY` or `IO` can return first, and the
+handler reports `BUSY` as a conflict when the revision moved. The handler's
+`SELECTED` branch (`wyrelog/daemon/http.c`, for a stored
+`selected_pending_cleanup` journal) finalizes a selected journal that is not
+yet `FINALIZED` the same way, or runs the terminal proof on a `FINALIZED`
+one, and then promotes through the same dispatcher. Once promotion has
+committed the journal is gone, so a retry finds no journal and is answered
+from the committed receipt (200, state `committed`, the receipt's revision)
+before any resume step runs: it does not unseal. If promotion commits and its
+tail then fails, for example because the unseal refuses a substituted main,
+the handler answers 403 (`POLICY`) with the receipt committed and the runtime
+closed, and a retry answers 200 from the receipt. The runtime stays closed
+until a restart, and boot then opens the graph through the `ACTIVE` evidence
+or refuses it. No test seam reaches that tail failure through the handler, so
+this is accepted on reasoning. None of this is reachable while macOS commit
+admission refuses (`wyrelog/daemon/http.c`, until #1303 U5-16): the daemon's
+resume handler reaches these steps only for a journal that direct calls
+produced.
 
 The macOS `FINALIZE` resume dispatcher
 (`wyl_fact_offline_restore_graph_selected_finalize_resume_run`, #1303 U5-14)
@@ -648,7 +655,15 @@ evidence `ACTIVE` and cannot be undone, so no byte of the main may change
 between the compare and the commit, and nothing up to the commit is accepted
 by device and inode alone. The cost is that the compare holds the graph
 authority mutex and the store connection mutex for a full SHA-256 read of
-the main, and every store call in the process waits for it. The store then
+the main, and every store call in the process waits for it. Through the
+promote resume dispatcher the daemon's resume handler now runs that compare
+(#1303 U5-15c). The daemon's reads that go through the authority already wait
+while a restore holds the policy write
+(`wyrelog/auth/service-auth-coordination.c`), so the stall adds nothing for
+them. It additionally blocks the store calls that take only the store
+connection mutex, outside policy-write coordination, for a full SHA-256 of
+the main, which grows with the main's size. That is accepted here; the stall
+has not been measured, and measuring it is a follow-up. The store then
 promotes the schema, publishes the journal, activates the graph, moves the
 `restore_selected` record to `ACTIVE` with its evidence and the row to
 `verified`, takes the tenant through `unsealing` to `active`, and
@@ -667,8 +682,9 @@ the `ACTIVE` evidence, and a retry gives `NOT_FOUND` and changes nothing.
 The macOS published proof
 (`wyl_fact_offline_restore_graph_commit_published_prove_terminal`, #1303
 U5-12) resolves the lost response in process. A direct caller must pass the
-current `FINALIZED` journal; any other journal is `POLICY` before the store
-is read. The proof reads only the receipt and the graph's authority before
+current `FINALIZED` journal: a well-formed journal that is not `FINALIZED` is
+`POLICY` before the store is read, and a malformed one is `INVALID`.
+The proof reads only the receipt and the graph's authority before
 the unseal; the unseal reads the `ACTIVE` evidence and opens the main by
 identity. No receipt is `POLICY`, with no lease, quiescence or namespace
 read: promotion terminalizes in its own transaction, so no macOS store holds
@@ -684,10 +700,59 @@ ready runtime is accepted, so a replay changes nothing. No `TERMINAL` proof
 or byte compare follows the receipt: the graph is live, and a WAL and writes
 are legitimate. Store errors pass through, so before a reopen the proof
 returns `IO`. An unseal that refuses a substituted main returns `POLICY` and
-leaves the runtime entry evicted and closed. The promote resume dispatcher
-still refuses on macOS (#1303 U5-15). A remount or reboot after `FINALIZE`
+leaves the runtime entry evicted and closed.
+A remount or reboot after `FINALIZE`
 changes the device number the `TERMINAL` inventory compares, so promotion
 then refuses as an operator wedge (`POLICY`).
+
+The macOS promote resume dispatcher
+(`wyl_fact_offline_restore_graph_selected_promote_resume_run`, #1303 U5-15c)
+is the Linux dispatcher opened in place, with no platform arm: every platform
+difference lives behind the public steps it calls, the published proof and
+promotion. The caller's `FINALIZED` journal is the anchor. Missing arguments
+are `INVALID`, and an anchor that is not `FINALIZED` is `POLICY` before the
+store is read. The dispatcher runs the published proof first. A matching
+committed receipt answers `OK` with the receipt's journal, the graph unsealed
+or its ready runtime accepted, and nothing else changes, so a replay is
+idempotent; any refusal of the proof but `POLICY` (`BUSY`, `IO`) passes
+through. On the proof's `POLICY` the dispatcher loads the stored journal. A
+stored journal that disagrees with its record, or is not the anchor byte for
+byte, is `BUSY`; a row that disagrees with the journal or is not
+`selected_pending_cleanup` is `POLICY`. Promotion then runs, and its
+refusals pass through unmapped. On success the output is promotion's: the
+journal published and handed off at the anchor's revision plus two, with the
+receipt committed at the selected revision plus four, the graph and the
+tenant active, the `restore_selected` record `ACTIVE` with the replacement
+evidence, and the runtime open and queryable. The dispatcher's own shape
+check does not read `replay_preflighted`: an anchor without it against a
+stored journal with it differs in bytes and is `BUSY`, and promotion's
+`POLICY` for it applies only when the stored journal lacks it too. The
+proof's `POLICY` has six meanings: no receipt; a receipt that does not name
+the journal; a stale replay of a graph sealed since; a substituted main that
+the unseal refuses; a journal that is not `FINALIZED`, which the
+dispatcher's shape check catches first; and a graph sealed inside the
+unseal's publication fence. The daemon reaches the dispatcher only with "no
+receipt": the handler's journal load proves the journal exists, promotion
+deletes it and writes the receipt in one transaction, and the exclusive
+policy write excludes a promotion between the two. For a direct caller every
+other `POLICY` meets a deleted journal, or a stored journal that is not the
+anchor, so the dispatcher answers `NOT_FOUND` or `BUSY`, and nothing is
+unsealed. The proof's own `NOT_FOUND` means the graph is gone, since its
+authority read finds nothing, which is not the dispatcher's "journal gone";
+it passes through as `NOT_FOUND` all the same, and the daemon's answer is
+the same under either meaning. A replay of a restore's
+anchor after a later restore of the same graph is answered from the earlier
+restore's genuine receipt: `OK` with its journal, which truthfully reports
+that it committed. The recovery-only unseal writes no policy and a ready
+runtime is accepted, so this is accepted; comparing the `ACTIVE` record with
+the journal's replacement would widen the published proof's contract, which
+reads only the receipt and the authority, and is left to a follow-up. The
+Linux branch for a stored published journal two revisions past the anchor is
+dead on macOS, since no macOS store holds a published journal, and stays as
+the Linux body. Opening this dispatcher does not close the seal residual
+described in the next paragraph (#TBD-U5-15b), and it adds no new way to
+reach it: a direct caller could already call the proof and promotion, and
+the daemon serializes restore with seal through the policy write.
 
 The restore unseal is recovery-only, on Linux and macOS (#1303 U5-15a).
 Every restore tail, macOS or not, ends in `restore_unseal_graph`, and its
@@ -712,7 +777,10 @@ daemon serializes restore and seal through the exclusive policy write, so
 this refusal is what keeps a direct caller that breaks that contract from
 unsealing. On macOS a seal that lands between the published proof's
 authority check and its unseal is refused the same way, so the proof's
-`POLICY` also means "sealed inside the fence". One residual remains:
+`POLICY` also means "sealed inside the fence". A direct caller that breaks
+that serialization and seals between a tenant restore's proof and its
+unseal gets `POLICY` the same way, and the tenant journal stays
+unterminalized. One residual remains:
 before any fence, `restore_unseal_graph` accepts a runtime that is `READY`,
 `OPEN` and queryable, and returns `OK` for a graph durably sealed while
 still admitting, the state a seal leaves when it found no runtime entry to
@@ -733,7 +801,8 @@ refusal.
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
 | `selected_pending_cleanup`, resumed by the `FINALIZE` resume dispatcher (macOS) | The anchor equal to the stored journal runs `FINALIZE` and the terminal proof; a lost begin runs `FINALIZE` from the begun revision; a lost completion runs the proof only; any other stored journal is `BUSY` and any other anchor `POLICY`; nothing is unsealed. |
 | `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal. Promotion requires `TERMINAL` before and inside its transaction and the replacement compare inside it, then commits; a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge, and a journal or row changed since it was loaded is `BUSY`. |
-| Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed and a retry gives `NOT_FOUND`; the published proof matches the receipt to the `FINALIZED` journal and unseals through the `ACTIVE` evidence, in process after a reopen or after a restart. |
+| `FINALIZED`, resumed by the promote resume dispatcher (macOS) | The published proof first: a matching committed receipt answers `OK` with the receipt's journal and changes nothing but the runtime it opens. Otherwise the stored journal must be the anchor byte for byte (`BUSY`) and the row `selected_pending_cleanup` (`POLICY`), and promotion runs, its refusals passed through. Any other proof `POLICY` meets a deleted journal (`NOT_FOUND`), and nothing is unsealed. |
+| Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed and a retry of promotion gives `NOT_FOUND`; the published proof, or the promote resume dispatcher retried with the `FINALIZED` journal, matches the receipt to that journal and unseals through the `ACTIVE` evidence, in process after a reopen or after a restart. Before a reopen the dispatcher's retry returns `IO` and unseals nothing. |
 | Committed receipt (macOS) | The published proof requires the `FINALIZED` journal, a matching committed receipt and the graph still active and unsealed in policy; it reads only the receipt and the graph's authority before the unseal, and the unseal reads the `ACTIVE` evidence and opens the main by identity. No receipt, a mismatch or a graph sealed since is `POLICY`, and nothing is unsealed. |
 | `ACTIVE` after promotion (macOS) | The record carries the replacement's version 1 evidence bound to the replacement UUID; unseal, store open, backup and a later restore read it. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |

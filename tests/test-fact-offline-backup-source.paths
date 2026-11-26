@@ -191,6 +191,17 @@
 /fact-offline-backup-source/macos/commit-promote-old-main-returned-in-transaction
 /fact-offline-backup-source/macos/commit-promote-quiescence-held
 /fact-offline-backup-source/macos/commit-promote-restart
+/fact-offline-backup-source/macos/commit-promote-resume
+/fact-offline-backup-source/macos/commit-promote-resume-invalid-input
+/fact-offline-backup-source/macos/commit-promote-resume-lost-response
+/fact-offline-backup-source/macos/commit-promote-resume-lost-response-restart
+/fact-offline-backup-source/macos/commit-promote-resume-not-finalized
+/fact-offline-backup-source/macos/commit-promote-resume-quiesce-held
+/fact-offline-backup-source/macos/commit-promote-resume-replay
+/fact-offline-backup-source/macos/commit-promote-resume-replay-quiescence-held
+/fact-offline-backup-source/macos/commit-promote-resume-stale-anchor
+/fact-offline-backup-source/macos/commit-promote-resume-stale-replay
+/fact-offline-backup-source/macos/commit-promote-resume-substituted-main
 /fact-offline-backup-source/macos/commit-promote-rollback-reappeared
 /fact-offline-backup-source/macos/commit-promote-row-changed-before-recheck
 /fact-offline-backup-source/macos/commit-promote-row-changed-before-transaction
