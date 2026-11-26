@@ -2377,6 +2377,157 @@ test_unseal_recovery_preserves_active_and_shutdown (void)
   remove_tree (root);
 }
 
+/* The restore tails' unseal (#1303 U5-15a) republishes an ACTIVE graph and
+ * never writes graph authority.  Per mode:
+ *   sealed       sealed by the full sequencer, so the runtime is evicted:
+ *                POLICY, still sealed, the runtime as it was; the operator
+ *                unseal then still unseals
+ *   degraded     degraded with the runtime evicted: POLICY, the runtime as
+ *                it was
+ *   active-open  ACTIVE and OPEN, so not recovery-eligible: BUSY, as for
+ *                every unseal, with nothing written and the entry OPEN
+ *   active       ACTIVE with the runtime evicted: OK, republished and open,
+ *                with nothing written */
+static void
+test_unseal_recovery_only (gconstpointer data)
+{
+  const gchar *mode = data;
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-recovery-only-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  if (g_str_equal (mode, "sealed")) {
+    WylFactGraphSealOutcome sealed = { 0 };
+    g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info,
+        fixture.manager, -1, &sealed), ==, WYRELOG_E_OK);
+    g_assert_true (sealed.engine_evicted);
+    wyl_fact_graph_seal_outcome_clear (&sealed);
+  } else if (!g_str_equal (mode, "active-open")) {
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture.manager, &key), ==, WYRELOG_E_OK);
+    gboolean evicted = FALSE;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed
+          (fixture.manager, &key, &evicted), ==, WYRELOG_E_OK);
+    g_assert_true (evicted);
+  }
+  if (g_str_equal (mode, "degraded")) {
+    WylPolicyGraphAuthorityRecord *active = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        info.tenant_id, info.graph_id, &active), ==, WYRELOG_E_OK);
+    WylPolicyAuthorityMutationResult mutation =
+        WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+    g_assert_cmpint (wyl_policy_store_transition_graph_authority
+          (fixture.policy, info.tenant_id, info.graph_id,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+        WYL_POLICY_GRAPH_ERROR_REPLAY, active->lifecycle_generation,
+        active->reconciliation_generation, &mutation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    wyl_policy_graph_authority_record_free (active);
+  }
+  WylPolicyGraphAuthorityRecord *before = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, &before), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus prior = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease),
+      ==, WYRELOG_E_OK);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_recovery_with_root_lease
+        (fixture.policy, fixture.root, NULL, &info, fixture.manager, -1,
+      &outcome), ==, WYRELOG_E_INVALID);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  wyrelog_error_t rc = wyl_fact_graph_unseal_recovery_with_root_lease
+        (fixture.policy, fixture.root, lease, &info, fixture.manager, -1,
+          &outcome);
+  g_test_message ("recovery-only unseal (%s): rc=%d policy_result=%d", mode,
+      rc, outcome.policy_result);
+  gboolean active = g_str_has_prefix (mode, "active");
+  gboolean open = g_str_equal (mode, "active");
+  g_assert_cmpint (rc, ==, !active ? WYRELOG_E_POLICY
+      : open ? WYRELOG_E_OK : WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.policy_result, ==, active
+      ? WYL_POLICY_AUTHORITY_MUTATION_STALE
+      : WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
+  g_assert_false (outcome.durable_unseal_applied);
+  g_assert_false (outcome.durable_reseal_applied);
+  g_assert_false (outcome.compensation_failed);
+  g_assert_cmpint (outcome.compensation_error, ==, WYRELOG_E_OK);
+  g_assert_false (outcome.engine_evicted);
+  g_assert_cmpint (outcome.engine_published, ==, open);
+  g_assert_cmpint (outcome.runtime_admission_open, ==, open);
+  if (open) {
+    g_assert_cmpint (outcome.status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+    g_assert_cmpint (outcome.status.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_OPEN);
+    g_assert_true (outcome.status.queryable);
+  } else {
+    /* The runtime is left in its prior state: an evicted entry stays
+     * evicted and closed, an OPEN one OPEN on the same engine. */
+    g_assert_cmpint (outcome.status.state, ==, prior.state);
+    g_assert_cmpint (outcome.status.admission, ==, prior.admission);
+    g_assert_cmpint (outcome.status.queryable, ==, prior.queryable);
+    g_assert_cmpuint (outcome.status.engine_generation, ==,
+        prior.engine_generation);
+  }
+  if (!active) {
+    g_assert_cmpint (prior.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (prior.queryable);
+    WylFactGraphSnapshot *snapshot = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+          (fixture.manager, &key, &snapshot), !=, WYRELOG_E_OK);
+    g_assert_null (snapshot);
+  }
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  wyl_fact_graph_runtime_status_clear (&prior);
+  WylPolicyGraphAuthorityRecord *after = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (after->lifecycle_state, ==, before->lifecycle_state);
+  g_assert_cmpuint (after->lifecycle_generation, ==,
+      before->lifecycle_generation);
+  g_assert_cmpuint (after->reconciliation_generation, ==,
+      before->reconciliation_generation);
+  g_assert_cmpint (after->sealed_compatibility, ==,
+      before->sealed_compatibility);
+  g_assert_cmpstr (after->store_uuid, ==, before->store_uuid);
+  wyl_policy_graph_authority_record_free (after);
+  if (g_str_equal (mode, "sealed")) {
+    g_assert_cmpint (before->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_true (before->sealed_compatibility);
+    /* The refusal released the fence and the runtime writer, and the
+     * operator unseal is unchanged: it still takes SEALED to ACTIVE. */
+    g_assert_cmpint (wyl_fact_graph_unseal_with_root_lease (fixture.policy,
+        fixture.root, lease, &info, fixture.manager, -1, &outcome), ==,
+        WYRELOG_E_OK);
+    g_assert_true (outcome.durable_unseal_applied);
+    g_assert_true (outcome.runtime_admission_open);
+    g_assert_true (outcome.status.queryable);
+    wyl_fact_graph_unseal_outcome_clear (&outcome);
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        info.tenant_id, info.graph_id, &after), ==, WYRELOG_E_OK);
+    g_assert_cmpint (after->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+    g_assert_cmpuint (after->lifecycle_generation, ==,
+        before->lifecycle_generation + 1);
+    wyl_policy_graph_authority_record_free (after);
+  } else if (g_str_equal (mode, "degraded")) {
+    g_assert_cmpint (before->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED);
+  }
+  wyl_policy_graph_authority_record_free (before);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_fact_graph_key_clear (&key);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
 static int
 deny_publication_rollback (void *data, int action, const char *first,
     const char *second, const char *database, const char *trigger)
@@ -3665,6 +3816,15 @@ main (int argc, char **argv)
       test_unseal_recovers_existing_active_runtime);
   g_test_add_func ("/fact-graph-seal/unseal-recovery-controls",
       test_unseal_recovery_preserves_active_and_shutdown);
+  static const gchar *recovery_only_modes[] = {
+    "sealed", "degraded", "active-open", "active"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (recovery_only_modes); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact-graph-seal/unseal-recovery-only-%s", recovery_only_modes[i]);
+    g_test_add_data_func (name, recovery_only_modes[i],
+        test_unseal_recovery_only);
+  }
   g_test_add_func ("/fact-graph-seal/publication-rollback-fences-connection",
       test_publication_rollback_failure_fences_connection);
   g_test_add_func ("/fact-graph-seal/publication-fence-binds-key",

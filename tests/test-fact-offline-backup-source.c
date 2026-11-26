@@ -24,6 +24,7 @@
 
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/fact/graph-seal-private.h"
 #include "wyrelog/fact/graph-artifact-transition-posix-private.h"
 #ifdef G_OS_WIN32
 #include "wyrelog/fact/graph-artifact-transition-windows-private.h"
@@ -13613,6 +13614,14 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   gboolean darwin_carry = g_strcmp0 (data, "darwin-evidence-carry") == 0;
   gboolean darwin_migration_reserved =
       g_strcmp0 (data, "darwin-evidence-migration-reserved") == 0;
+  gboolean seal_replay = g_strcmp0 (data, "published-receipt-sealed-since")
+      == 0;
+#ifndef __linux__
+  if (seal_replay) {
+    g_test_skip ("the Linux published proof replays a receipt");
+    return;
+  }
+#endif
 #ifndef __APPLE__
   if (darwin_migration_reserved) {
     g_test_skip ("a migrated reserved row gains evidence only on macOS");
@@ -15071,6 +15080,60 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
       SQLITE_OK);
   g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
       WYRELOG_E_OK);
+  if (seal_replay) {
+    /* #1303 U5-15a: the receipt outlives the graph's later lifecycle.  An
+     * operator seal after the promotion, by the full sequencer, evicts the
+     * runtime; a replay of the published proof with the FINALIZED journal
+     * then finds the receipt, and the restore unseal is recovery-only, so
+     * it refuses the sealed graph and writes no authority. */
+    wyl_policy_fact_graph_info_t seal_info = {
+      .tenant_id = "tenant-a", .graph_id = "alpha",
+    };
+    g_auto (WylFactGraphSealOutcome) seal_outcome = { 0 };
+    g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &seal_info,
+        fixture.runtime, 0, &seal_outcome), ==, WYRELOG_E_OK);
+    WylPolicyGraphAuthorityRecord *sealed_authority = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        "tenant-a", "alpha", &sealed_authority), ==, WYRELOG_E_OK);
+    g_assert_cmpint (sealed_authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    const guint64 sealed_generation = sealed_authority->lifecycle_generation;
+    wyl_policy_graph_authority_record_free (sealed_authority);
+    WylFactGraphKey sealed_key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&sealed_key, "tenant-a",
+        "alpha"), ==, WYRELOG_E_OK);
+    WylFactGraphRuntimeStatus sealed_status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (fixture.runtime, &sealed_key, &sealed_status), ==, WYRELOG_E_OK);
+    g_assert_false (sealed_status.state == WYL_FACT_GRAPH_RUNTIME_READY
+        && sealed_status.admission == WYL_FACT_GRAPH_ADMISSION_OPEN);
+    g_assert_cmpint (sealed_status.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (sealed_status.queryable);
+    wyl_fact_graph_runtime_status_clear (&sealed_status);
+    g_auto (WylFactOfflineRestoreJournal) replayed = { 0 };
+    g_assert_cmpint
+      (wyl_fact_offline_restore_graph_commit_published_prove_terminal
+          (fixture.policy, fixture.root, fixture.runtime, &finalized, 0,
+        &replayed), ==, WYRELOG_E_POLICY);
+    g_assert_null (replayed.operation_uuid);
+    g_assert_null (replayed.graphs);
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        "tenant-a", "alpha", &sealed_authority), ==, WYRELOG_E_OK);
+    g_assert_cmpint (sealed_authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_true (sealed_authority->sealed_compatibility);
+    g_assert_cmpuint (sealed_authority->lifecycle_generation, ==,
+        sealed_generation);
+    wyl_policy_graph_authority_record_free (sealed_authority);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (fixture.runtime, &sealed_key, &sealed_status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (sealed_status.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (sealed_status.queryable);
+    wyl_fact_graph_runtime_status_clear (&sealed_status);
+    wyl_fact_graph_key_clear (&sealed_key);
+  }
 #endif
   if (schema_transition) {
     /* The backup selects schema version 1 while version 2 is active.  Only
@@ -22634,6 +22697,47 @@ published_run (BackupFixture *fixture, FinalizeProbe *probe,
   return rc;
 }
 
+/* The operator's seal in published-seal-race: the full sequencer, run at
+ * the point after the proof's authority check and before its unseal, with
+ * the authority generation and runtime state it leaves behind. */
+typedef struct
+{
+  BackupFixture *fixture;
+  guint64 sealed_generation;
+  WylFactGraphRuntimeState sealed_state;
+} PublishedSealRace;
+
+static void
+published_seal_zeta (gpointer data)
+{
+  PublishedSealRace *race = data;
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "zeta",
+  };
+  g_auto (WylFactGraphSealOutcome) outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (race->fixture->policy, &info,
+      race->fixture->runtime, 0, &outcome), ==, WYRELOG_E_OK);
+  WylPolicyGraphAuthorityRecord *graph = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority
+        (race->fixture->policy, "tenant-a", "zeta", &graph), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (graph->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+  race->sealed_generation = graph->lifecycle_generation;
+  wyl_policy_graph_authority_record_free (graph);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (race->fixture->runtime, &key, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_false (status.queryable);
+  race->sealed_state = status.state;
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
+}
+
 /* FINALIZED, then promoted with the commit response lost: the commit is
  * durable, the call returned IO with no output, and zeta's runtime is
  * empty and closed.  The store is terminal, so nothing of the policy is
@@ -22742,6 +22846,11 @@ assert_published (BackupFixture *fixture, FinalizeProbe *probe,
  *     | yes
  *   published-stale-replay
  *     zeta sealed in policy after the promotion | POLICY | unsealed again
+ *   published-seal-race
+ *     zeta sealed by the full seal sequencer after the authority check
+ *     and before the unseal (#1303 U5-15a) | POLICY, still sealed at the
+ *     seal's generation, the runtime as the seal left it, closed, and the
+ *     receipt unchanged | unsealed again
  *   published-quiescence-held
  *     zeta quiesced by another owner | BUSY | released */
 static void
@@ -23058,6 +23167,45 @@ test_graph_commit_published_macos (gconstpointer data)
     g_assert_cmpint (wyl_policy_store_unseal_fact_graph (fixture.policy,
         "tenant-a", "zeta"), ==, WYRELOG_E_OK);
     assert_published_closed (&fixture, &expect, NULL);
+  } else if (g_str_equal (mode, "published-seal-race")) {
+    /* A seal that lands after the proof's authority check is still seen by
+     * the unseal: the restore unseal is recovery-only, so it refuses a
+     * graph that is not ACTIVE inside its publication fence and writes no
+     * authority (#1303 U5-15a). */
+    published_lost_response (&fixture, &probe, &expect, &finalized);
+    select_reopen_policy (&fixture);
+    PublishedSealRace race = { .fixture = &fixture };
+    probe.act_at = PUBLISHED_BEFORE_UNSEAL;
+    probe.action = FINALIZE_PROBE_CALL;
+    probe.call = published_seal_zeta;
+    probe.call_data = &race;
+    rc = published_run (&fixture, &probe, &finalized, &committed);
+    g_assert_cmpuint (probe.hits, ==, 1);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    assert_finalize_points (&probe, unsealed);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    assert_promote_runtime (&fixture, race.sealed_state,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+    WylPolicyGraphAuthorityRecord *graph = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        "tenant-a", "zeta", &graph), ==, WYRELOG_E_OK);
+    g_assert_cmpint (graph->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_true (graph->sealed_compatibility);
+    g_assert_cmpuint (graph->lifecycle_generation, ==,
+        race.sealed_generation);
+    wyl_policy_graph_authority_record_free (graph);
+    WylPolicyOfflineRestoreReceipt *receipt = NULL;
+    g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+          (fixture.policy, operation, &receipt), ==, WYRELOG_E_OK);
+    g_assert_nonnull (receipt);
+    g_assert_cmpstr (receipt->terminal_state, ==, "committed");
+    g_assert_cmpuint (receipt->final_revision, ==, selected + 4);
+    wyl_policy_offline_restore_receipt_free (receipt);
+    g_assert_cmpint (wyl_policy_store_unseal_fact_graph (fixture.policy,
+        "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+    assert_promote_policy (&fixture, &expect, NULL);
   } else if (g_str_equal (mode, "published-quiescence-held")) {
     /* A quiescence held elsewhere passes through from the unseal
      * sequencer, after the point, with the output cleared. */
@@ -24044,6 +24192,13 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-offline-backup-source/restore-populated-graph-schema-transition",
       test_graph_populated_schema_transition_roundtrip);
+#ifndef G_OS_WIN32
+  /* Its own meson test: the main run has no time left (tests/meson.build). */
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-unseal-recovery/"
+      "published-receipt-sealed-since", "published-receipt-sealed-since",
+      test_graph_restore_replacement_reservation);
+#endif
 #ifdef WYL_TEST_HANDLE_SEAMS
   g_test_add_data_func
     ("/fact-offline-backup-source/restore-replacement-commit-response",
@@ -24715,6 +24870,9 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-published-receipt-mismatch",
       "published-receipt-mismatch", test_graph_commit_published_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-published-seal-race",
+      "published-seal-race", test_graph_commit_published_macos);
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-published-stale-replay",
       "published-stale-replay", test_graph_commit_published_macos);

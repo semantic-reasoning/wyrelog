@@ -36,7 +36,7 @@ The graph authority record owns:
 
 | Field | Meaning and recovery owner |
 | --- | --- |
-| `lifecycle_state` | Whether the graph store is unclassified, provisioning, active, sealed, or degraded. Provisioning and lifecycle coordinators own normal transitions; reconciliation alone owns recovery from degraded. |
+| `lifecycle_state` | Whether the graph store is unclassified, provisioning, active, sealed, or degraded. Provisioning and lifecycle coordinators own normal transitions; reconciliation alone owns recovery from degraded. A restore tail owns none: its unseal is recovery-only and refuses a graph that is not active inside the publication fence (ADR 0006, #1303 U5-15a). |
 | `store_uuid` | Canonical, globally unique, write-once physical identity. Provisioning reserves it; reconciliation verifies it but never substitutes another UUID. |
 | `format_version` | Reserved store-format contract. Provisioning assigns it with the UUID; open/reconciliation code compares it with supported versions. |
 | `path_encoding_version` | Reserved mapping contract from authority identity to a physical path. Provisioning assigns it with the UUID; path resolution must reject unsupported versions. |

@@ -270,6 +270,21 @@ selected_replacement_snapshot_valid, row_equal, the lease authorization of
 the resolver, graph_commit_quiesce and check_runtime), the selected
 provenance load and check_finalized_persisted.
 
+Restore unseal rule (check_restore_unseal_rules), for the unseal every
+restore tail ends with (#1303 U5-15a), on every platform:
+
+- restore_unseal_graph calls wyl_fact_graph_unseal_recovery_with_root_lease
+  exactly once, so the unseal refuses a graph that is not ACTIVE inside the
+  publication fence and never writes graph authority;
+- it calls no other unseal entry point (wyl_fact_graph_unseal and its
+  _with_root_lease, _with_root_lease_bounded, _for_test and _core forms)
+  and none of wyl_policy_store_unseal_fact_graph, its _with_result form or
+  wyl_policy_store_transition_graph_authority
+  (E_RESTORE_UNSEAL_RECOVERY).  wyl_fact_graph_unseal_outcome_clear stays
+  allowed.  The refusal itself lives in graph-seal-private.c, which this
+  guard does not read: the runtime tests in tests/test-fact-graph-seal.c
+  pin it.
+
 Resume dispatcher rules (check_resume_source), on
 wyrelog/fact/offline-restore-resume-private.c with comments stripped:
 
@@ -402,6 +417,14 @@ JOURNAL_LOAD = "wyl_fact_offline_restore_journal_store_load"
 MARK_PUBLISHED = "wyl_fact_offline_restore_journal_mark_policy_published"
 MARK_HANDOFF = "wyl_fact_offline_restore_journal_mark_lifecycle_handoff"
 AUTHORITY_CALL = "wyl_policy_store_read_graph_authority"
+RESTORE_UNSEAL = "restore_unseal_graph"
+RECOVERY_UNSEAL_CALL = "wyl_fact_graph_unseal_recovery_with_root_lease"
+RESTORE_UNSEAL_BANNED = re.compile(
+    r"\bwyl_fact_graph_unseal(_with_root_lease(_bounded)?|_for_test|_core)?"
+    r"\s*\("
+    r"|\bwyl_policy_store_(unseal_fact_graph(_with_result)?"
+    r"|transition_graph_authority)\s*\("
+)
 # Local helpers that read or write the store: the promote effect runs
 # inside the store transaction and must call none of them.
 REENTRANT_HELPERS = ("check_finalized_persisted", "check_policy",
@@ -1298,6 +1321,22 @@ def check_published_rules(source: str) -> None:
         )
 
 
+def check_restore_unseal_rules(source: str) -> None:
+    body = function_body(source, RESTORE_UNSEAL)
+    if count_calls(body, RECOVERY_UNSEAL_CALL) != 1:
+        raise ContractError(
+            f"E_RESTORE_UNSEAL_RECOVERY: {RESTORE_UNSEAL} must call"
+            f" {RECOVERY_UNSEAL_CALL} exactly once"
+        )
+    banned = RESTORE_UNSEAL_BANNED.search(body)
+    if banned is not None:
+        raise ContractError(
+            f"E_RESTORE_UNSEAL_RECOVERY: {RESTORE_UNSEAL} calls"
+            f" {banned.group(0).rstrip('( ')}, but a restore tail never"
+            " writes graph authority"
+        )
+
+
 def gate_arms(body: str, name: str,
               code: str) -> tuple[str, str, str | None] | None:
     """The first ``#if``-family line of ``body``, its true arm and its
@@ -1502,6 +1541,7 @@ def check_source(source: str) -> None:
     check_promote_rules(source)
     check_published_rules(source)
     check_select_resume_rules(source)
+    check_restore_unseal_rules(source)
 
 
 def check_finalize_resume_rules(source: str) -> None:
@@ -2586,6 +2626,94 @@ static wyrelog_error_t darwin_published_prove_terminal
     WylFactOfflineRestoreJournal *out_committed);
 """
 
+# The real body of the restore tails' unseal.
+RESTORE_UNSEAL_FIXTURE = """\
+static wyrelog_error_t
+restore_unseal_graph (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *tenant_id,
+    const gchar *graph_id, gint64 drain_timeout_us)
+{
+  WylFactRootWriterLease *root_lease = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root,
+          &root_lease);
+  RestoreUnsealContext context = {
+    .policy = policy,
+    .graph_id = graph_id,
+    .fact_root = fact_root,
+    .runtime = runtime,
+    .root_lease = root_lease,
+    .drain_timeout_us = drain_timeout_us,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_foreach_fact_graph (policy, tenant_id,
+            restore_unseal_graph_info, &context);
+  if (rc == WYRELOG_E_OK && !context.found)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK) {
+    WylFactGraphKey key = { 0 };
+    rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
+    WylFactGraphRuntimeStatus current = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_get_status (runtime, &key,
+              &current);
+    gboolean had_entry = rc == WYRELOG_E_OK;
+    /* A retry after a lost response may find the normal lifecycle handoff
+     * already published and open. Accept that ready runtime; otherwise run
+     * the regular sealed-graph unseal sequencer. */
+    if (rc == WYRELOG_E_OK && current.state == WYL_FACT_GRAPH_RUNTIME_READY
+        && current.admission == WYL_FACT_GRAPH_ADMISSION_OPEN
+        && current.queryable) {
+      wyl_fact_graph_runtime_status_clear (&current);
+      wyl_fact_graph_key_clear (&key);
+      goto done;
+    }
+    wyl_fact_graph_runtime_status_clear (&current);
+    if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_OK;
+    if (rc == WYRELOG_E_OK && had_entry) {
+      WylFactGraphUnsealPreparation preparation = { 0 };
+      rc = wyl_fact_graph_runtime_unseal_prepare (runtime, &key,
+              &preparation);
+      WylFactGraphRuntimeStatus drained = { 0 };
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_graph_runtime_manager_drain (runtime, &key,
+                drain_timeout_us, &drained);
+      wyl_fact_graph_runtime_status_clear (&drained);
+      /* The restored file supersedes any engine retained by the closed
+       * runtime. Evict it before the normal unseal sequencer so an ACTIVE
+       * policy row is eligible for exact recovery and replay. Even if drain
+       * reports a timeout, make the entry unavailable before releasing the
+       * preparation. */
+      if (preparation.entry != NULL) {
+        gboolean evicted = FALSE;
+        wyrelog_error_t evict_rc =
+            wyl_fact_graph_runtime_manager_evict_closed (runtime, &key,
+                &evicted);
+        if (evict_rc == WYRELOG_E_NOT_FOUND)
+          evict_rc = WYRELOG_E_OK;
+        if (rc == WYRELOG_E_OK)
+          rc = evict_rc;
+      }
+      wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+    }
+    WylFactGraphUnsealOutcome outcome = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_unseal_recovery_with_root_lease (policy, fact_root,
+              root_lease, &context.info, runtime, drain_timeout_us, &outcome);
+    wyl_fact_graph_unseal_outcome_clear (&outcome);
+    wyl_fact_graph_key_clear (&key);
+  }
+done:
+  g_clear_pointer (&root_lease, wyl_fact_root_writer_lease_release);
+  g_free (context.tenant_id);
+  g_free (context.graph_id_copy);
+  g_free (context.storage_uri);
+  g_free (context.storage_path);
+  g_free (context.owner_scope);
+  return rc;
+}
+"""
+
 # The real body of the select resume dispatcher.
 SELECT_RESUME_RUN_FIXTURE = """\
 wyrelog_error_t
@@ -3133,6 +3261,7 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_select_resume_run":
         SELECT_RESUME_RUN_FIXTURE,
     "darwin_selected_namespace_prove": DARWIN_SELECTED_PROVE_FIXTURE,
+    "restore_unseal_graph": RESTORE_UNSEAL_FIXTURE,
 }
 
 
@@ -3185,6 +3314,18 @@ PP = "wyl_fact_offline_restore_graph_commit_published_prove_terminal"
 DB = "darwin_published_prove_terminal"
 SR = "wyl_fact_offline_restore_graph_commit_select_resume_run"
 SP = "darwin_selected_namespace_prove"
+RU = "restore_unseal_graph"
+RESTORE_UNSEAL_CLEAR_LINE = (
+    "    wyl_fact_graph_unseal_outcome_clear (&outcome);\n"
+)
+
+
+def restore_unseal_added(call: str):
+    return replace(RESTORE_UNSEAL_CLEAR_LINE,
+                   "    if (rc == WYRELOG_E_OK)\n      rc = " + call + ";\n"
+                   + RESTORE_UNSEAL_CLEAR_LINE)
+
+
 FINALIZE_SHAPE_LINES = (
     "  if (rc == WYRELOG_E_OK)\n"
     "    rc = darwin_post_publish_refusal\n"
@@ -4492,6 +4633,32 @@ MUTANTS = (
     ("selected prove: final recheck before the compare", SP, move_before(
         SELECTED_PROVE_PERSISTED_LINES, SELECTED_PROVE_COMPARE_LINES),
      "E_SELECTED_PROVE_PERSISTED"),
+    ("restore unseal: back to the operator unseal", RU, replace(
+        "wyl_fact_graph_unseal_recovery_with_root_lease (",
+        "wyl_fact_graph_unseal_with_root_lease ("),
+     "E_RESTORE_UNSEAL_RECOVERY"),
+    ("restore unseal: recovery call dropped", RU, replace(
+        "wyl_fact_graph_unseal_recovery_with_root_lease (",
+        "restore_left_sealed ("), "E_RESTORE_UNSEAL_RECOVERY"),
+    ("restore unseal: recovery called twice", RU, restore_unseal_added(
+        "wyl_fact_graph_unseal_recovery_with_root_lease (policy, fact_root,"
+        " root_lease, &context.info, runtime, drain_timeout_us, &outcome)"),
+     "E_RESTORE_UNSEAL_RECOVERY"),
+    ("restore unseal: test unseal added", RU, restore_unseal_added(
+        "wyl_fact_graph_unseal_for_test (policy, fact_root, &context.info,"
+        " runtime, drain_timeout_us, &outcome)"),
+     "E_RESTORE_UNSEAL_RECOVERY"),
+    ("restore unseal: bounded unseal added", RU, restore_unseal_added(
+        "wyl_fact_graph_unseal_with_root_lease_bounded (policy, fact_root,"
+        " root_lease, &context.info, runtime, drain_timeout_us, job,"
+        " &outcome)"), "E_RESTORE_UNSEAL_RECOVERY"),
+    ("restore unseal: store unseal added", RU, restore_unseal_added(
+        "wyl_policy_store_unseal_fact_graph_with_result (policy, tenant_id,"
+        " graph_id, &result)"), "E_RESTORE_UNSEAL_RECOVERY"),
+    ("restore unseal: authority transition added", RU, restore_unseal_added(
+        "wyl_policy_store_transition_graph_authority (policy, tenant_id,"
+        " graph_id, from, to, error, generation, reconciliation, &result)"),
+     "E_RESTORE_UNSEAL_RECOVERY"),
 )
 
 

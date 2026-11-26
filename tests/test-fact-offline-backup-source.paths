@@ -222,6 +222,7 @@
 /fact-offline-backup-source/macos/commit-published-not-finalized-input
 /fact-offline-backup-source/macos/commit-published-quiescence-held
 /fact-offline-backup-source/macos/commit-published-receipt-mismatch
+/fact-offline-backup-source/macos/commit-published-seal-race
 /fact-offline-backup-source/macos/commit-published-stale-replay
 /fact-offline-backup-source/macos/commit-published-substituted-main
 /fact-offline-backup-source/macos/commit-resume-to-published
@@ -337,6 +338,7 @@
 /fact-offline-backup-source/restore-replacement-schema-transition
 /fact-offline-backup-source/restore-staging-bad-checksum
 /fact-offline-backup-source/restore-staging-coordinator
+/fact-offline-backup-source/restore-unseal-recovery/published-receipt-sealed-since
 /fact-offline-backup-source/rollback/absent-main
 /fact-offline-backup-source/rollback/crash/begin
 /fact-offline-backup-source/rollback/crash/complete

@@ -881,13 +881,16 @@ wyl_fact_graph_reconcile_degraded_bounded
              out_outcome);
 }
 
-wyrelog_error_t
+/* recovery_only: refuse, inside the publication fence, a graph whose
+ * initial lifecycle is not ACTIVE, so the call can never write graph
+ * authority.  The restore tails' unseal sets it (#1303 U5-15a). */
+static wyrelog_error_t
 wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactRootWriterLease *root_lease,
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
     WylFactReplayJobContext *job_context,
-    WylFactGraphUnsealOutcome *out_outcome)
+    WylFactGraphUnsealOutcome *out_outcome, gboolean recovery_only)
 {
   if (out_outcome != NULL) {
     memset (out_outcome, 0, sizeof *out_outcome);
@@ -961,6 +964,15 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   gboolean recovery = preparation.recovery_eligible
       && fence.initial_lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE;
+  /* The initial lifecycle was read under the graph authority mutex in the
+   * fence's own transaction, so no seal can commit between this check and
+   * the fence commit.  An ACTIVE graph that is not recovery-eligible keeps
+   * the store's answer below: an unsealed row is STALE, which is BUSY. */
+  if (recovery_only
+      && fence.initial_lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE) {
+    rc = WYRELOG_E_POLICY;
+    goto fence_abort;
+  }
   rc = replay_job_checkpoint (job_context);
   if (rc != WYRELOG_E_OK)
     goto fence_abort;
@@ -1201,7 +1213,7 @@ wyl_fact_graph_unseal (wyl_policy_store_t *policy, WylHandle *handle,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info,
-             manager, drain_timeout_us, NULL, out_outcome);
+             manager, drain_timeout_us, NULL, out_outcome, FALSE);
 }
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
@@ -1212,7 +1224,7 @@ wyl_fact_graph_unseal_for_test (wyl_policy_store_t *policy,
     WylFactGraphUnsealOutcome *out_outcome)
 {
   return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info,
-             manager, drain_timeout_us, NULL, out_outcome);
+             manager, drain_timeout_us, NULL, out_outcome, FALSE);
 }
 #endif
 
@@ -1227,7 +1239,21 @@ wyl_fact_graph_unseal_with_root_lease
   if (root_lease == NULL)
     return WYRELOG_E_INVALID;
   return wyl_fact_graph_unseal_core (policy, fact_root, root_lease,
-             graph_info, manager, drain_timeout_us, NULL, out_outcome);
+             graph_info, manager, drain_timeout_us, NULL, out_outcome, FALSE);
+}
+
+wyrelog_error_t
+wyl_fact_graph_unseal_recovery_with_root_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome)
+{
+  if (root_lease == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_fact_graph_unseal_core (policy, fact_root, root_lease,
+             graph_info, manager, drain_timeout_us, NULL, out_outcome, TRUE);
 }
 
 wyrelog_error_t
@@ -1242,5 +1268,6 @@ wyl_fact_graph_unseal_with_root_lease_bounded
   if (root_lease == NULL || job_context == NULL)
     return WYRELOG_E_INVALID;
   return wyl_fact_graph_unseal_core (policy, fact_root, root_lease,
-             graph_info, manager, drain_timeout_us, job_context, out_outcome);
+             graph_info, manager, drain_timeout_us, job_context, out_outcome,
+             FALSE);
 }

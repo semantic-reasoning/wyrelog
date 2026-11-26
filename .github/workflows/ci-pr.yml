@@ -379,6 +379,7 @@ jobs:
             fact-offline-backup-source-registrations \
             fact-offline-backup-source \
             fact-offline-restore-tenant-old-binding \
+            fact-offline-restore-unseal-recovery \
             fact-offline-restore-graph-coordinator \
             fact-offline-restore-graph-import \
             fact-offline-restore-graph-rollback \

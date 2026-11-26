@@ -57,7 +57,12 @@ must exercise each cross-domain edge and prove bounded join/cleanup.
 
 `tests/test-fact-publication-lock-order-boundary.py` is intentionally a
 call-order smoke check: it guards the two production unseal call sites and
-does not claim to prove every concurrent schedule.  The runtime test-only
+does not claim to prove every concurrent schedule.  The restore unseal
+(`restore_unseal_graph`, through
+`wyl_fact_graph_unseal_recovery_with_root_lease`, #1303 U5-15a) is a third
+caller of the same sequencer body, `wyl_fact_graph_unseal_core`, whose order
+the check reads; its recovery-only refusal is taken inside the policy fence
+and releases through the fence abort.  The runtime test-only
 lock event seam now records actual `writer_lock` and `state_lock` acquisition
 and release, and `fact-runtime/lock-events-writer-before-state` proves the
 runtime sub-order and cleanup.  Runtime build callbacks also refuse
