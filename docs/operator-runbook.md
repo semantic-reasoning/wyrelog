@@ -63,10 +63,11 @@ xxhash, and libchronoid shared libraries at runtime.
 
 Packagers must also provide the external DuckDB runtime library
 `libduckdb.so` at exactly version 2.0.0. The Meson prebuilt dependency is pinned
-to the upstream v2.0.0 Linux archive; the installed product does not vendor
-DuckDB. The libchronoid 1.2.0 shared library is installed from the pinned
-fallback. Standard system runtime dependencies include GLib/GIO, libsoup 3,
-libsodium, SQLite, the C runtime, and (when TPM is enabled) tss2-esys. Package
+to the upstream v2.0.0 Linux archive, and `product_install` always uses it,
+never an installed DuckDB; the installed product does not vendor DuckDB. The
+libchronoid 1.2.0 shared library is installed from the pinned fallback.
+Standard system runtime dependencies include GLib/GIO, libsoup 3, libsodium,
+SQLite, the C runtime, and (when TPM is enabled) tss2-esys. Package
 metadata must declare these runtime requirements; a successful build or an
 `ldd` resolution against the build host is not evidence that the package is
 self-contained.

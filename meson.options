@@ -91,9 +91,11 @@ option('duckdb_source',
   choices : ['prebuilt', 'subproject'],
   value : 'prebuilt',
   description : 'How libduckdb is sourced when audit or fact storage is on. '
-              + '"prebuilt" downloads the upstream-published library '
+              + '"prebuilt" uses an installed DuckDB 2.0.x that passes '
+              + 'the version, header and library checks, and otherwise '
+              + 'downloads the upstream-published library '
               + 'binary for the host platform (fast: ~30 MB download '
-              + 'and zero compile). "subproject" downloads the '
+              + 'and zero compile). "subproject" always downloads the '
               + 'upstream v2.0.0 source tree and compiles it in tree '
               + '(slow: several hundred large unity translation units). '
               + 'Default is prebuilt; main-branch CI runs the '

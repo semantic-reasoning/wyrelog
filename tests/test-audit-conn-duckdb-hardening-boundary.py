@@ -290,7 +290,7 @@ def validate_repository(root: Path,
     if runtime.count("expect_loader_posture(duckdb_source, status)") != 2:
         errors.append("runtime does not check the loader posture in both modes")
     if hardening_block.count(
-            "'--duckdb-source', get_option('duckdb_source'),") != 2:
+            "'--duckdb-source', duckdb_provider,") != 2:
         errors.append("runtime registrations do not learn the DuckDB source")
     for required in (
         "#define RAW_SQLITE_NO_EXTENSION_LOADER 31",
@@ -458,7 +458,7 @@ def self_test(root: Path) -> list[str]:
          'validate_hardened_trace(positive, home / ".duckdb" / "extensions")',
          "pass"),
         ("driver DuckDB source", "tests/meson.build",
-         "      '--duckdb-source', get_option('duckdb_source'),\n"
+         "      '--duckdb-source', duckdb_provider,\n"
          "      test_audit_conn_duckdb_hardening,",
          "      test_audit_conn_duckdb_hardening,"),
         ("effective row count", "tests/test-audit-conn-duckdb-hardening.c",

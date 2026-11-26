@@ -160,7 +160,7 @@ def validate_repository(root: Path, overrides: dict[str, str] | None = None) -> 
     for requirement in runtime_requirements:
         if requirement not in runtime:
             errors.append(f"portable runtime evidence drifted: {requirement}")
-    if ("'--duckdb-source', get_option('duckdb_source'),\n"
+    if ("'--duckdb-source', duckdb_provider,\n"
             "      test_fact_store_duckdb_hardening,") not in meson:
         errors.append("runtime driver does not learn the DuckDB source")
     for workflow_name in ("ci-pr.yml", "ci-main.yml"):
@@ -270,7 +270,7 @@ def self_test(root: Path) -> list[str]:
          '            validate_no_network(evidence, "positive control")\n'
          "        elif"),
         ("driver DuckDB source", "tests/meson.build",
-         "'--duckdb-source', get_option('duckdb_source'),\n"
+         "'--duckdb-source', duckdb_provider,\n"
          "      test_fact_store_duckdb_hardening,",
          "test_fact_store_duckdb_hardening,"),
         ("runtime self-test registration", "tests/meson.build",

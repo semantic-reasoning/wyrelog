@@ -56,23 +56,21 @@ if enable_break_glass_opt and not enable_audit_opt.allowed()
       + '(auto or enabled); the override path needs a durable audit '
       + 'sink for reason-code emission.')
 endif
+force_fallback_for = get_option('force_fallback_for')
+wrap_mode = get_option('wrap_mode')
+product_install = get_option('product_install')
+if product_install and host_machine.system() != 'linux'
+  error('product_install is currently supported only for Linux packages')
+endif
+
 if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
   duckdb_source = get_option('duckdb_source')
   if duckdb_source == 'prebuilt'
-    if host_machine.system() == 'linux'
-      duckdb_dep = dependency('duckdb-prebuilt-linux',
-        fallback : ['duckdb-prebuilt-linux', 'duckdb_dep'])
-    elif host_machine.system() == 'darwin'
-      duckdb_dep = dependency('duckdb-prebuilt-osx',
-        fallback : ['duckdb-prebuilt-osx', 'duckdb_dep'])
-    elif host_machine.system() == 'windows'
-      duckdb_dep = dependency('duckdb-prebuilt-windows',
-        fallback : ['duckdb-prebuilt-windows', 'duckdb_dep'])
-    else
-      error('duckdb_source=prebuilt is not supported on host system: '
-          + host_machine.system())
-    endif
+    # An installed DuckDB 2.0.x first, then the pinned prebuilt; sets
+    # duckdb_dep and duckdb_provider.
+    subdir('meson/duckdb-dependency')
   else
+    duckdb_provider = 'subproject'
     # From-source build of the upstream DuckDB release tree, compiled in
     # the translation units upstream's package_build.py produces.  Slow
     # (several hundred large C++ units) but exercises the full link path
@@ -97,16 +95,11 @@ if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
   endif
 else
   duckdb_dep = disabler()
+  duckdb_provider = 'none'
 endif
 
 wirelog_version = '>= 0.72.0'
 libchronoid_version = '>= 1.2.0'
-force_fallback_for = get_option('force_fallback_for')
-wrap_mode = get_option('wrap_mode')
-product_install = get_option('product_install')
-if product_install and host_machine.system() != 'linux'
-  error('product_install is currently supported only for Linux packages')
-endif
 
 subdir('meson/wirelog-dependency')
 
