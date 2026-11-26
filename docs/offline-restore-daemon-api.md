@@ -97,7 +97,12 @@ For graph scope, add `--graph "$GRAPH"` to each command. After `begin`, use
 `status` to read the current revision, then pass that revision to `prepare`.
 After successful preflight, inspect status again and use the returned revision
 for `commit --confirm`. If commit was decided but interrupted, use `resume`;
-use `abort --confirm` only before commit has been decided. Each mutation uses
+use `abort --confirm` only before commit has been decided. For a graph
+restore, use it only if no `commit` was ever sent: admission reserves the
+replacement row before deciding COMMIT, status can still report `PREPARED`
+after a failed or lost graph `commit` with the row already reserved, and an
+abort from there cannot release. Retry `commit` at the reported revision
+instead; the retried admission accepts the reserved row. Each mutation uses
 the same `--uuid` throughout the lifecycle. Do not replace it after a lost
 response.
 
@@ -107,17 +112,23 @@ command retains that tuple. Replay `begin` only with the same UUID, scope,
 destination, bundle, and digest. A status result of `PREPARING` means the BEGIN
 was recorded and the next step is `prepare`.
 
-On macOS the daemon admits `dry-run`, `begin`, `status`, `prepare` for a
-tenant or graph restore, and `abort --confirm`. Every `commit` returns
-`403 restore_refused` and leaves the journal unchanged until the remaining
-#1303 work lands. `resume` is refused the same way for a tenant restore and
-reports the unchanged `preparing` or `prepared` state for a graph restore.
-After a successful macOS `prepare`, with the journal in the `prepared`
-state, the only forward action is therefore `abort --confirm`, which retires
-any staged artifact, records an `aborted` receipt, and releases the claim.
-The next-command hints the CLI prints after a `PREPARING` or `PREPARED`
-result are platform-agnostic; on macOS every `commit` they suggest is
-refused.
+On macOS the daemon admits `dry-run`, `begin`, `status`, `prepare` and
+`abort --confirm` for a tenant or graph restore, and `commit` and `resume`
+for a graph restore (#1303 U5-16). A graph `commit` binds and admits the
+restore and answers `committing`; `resume` then runs the commit steps to the
+committed receipt and answers `committed`, as on Linux. Once commit has been
+decided, `abort --confirm` is refused with `403 restore_refused` and `resume`
+is the only forward action. A fresh macOS graph `resume` takes about 22 s
+per GiB of restored main and blocks the daemon's HTTP loop meanwhile, so a
+client timeout there is a lost response that `status` resolves (ADR 0006).
+A tenant restore cannot commit on macOS yet
+(#1303 U6): its `commit` returns `403 restore_refused` and leaves the journal
+unchanged, and its `resume` is refused the same way, so after a tenant
+`prepare` the only forward action is `abort --confirm`, which retires the
+staged artifacts, records an `aborted` receipt, and releases the claim. The
+next-command hints the CLI prints after a `PREPARING` or `PREPARED` result
+are platform-agnostic; on macOS the `commit` they suggest for a tenant
+restore is refused. Windows refuses every `commit` (#1304).
 
 The CLI emits one JSON object or one text line. JSON keys are stable and
 ordered: `operation`, `outcome`, `scope`, `tenant_id`, `graph_id`,

@@ -17590,7 +17590,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
               30 * G_USEC_PER_SEC, write.cancellable, &journal);
     }
     if (rc == WYRELOG_E_OK && commit) {
-#if defined(__APPLE__) || defined(G_OS_WIN32)
+#ifdef G_OS_WIN32
       /* A refused commit must leave the journal unchanged (403).  The
        * library can bind a prepared macOS or Windows graph restore, but
        * admission refuses until the commit steps are ported (#1303 U5,
