@@ -456,7 +456,8 @@ if get_option('enable_fact_store').allowed() and \
     args : ['--tap',
             '-x', '/fact-offline-backup-source/coordinator',
             '-x', '/fact-offline-backup-source/import',
-            '-x', '/fact-offline-backup-source/tenant-provisioned-binding'],
+            '-x', '/fact-offline-backup-source/tenant-provisioned-binding',
+            '-x', '/fact-offline-backup-source/restore-unseal-recovery'],
     protocol : 'tap',
     # DuckDB 2.0 made this binary 1.19 times slower (#1449): 934.0 to 1107.7
     # seconds in the secure-bridge suite at one wyrelog commit on one Linux
@@ -469,6 +470,15 @@ if get_option('enable_fact_store').allowed() and \
             '-r', '/fact-offline-backup-source/tenant-provisioned-binding'],
     protocol : 'tap',
     timeout : 90,
+  )
+  # The restore unseal is recovery-only (#1303 U5-15a).  Its Linux receipt
+  # replay runs a whole graph restore and promotion, and the main run above
+  # has no time left for it.  Its CI duration has not been measured yet.
+  test('fact-offline-restore-unseal-recovery', test_offline_backup_source,
+    args : ['--tap',
+            '-r', '/fact-offline-backup-source/restore-unseal-recovery'],
+    protocol : 'tap',
+    timeout : 120,
   )
   test('fact-offline-restore-graph-coordinator', test_offline_backup_source,
     args : ['--tap', '-r', '/fact-offline-backup-source/coordinator'],

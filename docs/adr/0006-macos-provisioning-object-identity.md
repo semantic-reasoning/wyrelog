@@ -689,6 +689,38 @@ still refuses on macOS (#1303 U5-15). A remount or reboot after `FINALIZE`
 changes the device number the `TERMINAL` inventory compares, so promotion
 then refuses as an operator wedge (`POLICY`).
 
+The restore unseal is recovery-only, on Linux and macOS (#1303 U5-15a).
+Every restore tail, macOS or not, ends in `restore_unseal_graph`, and its
+one unseal is `wyl_fact_graph_unseal_recovery_with_root_lease`. A restore
+tail never writes graph authority; any non-`ACTIVE` initial lifecycle
+(sealed, degraded, provisioning, legacy unclassified) is refused inside the
+publication fence with `POLICY`; the unseal leaves the runtime as
+`restore_unseal_graph`'s pre-fence eviction of a runtime that is not
+`READY`, `OPEN` and queryable left it. The fence reads the
+initial lifecycle under the graph authority mutex in its own transaction, so
+a seal cannot commit between the check and the fence commit. An `ACTIVE`
+graph whose runtime is not recovery-eligible keeps the store's answer,
+`BUSY`. This changes the Linux behaviour as well (Windows restore entry
+points refuse before any tail; the shared code is ungated, so a future
+Windows tail inherits the rule): before it, a restore tail unsealed a
+sealed graph durably, the operator's unseal without the operator's write
+lease, and answered `BUSY` for a degraded, provisioning or unsealed legacy
+graph. On Linux the published proof's receipt branch has no
+authority check, so a replay of the `FINALIZED` journal after a later seal
+unsealed the graph; it is now `POLICY` and the graph stays sealed. The
+daemon serializes restore and seal through the exclusive policy write, so
+this refusal is what keeps a direct caller that breaks that contract from
+unsealing. On macOS a seal that lands between the published proof's
+authority check and its unseal is refused the same way, so the proof's
+`POLICY` also means "sealed inside the fence". One residual remains:
+before any fence, `restore_unseal_graph` accepts a runtime that is `READY`,
+`OPEN` and queryable, and returns `OK` for a graph durably sealed while
+still admitting, the state a seal leaves when it found no runtime entry to
+close. That residual stands while #TBD-U5-15b, the seal's own fix, is out
+of this change. `tests/test-darwin-restore-bind-wiring.py` pins the
+call (E_RESTORE_UNSEAL_RECOVERY); `tests/test-fact-graph-seal.c` pins the
+refusal.
+
 | Durable observation | Required recovery result |
 | --- | --- |
 | Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed (capture, write-once, re-read, compare, advance). |

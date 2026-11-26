@@ -186,6 +186,20 @@ wyrelog_error_t wyl_fact_graph_unseal_with_root_lease_bounded
     WylFactReplayJobContext *job_context,
     WylFactGraphUnsealOutcome *out_outcome);
 
+/* The restore tails' only unseal (#1303 U5-15a): it republishes an ACTIVE
+ * graph and never writes graph authority.  A graph whose lifecycle is not
+ * ACTIVE inside the publication fence (sealed, degraded, provisioning) is
+ * POLICY, with the runtime left in its prior state; an ACTIVE graph whose
+ * runtime is not recovery-eligible is BUSY, as for the unseal above.  The
+ * caller holds the root writer lease and still serializes this call with
+ * the graph lifecycle writers. */
+wyrelog_error_t wyl_fact_graph_unseal_recovery_with_root_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome);
+
 #if defined(WYL_TEST_HANDLE_SEAMS)
 /*
  * Fail one step of the seal for a test, so the ambiguous-write branch can be

@@ -131,7 +131,7 @@ restore_unseal_graph (wyl_policy_store_t *policy, const gchar *fact_root,
     }
     WylFactGraphUnsealOutcome outcome = { 0 };
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_graph_unseal_with_root_lease (policy, fact_root,
+      rc = wyl_fact_graph_unseal_recovery_with_root_lease (policy, fact_root,
               root_lease, &context.info, runtime, drain_timeout_us, &outcome);
     wyl_fact_graph_unseal_outcome_clear (&outcome);
     wyl_fact_graph_key_clear (&key);
