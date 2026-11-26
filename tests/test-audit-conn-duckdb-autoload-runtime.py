@@ -37,6 +37,9 @@ def failure_code(status: int, stderr: str) -> int:
 
 
 def expect_loader_posture(duckdb_source: str, status: int) -> None:
+    # An installed DuckDB ("system") may be built with or without the
+    # extension loader, so either answer is its posture; the hardening
+    # assertions around this call still apply to it.
     refused = status == NO_EXTENSION_LOADER
     if duckdb_source == "subproject" and not refused:
         raise RuntimeError(
@@ -116,6 +119,20 @@ def validate_positive_trace(evidence: str, staged: Path) -> None:
     found = [token for token in ("AF_INET", "AF_INET6") if token in evidence]
     if found:
         raise RuntimeError(f"positive control used forbidden network: {found}")
+
+
+def loader_posture_self_test() -> None:
+    for source, status in (("subproject", NO_EXTENSION_LOADER),
+                           ("prebuilt", 0), ("system", 0),
+                           ("system", NO_EXTENSION_LOADER)):
+        expect_loader_posture(source, status)
+    for source, status in (("subproject", 0),
+                           ("prebuilt", NO_EXTENSION_LOADER)):
+        try:
+            expect_loader_posture(source, status)
+        except RuntimeError:
+            continue
+        raise RuntimeError(f"loader posture accepted {source} status {status}")
 
 
 def trace_parser_self_test() -> None:
@@ -364,11 +381,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("clean", "ambient"))
     parser.add_argument("--ambient-extension", type=Path)
-    parser.add_argument("--duckdb-source", choices=("prebuilt", "subproject"))
+    parser.add_argument("--duckdb-source",
+                        choices=("prebuilt", "subproject", "system"))
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("executable", type=Path, nargs="?")
     arguments = parser.parse_args()
     if arguments.self_test:
+        loader_posture_self_test()
         trace_parser_self_test()
         return 0
     if (arguments.mode is None or arguments.executable is None

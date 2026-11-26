@@ -28,6 +28,7 @@ FILES = (
     "tests/test-fact-artifact-transition-posix.c",
     "tests/test-fact-artifact-transition-windows.c",
     "meson.build",
+    "meson/duckdb-dependency/meson.build",
     "meson/wirelog-dependency/meson.build",
     "wyrelog/meson.build",
     "tests/meson.build",
@@ -1324,6 +1325,7 @@ def require_repository_meson_profile(
 ) -> None:
     expected = {
         "meson.build",
+        "meson/duckdb-dependency/meson.build",
         "meson/wirelog-dependency/meson.build",
         "wyrelog/meson.build",
         "tests/meson.build",
@@ -1345,13 +1347,20 @@ def require_repository_meson_profile(
         "7804bf39d420c3d8ef21e8a9eee690cf6b978e6bd2f3e4d2e9e1620e1016c1e2"
     ):
         raise AssertionError("wirelog dependency Meson profile drift")
+    duckdb_selector = raw["meson/duckdb-dependency/meson.build"]
+    if hashlib.sha256(duckdb_selector.encode("utf-8")).hexdigest() != (
+        "2bbff0f71d687062bd0e88c9d64ea46579a0b08c8e2a5ba2b400905c8449f42b"
+    ):
+        raise AssertionError("duckdb dependency Meson profile drift")
     if meson_function_calls(raw["meson.build"], "subdir") != [
+        "subdir('meson/duckdb-dependency')",
         "subdir('meson/wirelog-dependency')",
         "subdir('wyrelog')",
         "subdir('tests')",
     ]:
         raise AssertionError("root Meson subdir profile drift")
     for name in (
+        "meson/duckdb-dependency/meson.build",
         "meson/wirelog-dependency/meson.build",
         "wyrelog/meson.build",
         "tests/meson.build",

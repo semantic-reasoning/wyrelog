@@ -177,6 +177,17 @@ if host_machine.system() == 'linux' and \
   )
 endif
 
+test('duckdb-dependency-boundary', python3,
+  args : [
+    meson.current_source_dir() / 'test-duckdb-dependency-boundary.py',
+    meson.project_source_root(),
+    meson_exe.full_path(),
+  ],
+  env : python_strict_encoding_env,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : 600,
+)
+
 test('wirelog-dependency-boundary', python3,
   args : [
     meson.current_source_dir() / 'test-wirelog-dependency-boundary.py',
@@ -2457,7 +2468,7 @@ if get_option('enable_fact_store').allowed()
   test('fact-store-duckdb-autoload-runtime', python3,
     args : [
       files('test-fact-store-duckdb-autoload-runtime.py'),
-      '--duckdb-source', get_option('duckdb_source'),
+      '--duckdb-source', duckdb_provider,
       test_fact_store_duckdb_hardening,
     ],
     timeout : 60,
@@ -4756,7 +4767,7 @@ endif
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \
-      and get_option('duckdb_source') == 'prebuilt'
+      and duckdb_provider == 'prebuilt'
     # Prepend the prebuilt subproject directory to PATH so the
     # Windows loader can find duckdb.dll at test run time. The DLL
     # is not in dependency.sources (that would feed it into the
@@ -4809,7 +4820,7 @@ if get_option('enable_audit').allowed()
     args : [
       files('test-audit-conn-duckdb-autoload-runtime.py'),
       '--mode', 'clean',
-      '--duckdb-source', get_option('duckdb_source'),
+      '--duckdb-source', duckdb_provider,
       test_audit_conn_duckdb_hardening,
     ],
     env : audit_conn_test_env,
@@ -4819,7 +4830,7 @@ if get_option('enable_audit').allowed()
     args : [
       files('test-audit-conn-duckdb-autoload-runtime.py'),
       '--mode', 'ambient',
-      '--duckdb-source', get_option('duckdb_source'),
+      '--duckdb-source', duckdb_provider,
       test_audit_conn_duckdb_hardening,
     ],
     env : audit_conn_test_env,
