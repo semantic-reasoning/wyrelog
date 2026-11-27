@@ -101,10 +101,10 @@ use `abort --confirm` only before commit has been decided. For a graph
 restore, use it only if no `commit` was ever sent: admission reserves the
 replacement row before deciding COMMIT, status can still report `PREPARED`
 after a failed or lost graph `commit` with the row already reserved, and an
-abort from there cannot release. Retry `commit` at the reported revision
-instead; the retried admission accepts the reserved row. Each mutation uses
-the same `--uuid` throughout the lifecycle. Do not replace it after a lost
-response.
+abort from there cannot release (#1570). Retry `commit` at the reported
+revision instead; the retried admission accepts the reserved row. Each
+mutation uses the same `--uuid` throughout the lifecycle. Do not replace it
+after a lost response.
 
 `status --retry-begin` is for an unknown BEGIN that may never have reached the
 daemon. Supply the original `--bundle` and `--trusted-sha256`; its recovery
@@ -120,7 +120,8 @@ committed receipt and answers `committed`, as on Linux. Once commit has been
 decided, `abort --confirm` is refused with `403 restore_refused` and `resume`
 is the only forward action. A fresh macOS graph `resume` takes about 22 s
 per GiB of restored main and blocks the daemon's HTTP loop meanwhile, so a
-client timeout there is a lost response that `status` resolves (ADR 0006).
+client timeout there is a lost response that `status`, sent with the same
+raised timeout, resolves once the resume finishes (ADR 0006, #1571).
 A tenant restore cannot commit on macOS yet
 (#1303 U6): its `commit` returns `403 restore_refused` and leaves the journal
 unchanged, and its `resume` is refused the same way, so after a tenant
