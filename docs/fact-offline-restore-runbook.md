@@ -4,7 +4,7 @@ This guide covers daemon-managed, staged restore of a tenant's selected graph se
 
 ## Before starting
 
-Run a tenant restore on Linux. On macOS a graph restore runs the whole lifecycle, `commit` and `resume` included, as on Linux; a tenant restore there admits `begin` and `prepare`, but its `commit` answers `403 restore_refused` and its `resume` is refused, so a macOS tenant restore can only be aborted (#1303 U6). Once commit has been decided, on any platform, `abort` is refused and `resume` is the only forward action. On macOS a fresh graph `resume` hashes the restored main file several times, about 22 seconds per GiB, and the daemon answers nothing else meanwhile; for a large graph raise wyctl's 2000 ms default with the global option before `fact`, as in `wyctl --timeout-ms 600000 --daemon-url "$DAEMON_URL" fact restore resume ...`, and after a client timeout read `status` rather than assuming failure (ADR 0006). Windows refuses `commit` (#1304). See [the daemon API](offline-restore-daemon-api.md). A successful `dry-run` does not mean `commit` or `resume` is supported on that platform.
+Run a tenant restore on Linux. On macOS a graph restore runs the whole lifecycle, `commit` and `resume` included, as on Linux; a tenant restore there admits `begin` and `prepare`, but its `commit` answers `403 restore_refused` and its `resume` is refused, so a macOS tenant restore can only be aborted (#1303 U6). Once commit has been decided, on any platform, `abort` is refused and `resume` is the only forward action. On macOS a fresh graph `resume` hashes the restored main file several times, about 22 seconds per GiB, and the daemon answers nothing else meanwhile; for a large graph raise wyctl's 2000 ms default with the global option before `fact`, as in `wyctl --timeout-ms 600000 --daemon-url "$DAEMON_URL" fact restore resume ...`, and after a client timeout read `status` rather than assuming failure, with the same raised timeout, because the daemon answers it only after the resume finishes (ADR 0006, #1571). Windows refuses `commit` (#1304). See [the daemon API](offline-restore-daemon-api.md). A successful `dry-run` does not mean `commit` or `resume` is supported on that platform.
 
 Obtain the bundle manifest SHA-256 through a separately trusted channel, such as a signed backup receipt. Do not trust a digest copied from the bundle or restore journal. Put the bundle in the daemon-readable owner-only bundle directory, and use the exact same bundle and digest throughout this operation. Register every schema definition selected by the backup on the destination before sealing it; the backup manifest carries selected versions, not schema definitions. See [schema transition limits](fact-offline-restore-schema-transition.md).
 
@@ -160,11 +160,14 @@ write before it decides COMMIT, so a `commit` that failed or lost its
 response can leave status at `PREPARED` with the row already reserved, and
 status does not show the reservation. An abort after that reaches the
 rollback decision but its release can never finish, and nothing documented
-recovers it (ADR 0006, commit admission on macOS). After any graph `commit`
-attempt, retry `commit` at the revision status reports instead: a retried
-admission accepts the reserved row and decides COMMIT. A macOS tenant
+recovers it (ADR 0006, commit admission on macOS; #1570). After any graph
+`commit` attempt, retry `commit` at the revision status reports instead: a
+retried admission accepts the reserved row and decides COMMIT. A macOS tenant
 `commit` is refused before any write, so aborting that tenant restore stays
-safe.
+safe. On macOS, if the destination volume was remounted or the host rebooted
+after a graph `commit` was attempted, the retried `commit` refuses too,
+because the device number changed; neither `commit` nor `abort` can then
+progress, and there is no documented recovery yet (#1570).
 
 ```sh
 wyctl --daemon-url "$DAEMON_URL" fact restore abort \

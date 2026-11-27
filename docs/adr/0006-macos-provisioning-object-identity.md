@@ -424,7 +424,7 @@ store's journal delete guard), and only a committed receipt may delete that
 row, so the journal stays `ROLLBACK`, complete, with no receipt, and
 admission refuses it (`macos/commit-admit-reserved-abort`). That is the
 shared library's behaviour, which U5-16 makes reachable on macOS; it is not
-changed here, and no Linux test pins it.
+changed here, no Linux test pins it, and the store fix is #1570.
 
 Tenant-scope commit stays refused on macOS. The daemon now reaches
 `wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run`, which
@@ -656,13 +656,16 @@ from the committed receipt (200, state `committed`, the receipt's revision)
 before any resume step runs: it does not unseal. If promotion commits and its
 tail then fails, for example because the unseal refuses a substituted main,
 the handler answers 403 (`POLICY`) with the receipt committed and the runtime
-closed, and a retry answers 200 from the receipt. The runtime stays closed
-until a restart, and boot then opens the graph through the `ACTIVE` evidence
-or refuses it. No test seam reaches that tail failure through the handler, so
-this is accepted on reasoning. Since #1303 U5-16 commit admission produces
-that journal through the daemon, and `daemon-macos-commit/*` drives the
-whole path over HTTP, including a resume stopped after `FINALIZE` and
-finished through the `SELECTED` branch.
+closed, and a retry answers 200 from the receipt. The restore handler never
+reopens that runtime, after this tail failure or after a promotion whose
+response was lost (`IO`, then 200 from the receipt): it stays closed until
+boot opens the graph through the `ACTIVE` evidence or refuses it, unless
+another path, such as an operator unseal, opens it first. No test seam
+reaches that tail failure through the handler, so this is accepted on
+reasoning. Since #1303 U5-16 commit admission produces that journal through
+the daemon, and `daemon-macos-commit/*` drives the whole path over HTTP,
+including a resume stopped after `FINALIZE` and finished through the
+`SELECTED` branch.
 
 The macOS `FINALIZE` resume dispatcher
 (`wyl_fact_offline_restore_graph_selected_finalize_resume_run`, #1303 U5-14)
@@ -741,7 +744,7 @@ store calls that take only the connection mutex; and the compare cannot
 move out of the transaction without accepting the main by identity alone,
 which this ADR forbids. A hardware-accelerated SHA-256 (CommonCrypto
 `CC_SHA256`, the ARMv8 SHA extensions) would keep the in-transaction proof
-and shorten the hold; its factor is not measured, and it is a follow-up.
+and shorten the hold; its factor is not measured, and it is #1571.
 The store then promotes the schema, publishes the journal, activates the
 graph, moves the `restore_selected` record to `ACTIVE` with its evidence
 and the row to `verified`, takes the tenant through `unsealing` to `active`,
@@ -828,7 +831,7 @@ reads only the receipt and the authority, and is left to a follow-up. The
 Linux branch for a stored published journal two revisions past the anchor is
 dead on macOS, since no macOS store holds a published journal, and stays as
 the Linux body. Opening this dispatcher does not close the seal residual
-described in the next paragraph (#TBD-U5-15b), and it adds no new way to
+described in the next paragraph (#1569), and it adds no new way to
 reach it: a direct caller could already call the proof and promotion, and
 the daemon serializes restore with seal through the policy write.
 
@@ -862,7 +865,7 @@ unterminalized. One residual remains:
 before any fence, `restore_unseal_graph` accepts a runtime that is `READY`,
 `OPEN` and queryable, and returns `OK` for a graph durably sealed while
 still admitting, the state a seal leaves when it found no runtime entry to
-close. That residual stands while #TBD-U5-15b, the seal's own fix, is out
+close. That residual stands while #1569, the seal's own fix, is out
 of this change. `tests/test-darwin-restore-bind-wiring.py` pins the
 call (E_RESTORE_UNSEAL_RECOVERY); `tests/test-fact-graph-seal.c` pins the
 refusal.
@@ -870,7 +873,7 @@ refusal.
 | Durable observation | Required recovery result |
 | --- | --- |
 | `HANDOFF`, bound, commit refused after the bind (macOS) | The journal stays at the bound revision (4 in the daemon), byte-identical; the handler answers 403 (`POLICY`), 409 `restore_conflict` (`BUSY` with the revision moved) or 500 (`IO`). The forward action is `commit` at the bound revision: the bind replays and admission proceeds. Abort stays open while no row is reserved. |
-| `HANDOFF`, bound, row `reserved`, no decision | A retried admission accepts the row as `UNCHANGED_REPLAY` and decides `COMMIT`. An abort decides `ROLLBACK` and retires the stage, but the release fails (`IO`) while the row remains, so the journal stays `ROLLBACK`, complete, with no receipt; operator wedge, on every host. |
+| `HANDOFF`, bound, row `reserved`, no decision | A retried admission accepts the row as `UNCHANGED_REPLAY` and decides `COMMIT`. An abort decides `ROLLBACK` and retires the stage, but the release fails (`IO`) while the row remains, so the journal stays `ROLLBACK`, complete, with no receipt; operator wedge, on every host (#1570). On macOS a remount or reboot after the bind changes the device number every later step compares, so the retried commit (its bind replay or admission) refuses as well and neither commit nor abort can progress; operator wedge with no documented recovery (#1570). |
 | `HANDOFF`, `COMMIT` decided (macOS) | Abort is barred (403 at the handler, `POLICY` at rollback) with the journal byte-identical; resume is the only forward action. |
 | Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed (capture, write-once, re-read, compare, advance). |
 | `reserved`, evidence present | Re-read exactly and advance; never recapture. |
@@ -882,7 +885,7 @@ refusal.
 | `selected_pending_cleanup`, `FINALIZE` pending (macOS) | `FINALIZE` accepts `DUAL` or `TERMINAL`, compares the replacement evidence on both and finishes; any other shape is an operator wedge. |
 | `selected_pending_cleanup`, resumed by the `FINALIZE` resume dispatcher (macOS) | The anchor equal to the stored journal runs `FINALIZE` and the terminal proof; a lost begin runs `FINALIZE` from the begun revision; a lost completion runs the proof only; any other stored journal is `BUSY` and any other anchor `POLICY`; nothing is unsealed. |
 | `FINALIZED` (macOS) | The terminal proof requires `TERMINAL` and the replacement compare, mutates nothing, and returns the journal. Promotion requires `TERMINAL` before and inside its transaction and the replacement compare inside it, then commits; a diverged `restore_selected` or row evidence, a reappeared rollback name or a changed main is an operator wedge, and a journal or row changed since it was loaded is `BUSY`. |
-| `FINALIZED`, resumed by the promote resume dispatcher (macOS) | The published proof first: a matching committed receipt answers `OK` with the receipt's journal and changes nothing but the runtime it opens. Otherwise the stored journal must be the anchor byte for byte (`BUSY`) and the row `selected_pending_cleanup` (`POLICY`), and promotion runs, its refusals passed through. Any other proof `POLICY` meets a deleted journal (`NOT_FOUND`), and nothing is unsealed. |
+| `FINALIZED`, resumed by the promote resume dispatcher (macOS) | The published proof first: a matching committed receipt answers `OK` with the receipt's journal and changes nothing but the runtime it opens. Otherwise the stored journal must be the anchor byte for byte (`BUSY`) and the row `selected_pending_cleanup` (`POLICY`), and promotion runs, its refusals passed through. Any other proof `POLICY` meets a deleted journal (`NOT_FOUND`) or a present journal that is not the anchor (`BUSY`), and nothing is unsealed. |
 | Promoted, response lost (macOS) | The call returns `IO` and does not unseal; after a reopen the receipt shows the promotion committed and a retry of promotion gives `NOT_FOUND`; the published proof, or the promote resume dispatcher retried with the `FINALIZED` journal, matches the receipt to that journal and unseals through the `ACTIVE` evidence, in process after a reopen or after a restart. Before a reopen the dispatcher's retry returns `IO` and unseals nothing. |
 | Committed receipt (macOS) | The published proof requires the `FINALIZED` journal, a matching committed receipt and the graph still active and unsealed in policy; it reads only the receipt and the graph's authority before the unseal, and the unseal reads the `ACTIVE` evidence and opens the main by identity. No receipt, a mismatch or a graph sealed since is `POLICY`, and nothing is unsealed. |
 | `ACTIVE` after promotion (macOS) | The record carries the replacement's version 1 evidence bound to the replacement UUID; unseal, store open, backup and a later restore read it. |
