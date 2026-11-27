@@ -485,7 +485,7 @@ if get_option('enable_fact_store').allowed() and \
   )
   # The restore unseal is recovery-only (#1303 U5-15a).  Its Linux receipt
   # replay runs a whole graph restore and promotion, and the main run above
-  # has no time left for it.  Its CI duration has not been measured yet.
+  # has no time left for it.  2.55 seconds on the ubuntu-latest CI runner.
   test('fact-offline-restore-unseal-recovery', test_offline_backup_source,
     args : ['--tap',
             '-r', '/fact-offline-backup-source/restore-unseal-recovery'],
@@ -495,8 +495,8 @@ if get_option('enable_fact_store').allowed() and \
   # The macOS graph commit through the daemon (#1303 U5-16): seven HTTP
   # end-to-end cases, each a whole graph restore, skipped elsewhere.  The
   # main run above has no time left for them.  24.2 seconds alone and 44.1
-  # seconds inside the full run on one Apple M2 Max; its CI duration has not
-  # been measured yet.
+  # seconds inside the full run on one Apple M2 Max, and 38.82 seconds on
+  # the macos-latest CI runner.
   test('fact-offline-restore-daemon-macos-commit', test_offline_backup_source,
     args : ['--tap',
             '-r', '/fact-offline-backup-source/daemon-macos-commit'],
