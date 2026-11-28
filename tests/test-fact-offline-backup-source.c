@@ -22,6 +22,7 @@
 #include <windows.h>
 #endif
 
+#include "fact-restore-predecessor-test.h"
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/graph-seal-private.h"
@@ -4758,6 +4759,10 @@ test_restore_daemon_http_stateful_refusal (void)
 #endif
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t graph_commit_admission_fail_before_cas (gpointer data);
+#endif
+
 static void
 test_restore_daemon_http_graph_lifecycle (void)
 {
@@ -5109,6 +5114,42 @@ test_restore_daemon_http_graph_lifecycle (void)
           restore_http_revision (cli_stdout));
   g_free (cli_stdout);
   g_free (cli_stderr);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gboolean reserved_checkpoint = FALSE;
+  wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+    (graph_commit_admission_fail_before_cas, &reserved_checkpoint);
+  g_autofree gchar *reserved_body = restore_http_request_body_for_scope
+        ("graph", "tenant-a", "alpha", bundle_path, digest, cli_operation_uuid,
+          g_ascii_strtoull (cli_revision, NULL, 10), TRUE);
+  g_autofree gchar *reserved_response = NULL;
+  guint reserved_status = 0;
+  g_assert_true (restore_http_post (session, base_url, token, "commit", reserved_body,
+      &reserved_status, &reserved_response));
+  wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test (NULL, NULL);
+  g_assert_cmpuint (reserved_status, ==, 500);
+  g_assert_true (reserved_checkpoint);
+  g_clear_pointer (&reserved_body, g_free);
+  g_clear_pointer (&reserved_response, g_free);
+  reserved_body = restore_http_request_body_for_scope ("graph", "tenant-a",
+          "alpha", "", "", cli_operation_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", reserved_body,
+      &reserved_status, &reserved_response));
+  g_assert_cmpuint (reserved_status, ==, 200);
+  g_assert_nonnull (strstr (reserved_response, "\"state\":\"prepared\""));
+  g_assert_true (g_spawn_sync (NULL, (gchar **) cli_status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARED_RESERVED\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+#endif
   const gchar *cli_abort_argv[] = {
     WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
     "fact", "restore", "abort", "--scope", "graph",
@@ -12389,12 +12430,85 @@ graph_commit_admission_fail_before_cas (gpointer data)
 }
 #endif
 
+#if (defined(__linux__) || defined(__APPLE__)) && defined(WYL_TEST_HANDLE_SEAMS)
 static void
-test_graph_populated_schema_transition_roundtrip (void)
+assert_reserved_restore_abort (BackupFixture *fixture, const gchar *operation)
 {
-#ifndef __linux__
+  g_auto (WylFactOfflineRestoreJournal) rollback = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+        (fixture->policy, fixture->root, fixture->runtime, operation, 0,
+      &rollback), ==, WYRELOG_E_OK);
+  g_assert_cmpint (rollback.decision, ==, WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&rollback), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&rollback, &encoded),
+      ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (fixture->policy);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_restore_replacement_delete_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, fixture_restore_replacement_delete_guard_sql,
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==, WYRELOG_E_OK);
+  assert_restore_journal_unchanged (fixture->policy, operation, encoded, rollback.revision);
+  g_assert_cmpint (sqlite3_exec (db,
+      "CREATE TEMP TRIGGER injected_abort_failure BEFORE DELETE ON "
+      "fact_offline_restore_journals BEGIN SELECT RAISE(ABORT,'test'); END;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      rollback.revision, 0), ==, WYRELOG_E_IO);
+  assert_restore_journal_unchanged (fixture->policy, operation, encoded, rollback.revision);
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (fixture->policy,
+      operation, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (row->phase, ==, "reserved");
+  wyl_policy_graph_restore_replacement_record_free (row);
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup (fixture->policy,
+      operation, &receipt), ==, WYRELOG_E_OK);
+  g_assert_null (receipt);
+  g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER injected_abort_failure;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      rollback.revision, 0), ==, WYRELOG_E_OK);
+  assert_restore_operation_aborted (fixture->policy, operation, 1);
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (fixture->policy,
+      operation, &row), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (row);
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup (fixture->policy,
+      operation, &receipt), ==, WYRELOG_E_OK);
+  g_assert_nonnull (receipt);
+  g_assert_cmpuint (receipt->final_revision, ==, rollback.revision);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==, WYRELOG_E_OK);
+}
+
+static wyrelog_error_t
+graph_commit_admission_refuse_before_cas (gpointer data)
+{
+  guint *calls = data;
+  (*calls)++;
+  return WYRELOG_E_POLICY;
+}
+#endif
+
+static void
+test_graph_populated_schema_transition_roundtrip (gconstpointer data)
+{
+  (void) data;
+#if !defined(__linux__)
   g_test_skip ("offline restore is Linux-only");
 #else
+#ifndef WYL_TEST_HANDLE_SEAMS
+  if (data != NULL) {
+    g_test_skip ("commit admission fault requires test seams");
+    return;
+  }
+#endif
   BackupFixture fixture = { 0 };
   fixture_init (&fixture, "restore-populated-graph-XXXXXX");
   create_tenant (&fixture);
@@ -12756,6 +12870,27 @@ test_graph_populated_schema_transition_roundtrip (void)
   g_assert_cmpuint (reserved->attempt, ==, 0);
   g_assert_cmpuint (reserved->journal_revision, ==, bound.revision);
   wyl_policy_graph_restore_replacement_record_free (reserved);
+  if (data != NULL) {
+    guint refused = 0;
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (graph_commit_admission_refuse_before_cas, &refused);
+    for (guint i = 0; i < 2; i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+            (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
+          operation, bound.revision, 0, NULL, &admitted), ==, WYRELOG_E_POLICY);
+      assert_restore_journal_matches (fixture.policy, operation, bound_none);
+    }
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test (NULL, NULL);
+    g_assert_cmpuint (refused, ==, 2);
+    assert_reserved_restore_abort (&fixture, operation);
+    g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    g_assert_true (g_file_test (prebind_main_path, G_FILE_TEST_IS_REGULAR));
+    g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==, WYRELOG_E_OK);
+    g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+    remove_tree (bundle_root);
+    fixture_clear (&fixture);
+    return;
+  }
 #endif
   /* Lose the response after the guarded NONE-to-COMMIT write. Admission must
    * reload and accept only the exact canonical successor. */
@@ -13215,7 +13350,8 @@ downgrade_restore_replacement_schema_for_test (sqlite3 *db)
     g_assert_cmpint (sqlite3_bind_text (stmt, 1, kept[i], -1,
         SQLITE_STATIC), ==, SQLITE_OK);
     g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
-    kept_sql[i] = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    kept_sql[i] = g_strdup (i == 1 ? fixture_restore_replacement_delete_guard_sql
+        : (const gchar *) sqlite3_column_text (stmt, 0));
     sqlite3_finalize (stmt);
   }
   static const gchar columns[] =
@@ -24066,44 +24202,19 @@ test_graph_commit_admit_macos (gconstpointer data)
     assert_restore_journal_unchanged (fixture.policy, operation,
         bound_journal, bound);
     admit_assert_row_reserved (fixture.policy, operation, bound);
-    /* Rollback still decides and retires the stage, but the release
-     * cannot delete the journal while the reserved row remains (the store's
-     * journal delete guard), and only a committed receipt may delete that
-     * row.  The abort wedges at ROLLBACK, COMPLETE, with no receipt, and
-     * admission refuses the rolled-back journal.  This is the shared
-     * library's behaviour on every host; U5-16 makes it reachable on
-     * macOS. */
-    g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
-          (fixture.policy, fixture.root, fixture.runtime, operation, 0,
-        &committed), ==, WYRELOG_E_OK);
-    g_assert_cmpuint (committed.revision, ==, bound + 3);
-    g_assert_cmpint (committed.decision, ==,
-        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
-    g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
-        ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
-    const guint64 aborted = committed.revision;
-    g_autoptr (GBytes) rolled_back = NULL;
-    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
-        &rolled_back), ==, WYRELOG_E_OK);
-    wyl_fact_offline_restore_journal_clear (&committed);
-    g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+    guint refused = 0;
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+      (graph_commit_admission_refuse_before_cas, &refused);
     for (guint i = 0; i < 2; i++) {
-      g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
-            (fixture.policy, fixture.root, fixture.runtime, operation,
-          aborted, 0), ==, WYRELOG_E_IO);
-      assert_restore_journal_unchanged (fixture.policy, operation,
-          rolled_back, aborted);
+      g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation, bound,
+          NULL, &committed), ==, WYRELOG_E_POLICY);
+      assert_restore_journal_unchanged (fixture.policy, operation, bound_journal, bound);
       admit_assert_row_reserved (fixture.policy, operation, bound);
-      WylPolicyOfflineRestoreReceipt *receipt = NULL;
-      g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
-            (fixture.policy, operation, &receipt), ==, WYRELOG_E_OK);
-      g_assert_null (receipt);
     }
-    g_assert_cmpint (admit_run (&fixture, scheduler, bundle, operation,
-        aborted, NULL, &committed), ==, WYRELOG_E_POLICY);
-    g_assert_null (committed.operation_uuid);
-    assert_restore_journal_unchanged (fixture.policy, operation, rolled_back,
-        aborted);
+    wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test (NULL, NULL);
+    g_assert_cmpuint (refused, ==, 2);
+    assert_reserved_restore_abort (&fixture, operation);
+    g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
   } else {
     g_assert_not_reached ();
   }
@@ -25629,9 +25740,12 @@ main (int argc, char **argv)
     ("/fact-offline-backup-source/restore-replacement-darwin-evidence-migration-reserved",
       "darwin-evidence-migration-reserved",
       test_graph_restore_replacement_reservation);
-  g_test_add_func
+  g_test_add_data_func
     ("/fact-offline-backup-source/restore-populated-graph-schema-transition",
-      test_graph_populated_schema_transition_roundtrip);
+      NULL, test_graph_populated_schema_transition_roundtrip);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-reserved-graph-abort",
+      GINT_TO_POINTER (1), test_graph_populated_schema_transition_roundtrip);
 #ifndef G_OS_WIN32
   /* Its own meson test: the main run has no time left (tests/meson.build). */
   g_test_add_data_func

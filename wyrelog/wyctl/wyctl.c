@@ -4302,6 +4302,7 @@ fact_restore_state_name (WylClientFactRestoreState state)
     case WYL_CLIENT_FACT_RESTORE_STATE_ELIGIBLE: return "ELIGIBLE";
     case WYL_CLIENT_FACT_RESTORE_STATE_PREPARING: return "PREPARING";
     case WYL_CLIENT_FACT_RESTORE_STATE_PREPARED: return "PREPARED";
+    case WYL_CLIENT_FACT_RESTORE_STATE_PREPARED_RESERVED: return "PREPARED_RESERVED";
     case WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING: return "COMMITTING";
     case WYL_CLIENT_FACT_RESTORE_STATE_ACTIVE: return "ACTIVE";
     case WYL_CLIENT_FACT_RESTORE_STATE_ABORTING: return "ABORTING";
@@ -4357,7 +4358,8 @@ fact_restore_next_command (const gchar *operation,
 {
   /* PREPARED is the durable point at which the operator must choose between
    * commit and abort. A status query cannot make that choice for them. */
-  if (result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARED
+  if ((result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARED
+      || result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARED_RESERVED)
       && g_strcmp0 (operation, "status") == 0)
     return g_strdup ("-");
   if (g_strcmp0 (operation, "status") == 0
@@ -4379,6 +4381,7 @@ fact_restore_next_command (const gchar *operation,
       case WYL_CLIENT_FACT_RESTORE_STATE_PREPARING:
         verb = "prepare"; bundle = TRUE; revision = TRUE; break;
       case WYL_CLIENT_FACT_RESTORE_STATE_PREPARED:
+      case WYL_CLIENT_FACT_RESTORE_STATE_PREPARED_RESERVED:
         if (g_strcmp0 (operation, "abort") == 0) {
           verb = "status";
         } else {

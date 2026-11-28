@@ -417,14 +417,10 @@ graph's quiescence token, which closes admission for as long as it is held,
 so a runtime entry that was `OPEN` before admission does not stop it: the
 proof decides, and releasing the token restores `OPEN`
 (`macos/commit-admit-runtime-open`). The same holds on Linux, where the
-code is shared. An abort after a reservation that never reached `COMMIT`
-cannot finish on any host: rollback decides and retires the stage, but the
-release cannot delete the journal while the `reserved` row remains (the
-store's journal delete guard), and only a committed receipt may delete that
-row, so the journal stays `ROLLBACK`, complete, with no receipt, and
-admission refuses it (`macos/commit-admit-reserved-abort`). That is the
-shared library's behaviour, which U5-16 makes reachable on macOS; it is not
-changed here, no Linux test pins it, and the store fix is #1570.
+code is shared. If admission left a reservation without deciding COMMIT,
+rollback can retire the stage and release the reservation with an aborted
+receipt. Linux and macOS regression tests cover a persistent refusal at
+the admission proof and a retry of interrupted release (#1570).
 
 Tenant-scope commit stays refused on macOS. The daemon now reaches
 `wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run`, which
@@ -872,8 +868,8 @@ refusal.
 
 | Durable observation | Required recovery result |
 | --- | --- |
-| `HANDOFF`, bound, commit refused after the bind (macOS) | The journal stays at the bound revision (4 in the daemon), byte-identical; the handler answers 403 (`POLICY`), 409 `restore_conflict` (`BUSY` with the revision moved) or 500 (`IO`). The forward action is `commit` at the bound revision: the bind replays and admission proceeds. Abort stays open while no row is reserved. |
-| `HANDOFF`, bound, row `reserved`, no decision | A retried admission accepts the row as `UNCHANGED_REPLAY` and decides `COMMIT`. An abort decides `ROLLBACK` and retires the stage, but the release fails (`IO`) while the row remains, so the journal stays `ROLLBACK`, complete, with no receipt; operator wedge, on every host (#1570). On macOS a remount or reboot after the bind changes the device number every later step compares, so the retried commit (its bind replay or admission) refuses as well and neither commit nor abort can progress; operator wedge with no documented recovery (#1570). |
+| `HANDOFF`, bound, commit refused after the bind (macOS) | The journal stays at the bound revision (4 in the daemon), byte-identical; the handler answers 403 (`POLICY`), 409 `restore_conflict` (`BUSY` with the revision moved) or 500 (`IO`). The forward action is `commit` at the bound revision: the bind replays and admission proceeds. Abort remains available before the COMMIT decision. |
+| `HANDOFF`, bound, row `reserved`, no decision | Status exposes the reservation. Retry commit at the bound revision or abort. Once rollback proves the stage is absent, release removes the untouched reservation and records the aborted receipt in the same transaction (#1570). A remount or changed active pair can still prevent proof. |
 | `HANDOFF`, `COMMIT` decided (macOS) | Abort is barred (403 at the handler, `POLICY` at rollback) with the journal byte-identical; resume is the only forward action. |
 | Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed (capture, write-once, re-read, compare, advance). |
 | `reserved`, evidence present | Re-read exactly and advance; never recapture. |

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fact-restore-predecessor-test.h"
 #include "fact-test-support.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-request-id-private.h"
@@ -551,6 +552,7 @@ check_restore_replacement_zero_reconciliation_migration (void)
   for (guint i = 1; i < sql->len; i++)
     if (sqlite3_exec (db, i == 3 ?
         fixture_restore_replacement_update_guard_pre_promotion_sql :
+        i == 1 ? fixture_restore_replacement_delete_guard_sql :
         g_ptr_array_index (sql, i), NULL, NULL,
         NULL) != SQLITE_OK)
       return 9615;
@@ -1594,8 +1596,7 @@ install_restore_replacement_shape (sqlite3 *db, const gchar *table_sql,
 {
   g_autofree gchar *insert_guard = schema_sql_for_name (db,
           "fact_graph_restore_replacement_insert_guard");
-  g_autofree gchar *delete_guard = schema_sql_for_name (db,
-          "fact_graph_restore_replacement_delete_guard");
+  const gchar *delete_guard = fixture_restore_replacement_delete_guard_sql;
   if (insert_guard == NULL || delete_guard == NULL)
     return 1;
   if (sqlite3_exec (db,
@@ -1718,8 +1719,7 @@ check_restore_selected_predecessor_migration (void)
           "fact_graph_provisioning_immutable");
   g_autofree gchar *replacement_insert = schema_sql_for_name (db,
           "fact_graph_restore_replacement_insert_guard");
-  g_autofree gchar *replacement_delete = schema_sql_for_name (db,
-          "fact_graph_restore_replacement_delete_guard");
+  const gchar *replacement_delete = fixture_restore_replacement_delete_guard_sql;
   if (immutable == NULL || replacement_insert == NULL
       || replacement_delete == NULL)
     return 9622;
