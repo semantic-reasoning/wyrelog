@@ -1240,9 +1240,12 @@ test_restore_dry_run_read_only (void)
           alpha_component);
   g_autofree gchar *alpha_backup = g_build_filename (bundle_root,
           alpha_name, NULL);
-  gint backup_fd = g_open (alpha_backup, O_WRONLY, 0);
+  gint backup_fd = g_open (alpha_backup, O_RDWR, 0);
   g_assert_cmpint (backup_fd, >=, 0);
-  g_assert_cmpint (pwrite (backup_fd, "X", 1, 0), ==, 1);
+  guint8 first_byte = 0;
+  g_assert_cmpint (pread (backup_fd, &first_byte, 1, 0), ==, 1);
+  first_byte ^= 0xffu;
+  g_assert_cmpint (pwrite (backup_fd, &first_byte, 1, 0), ==, 1);
   g_assert_cmpint (close (backup_fd), ==, 0);
   g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
       fixture.root, fixture.runtime, bundle,
@@ -23966,10 +23969,9 @@ admit_assert_decided (BackupFixture *fixture, const gchar *operation,
  *     IO at the proof, then admit again | IO, then OK at 5 | after the IO,
  *     the row reserved at 4
  *   admit-reserved-abort
- *     IO at the proof (the row reserved), then abort | rollback OK at 7,
- *     the stage retired; release IO, twice; admission POLICY | the journal
- *     ROLLBACK at 7 byte-identical, the row reserved and no receipt: the
- *     abort cannot finish (see the mode) */
+ *     IO at the proof, then repeated POLICY refusals | rollback retires
+ *     the stage; an injected release error preserves the reservation;
+ *     the retry removes it and records an aborted receipt */
 static void
 test_graph_commit_admit_macos (gconstpointer data)
 {

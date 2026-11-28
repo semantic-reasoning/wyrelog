@@ -2907,20 +2907,15 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
-  # Linux retains the stage/final hard-link pair; Darwin and Windows open their
-  # direct final through durable policy-owned operation evidence.
-  # Windows run 40185256787 passed in 59.86 s; run 40189091510 hit the 60 s
-  # limit at 60.21 s after 15 of 17 cases. Allow the same bounded 180 s
-  # headroom as fact-provisioning-run without changing case selection or
-  # concurrency. Keep the existing Linux and Darwin deadlines.
-  # #1522 runs the 15 physical-quota cases on Windows too, each a further
-  # provisioning; all 32 cases took 26 s in a local MinGW debug build.  The
-  # CI clang-cl time is unmeasured: raise this if it nears the limit.
+  # The Windows secure-bridge suite provisions a fresh store in its quota
+  # and metadata cases. CI run 46141918645 passed 65 cases before the
+  # 180-second limit interrupted the remaining cases. Allow bounded
+  # headroom for the full suite on hosted Windows runners.
   fact_store_provisioned_timeout = 60
   if host_machine.system() == 'darwin'
     fact_store_provisioned_timeout = 300
   elif host_machine.system() == 'windows'
-    fact_store_provisioned_timeout = 180
+    fact_store_provisioned_timeout = 300
   endif
   test('fact-store-provisioned', test_fact_store_provisioned,
     timeout : fact_store_provisioned_timeout,
