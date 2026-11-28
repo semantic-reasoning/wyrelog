@@ -154,20 +154,13 @@ has not been committed. Review the prepared graph set again, then either run
 abort command is only for an operation before COMMIT; use the same UUID and
 explicit confirmation.
 
-For a graph restore, abort only when no `commit` was ever sent for the
-operation. Graph commit admission reserves the replacement row in its own
-write before it decides COMMIT, so a `commit` that failed or lost its
-response can leave status at `PREPARED` with the row already reserved, and
-status does not show the reservation. An abort after that reaches the
-rollback decision but its release can never finish, and nothing documented
-recovers it (ADR 0006, commit admission on macOS; #1570). After any graph
-`commit` attempt, retry `commit` at the revision status reports instead: a
-retried admission accepts the reserved row and decides COMMIT. A macOS tenant
-`commit` is refused before any write, so aborting that tenant restore stays
-safe. On macOS, if the destination volume was remounted or the host rebooted
-after a graph `commit` was attempted, the retried `commit` refuses too,
-because the device number changed; neither `commit` nor `abort` can then
-progress, and there is no documented recovery yet (#1570).
+A failed graph commit request can leave a reservation before COMMIT is
+decided. Status then reports `PREPARED_RESERVED`. Use the reported revision
+to retry commit or abort. A successful abort releases the reservation and
+records an aborted receipt. If the destination was remounted or its files
+changed, recovery still requires the recorded identity of the active graph
+and stage to match. Investigate any evidence refusal before attempting
+further file changes.
 
 ```sh
 wyctl --daemon-url "$DAEMON_URL" fact restore abort \
@@ -237,4 +230,4 @@ abort retry can recheck completed graphs. See [abort recovery](fact-offline-rest
 
 All selected schema definitions must already be registered before the target is sealed. A legacy manifest without relation-version selection can be restored only when its active schema digest matches the destination. Schema changes selected by a new manifest are made active with the final publication; pre-COMMIT abort leaves the old activation in place.
 
-Before the durable COMMIT decision, an authorized operator may choose abort, except after a graph `commit` attempt (see [Restart immediately before COMMIT](#restart-immediately-before-commit)). After COMMIT, the only safe path is forward recovery with `resume`; the daemon finishes publication, normal unseal/replay, and terminal receipt recording. This daemon-managed workflow does not replace the separate stopped-daemon file-level rollback procedure described in the operator runbook.
+Before the durable COMMIT decision, an authorized operator may choose abort using the revision returned by status. After COMMIT, the only safe path is forward recovery with `resume`; the daemon finishes publication, normal unseal/replay, and terminal receipt recording. This daemon-managed workflow does not replace the separate stopped-daemon file-level rollback procedure described in the operator runbook.

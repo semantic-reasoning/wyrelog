@@ -2307,6 +2307,15 @@ client_fact_restore_request (WylClient *client,
     wyl_client_fact_restore_result_clear (out_result);
     return WYRELOG_E_IO;
   }
+  if (graph_scope && g_strcmp0 (operation, "status") == 0
+      && out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARED
+      && g_strcmp0 (soup_message_headers_get_one
+        (soup_message_get_response_headers (message),
+      "X-Wyrelog-Restore-Replacement"), "reserved") == 0) {
+    out_result->state = WYL_CLIENT_FACT_RESTORE_STATE_PREPARED_RESERVED;
+    g_free (out_result->state_name);
+    out_result->state_name = g_strdup ("prepared_reserved");
+  }
   if (out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARING
       || out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING
       || out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_ABORTING)

@@ -1,5 +1,6 @@
 tests/fact-artifact-transition-driver-fixture.c
 tests/fact-artifact-transition-driver-fixture.h
+tests/fact-restore-predecessor-test.h
 tests/fact-test-support.c
 tests/fact-test-support.h
 tests/fixtures/rule-pack-reader-6201ee46/fact/graph-program-private.c

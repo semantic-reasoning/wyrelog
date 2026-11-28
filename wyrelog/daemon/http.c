@@ -17562,6 +17562,21 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
         || g_strcmp0 (journal.selected_graph_id,
         graph_scope ? values[2] : NULL) != 0))
       rc = WYRELOG_E_NOT_FOUND;
+    gboolean replacement_reserved = FALSE;
+    if (rc == WYRELOG_E_OK && status && graph_scope
+        && journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE) {
+      WylPolicyGraphRestoreReplacementRecord *replacement = NULL;
+      rc = wyl_policy_store_graph_restore_replacement_load (write.store,
+              journal.operation_uuid, &replacement);
+      if (rc == WYRELOG_E_NOT_FOUND)
+        rc = WYRELOG_E_OK;
+      else if (rc == WYRELOG_E_OK)
+        replacement_reserved = g_strcmp0 (replacement->tenant_id, journal.tenant_id) == 0
+            && g_strcmp0 (replacement->graph_id, journal.selected_graph_id) == 0
+            && replacement->journal_revision == journal.revision
+            && replacement->attempt == 0 && g_strcmp0 (replacement->phase, "reserved") == 0;
+      wyl_policy_graph_restore_replacement_record_free (replacement);
+    }
     if (rc == WYRELOG_E_OK && (prepare || commit || resume || aborting)
         && journal.revision != expected_revision)
       rc = WYRELOG_E_CONFLICT;
@@ -17767,6 +17782,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
         response_publication_eligible ? "true" : "false");
     append_json_string (response, state_name);
     g_string_append (response, ",\"failure_code\":null}");
+    if (replacement_reserved)
+      soup_message_headers_replace (soup_server_message_get_response_headers (msg),
+          "X-Wyrelog-Restore-Replacement", "reserved");
     attach_request_id_header (msg);
     soup_server_message_set_status (msg, 200, NULL);
     soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,

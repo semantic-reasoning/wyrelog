@@ -50,6 +50,7 @@ typedef enum
   WYL_CLIENT_FACT_RESTORE_STATE_ABORTED,
   /* The durable commit journal reached its terminal publication state. */
   WYL_CLIENT_FACT_RESTORE_STATE_COMMITTED,
+  WYL_CLIENT_FACT_RESTORE_STATE_PREPARED_RESERVED,
 } WylClientFactRestoreState;
 
 typedef enum

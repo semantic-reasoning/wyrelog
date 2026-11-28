@@ -97,12 +97,12 @@ For graph scope, add `--graph "$GRAPH"` to each command. After `begin`, use
 `status` to read the current revision, then pass that revision to `prepare`.
 After successful preflight, inspect status again and use the returned revision
 for `commit --confirm`. If commit was decided but interrupted, use `resume`;
-use `abort --confirm` only before commit has been decided. For a graph
-restore, use it only if no `commit` was ever sent: admission reserves the
-replacement row before deciding COMMIT, status can still report `PREPARED`
-after a failed or lost graph `commit` with the row already reserved, and an
-abort from there cannot release (#1570). Retry `commit` at the reported
-revision instead; the retried admission accepts the reserved row. Each
+use `abort --confirm` only before commit has been decided. Graph commit
+admission may reserve a replacement before deciding COMMIT. For such an
+undecided graph, the status response includes the header
+`X-Wyrelog-Restore-Replacement: reserved` and its JSON state is `prepared`.
+Current `wyctl` displays `PREPARED_RESERVED`. Use the reported revision to
+retry `commit` or to `abort --confirm`. Each
 mutation uses the same `--uuid` throughout the lifecycle. Do not replace it
 after a lost response.
 
